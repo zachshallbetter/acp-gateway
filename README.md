@@ -19,10 +19,14 @@ pattern, not just that one ecosystem.
   exchanged via the GitHub Apps API) — nothing is minted client-side or cached
   beyond the request.
 - Exposes one useful authenticated read: `GET /internal/project-context?owner=&project=`
-  — a live ProjectsV2 GraphQL snapshot (fields + up to 100 items) for an
-  **allowlisted** project number (edit `project_context`'s range check per
-  deployment; the shipped default is `2 <= project <= 7`, tuned for the repo
-  this was extracted from — change it for a new project).
+  — a live ProjectsV2 GraphQL snapshot (fields + **every** item, paged) for an
+  **allowlisted** project number. The allowlist is configuration, not a code
+  edit: set `ACP_PROJECT_ALLOWLIST` (see below). Boards owned by a user work as
+  well as boards owned by an organization.
+
+  The response reports its own completeness — `items_fetched`, `items_total`,
+  `pages`, and an explicit `truncated` flag. Never infer completeness from the
+  item count alone: a count equal to the page size is a cap, not a total.
 - `GET /health` (unauthenticated, for platform health checks) and
   `GET /internal/app-status` / `GET /internal/app-probe` (authenticated,
   for verifying the App credentials are configured and can actually mint a
@@ -53,6 +57,7 @@ modes, different scaling shape, different credential exposure.
 | `ACP_GITHUB_APP_ID` | for App reads | The GitHub App's numeric ID. |
 | `ACP_GITHUB_INSTALLATION_ID` | for App reads | The installation ID for the target org/repo. |
 | `ACP_GITHUB_PRIVATE_KEY` | for App reads | The App's PEM private key, as a literal env value (not a file path). |
+| `ACP_PROJECT_ALLOWLIST` | no | Which board numbers may be read. Comma list of numbers and ranges (`2-9,11`), or `*` for any. Defaults to `2-7`, the range that used to be hardcoded. |
 | `PORT` | no | Defaults to `8080`. |
 
 `configured()` is `False` (and `/internal/app-status`, `/internal/app-probe`
@@ -83,6 +88,7 @@ services it reads Project state for.
 
 ```bash
 python3 test_gateway.py
+python3 test_gateway_access.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials
