@@ -26,6 +26,41 @@ def install(login, ident, account_type="Organization", projects="read"):
             "permissions": ({"organization_projects": projects} if projects else {})}
 
 
+def test_repository_projects_does_not_count_as_projectsv2_access():
+    # The real user installation held issues/metadata/repository_hooks and
+    # repository_projects:write, and could still see zero ProjectsV2 boards.
+    # Counting Projects (classic) as access reported it as capable.
+    entry = gateway.installation_entry(
+        {"id": 152843663, "account": {"login": "zachshallbetter", "type": "User"},
+         "permissions": {"issues": "read", "metadata": "read", "repository_hooks": "read",
+                         "repository_projects": "write"}})
+    assert entry["projects_read"] is False, entry["permissions"]
+    assert gateway.installation_entry(
+        {"id": 1, "account": {"login": "o", "type": "Organization"},
+         "permissions": {"organization_projects": "read"}})["projects_read"] is True
+
+
+def test_a_user_installation_is_not_told_to_grant_an_org_permission():
+    fresh()
+    miss = {"data": {"organization": None, "user": None}}
+    with patch.dict(os.environ, {**APP_ENV, "ACP_PROJECT_ALLOWLIST": "*"}), \
+         patch("gateway.app_jwt", return_value="jwt"), \
+         patch("gateway.installation_token", return_value={"token": "t"}), \
+         patch("gateway.urlopen", side_effect=[resp(miss), resp(miss), resp([
+             {"id": 5, "account": {"login": "zachshallbetter", "type": "User"},
+              "permissions": {"repository_projects": "write"}}])]):
+        os.environ.pop("ACP_GITHUB_INSTALLATIONS", None)
+        try:
+            gateway.project_context("zachshallbetter", "38")
+        except gateway.TargetError as exc:
+            status, body = exc.status, exc.payload()
+        else:
+            raise AssertionError("must raise")
+    assert body["error"] == "PROJECTS_PERMISSION_MISSING" and body["account_type"] == "User"
+    assert "account-level Projects permission" in body["remedy"], body["remedy"]
+    assert "organization_projects` grant does not apply" in body["remedy"]
+
+
 def fresh():
     """Discovery is cached process-wide; each test starts from cold."""
     gateway._INSTALLATIONS.update(value=None, fetched_at=0.0)
