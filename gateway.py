@@ -305,10 +305,24 @@ PROJECT_QUERY = """
         items(first:%d, after:$after) {
           totalCount
           pageInfo { hasNextPage endCursor }
-          nodes { id type isArchived content { __typename
-            ... on Issue { title number url state repository { nameWithOwner } }
-            ... on PullRequest { title number url state repository { nameWithOwner } }
-          } }
+          nodes { id type isArchived createdAt updatedAt
+            content { __typename
+              ... on DraftIssue { title }
+              ... on Issue { title number url state repository { nameWithOwner }
+                assignees(first:10) { nodes { login } } labels(first:20) { nodes { name } }
+                milestone { title }
+                closedByPullRequestsReferences(first:10) { nodes { url number state } } }
+              ... on PullRequest { title number url state isDraft reviewDecision
+                repository { nameWithOwner }
+                assignees(first:10) { nodes { login } } labels(first:20) { nodes { name } }
+                milestone { title } } }
+            fieldValues(first:50) { nodes { __typename
+              ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } } } }
+          }
         }
       }
     }
