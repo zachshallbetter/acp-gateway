@@ -238,6 +238,21 @@ def test_snapshot_asks_for_what_set_field_needs():
     assert "ProjectV2IterationField" in gateway.PROJECT_QUERY
 
 
+def test_items_carry_their_field_values():
+    # Every consumer of the snapshot -- claim, claims, operate-frontier's Ready
+    # selection, the TSV view -- keys off per-item field values. Returning items
+    # without fieldValues produced a snapshot that parsed cleanly, counted right,
+    # and had an empty `fields` object on every row: no Status, no Agent, nothing
+    # to select or claim on.
+    assert "fieldValues" in gateway.PROJECT_QUERY
+    for kind in ("SingleSelectValue", "TextValue", "NumberValue", "DateValue", "IterationValue"):
+        assert f"ProjectV2ItemField{kind}" in gateway.PROJECT_QUERY, kind
+    # ...and the item envelope the record builder reads alongside them.
+    for field in ("assignees", "labels", "milestone", "closedByPullRequestsReferences",
+                  "createdAt", "updatedAt", "DraftIssue"):
+        assert field in gateway.PROJECT_QUERY, field
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
