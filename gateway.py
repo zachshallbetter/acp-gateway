@@ -118,9 +118,12 @@ def install_url():
     return f"https://github.com/apps/{slug}/installations/new" if slug else None
 
 
-# A GitHub App's Projects access shows up under different permission names for
-# repository / organization / user installations; any of them counts as read.
-PROJECT_PERMISSIONS = ("organization_projects", "repository_projects", "projects")
+# ProjectsV2 boards hang off an *owner*, so only an owner-level Projects grant
+# reaches them. `repository_projects` is deliberately not in this list: that is
+# Projects (classic), repository-scoped, and an installation holding it still
+# reads zero ProjectsV2 boards -- counting it here reported a user installation
+# as Projects-capable when it could not see a single board.
+PROJECT_PERMISSIONS = ("organization_projects", "projects")
 
 
 def installation_entry(raw):
@@ -129,7 +132,7 @@ def installation_entry(raw):
         "login": account.get("login") or "",
         "account_type": account.get("type") or "",
         "installation_id": raw.get("id"),
-        "projects_read": any(permissions.get(name) in ("read", "write") for name in PROJECT_PERMISSIONS),
+        "projects_read": any(permissions.get(name) in ("read", "write", "admin") for name in PROJECT_PERMISSIONS),
         "permissions": permissions,
     }
 
@@ -352,11 +355,18 @@ def missing_board(owner, project, errors):
     """Not-found is usually one of two things; say which, and how to fix it."""
     entry = owner_installation(owner)
     if entry and not entry["projects_read"]:
+        user = entry["account_type"] == "User"
         return TargetError(403, "PROJECTS_PERMISSION_MISSING",
-                           f"The App is installed on '{owner}' but that installation has no Projects read permission.",
-                           remedy=f"Grant the App's Projects permission (read) on '{owner}' and accept the updated "
-                                  "permissions; the change takes effect immediately, no redeploy.",
-                           owner=owner, installation_id=entry["installation_id"],
+                           f"The App is installed on '{owner}' ({entry['account_type'].lower()} account) but that "
+                           "installation holds no owner-level Projects permission, so it sees no ProjectsV2 board.",
+                           remedy=("Add the account-level Projects permission (read) to the App and accept it on this "
+                                   "installation. An `organization_projects` grant does not apply to a user account, "
+                                   "and `repository_projects` is Projects (classic), which ProjectsV2 ignores."
+                                   if user else
+                                   "Grant the App's organization Projects permission (read) on "
+                                   f"'{owner}' and accept the updated permissions."),
+                           owner=owner, account_type=entry["account_type"],
+                           installation_id=entry["installation_id"],
                            permissions=entry["permissions"], graphql_errors=graphql_notes(errors))
     return UpstreamError(404, "PROJECT_NOT_FOUND",
                          f"No ProjectsV2 board #{project} is visible to this App for '{owner}'.",

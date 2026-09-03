@@ -82,6 +82,22 @@ liveness check while clearly reporting it can't do App-authenticated reads yet.
 The installation ID is deliberately no longer part of that: installations are
 discovered per owner.
 
+### Which GitHub App permission a board needs
+
+ProjectsV2 boards hang off an owner, so only an **owner-level** Projects grant
+reaches them:
+
+- an **organization** board needs the App's organization `Projects` permission
+  (`organization_projects`) on that org's installation;
+- a **user** board needs the account-level `Projects` permission on the user's
+  installation — an organization grant does not apply to a user account.
+
+`repository_projects` is Projects (classic), repository-scoped: an installation
+holding it reads zero ProjectsV2 boards, so the gateway does not count it.
+`/internal/installations` reports each installation's raw `permissions` next to
+a `projects_read` verdict, and a board that is invisible for this reason comes
+back as `PROJECTS_PERMISSION_MISSING` rather than "not found".
+
 ### The allowlist
 
 `ACP_PROJECT_ALLOWLIST` is a comma list of numbers and ranges, optionally
@@ -113,7 +129,7 @@ not `-f`, which throws it away).
 | `PROJECT_REQUIRED` | 400 | `?project=` must be a board number; body points at `/internal/projects?owner=`. |
 | `PROJECT_NOT_ALLOWED` | 403 | Board is outside `ACP_PROJECT_ALLOWLIST`; body carries the current value and the entry to add. |
 | `OWNER_NOT_INSTALLED` | 404 | Install the App on that account (body carries the install URL and `owners_available`). No redeploy follows. |
-| `PROJECTS_PERMISSION_MISSING` | 403 | The installation exists but has no Projects read; body carries its `permissions`. |
+| `PROJECTS_PERMISSION_MISSING` | 403 | The installation exists but holds no owner-level Projects read; body carries its `permissions` and `account_type`. |
 | `PROJECT_NOT_FOUND` | 404 | No such board for that owner; body points at the board listing. |
 | `OWNER_NOT_VISIBLE` | 404 | The login didn't resolve to a user or org. |
 | `APP_NOT_CONFIGURED` | 503 | Gateway has no App credentials. |
