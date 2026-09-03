@@ -40,7 +40,7 @@ def test_repository_projects_does_not_count_as_projectsv2_access():
          "permissions": {"organization_projects": "read"}})["projects_read"] is True
 
 
-def test_a_user_installation_is_not_told_to_grant_an_org_permission():
+def test_a_user_installation_is_told_the_permission_does_not_exist():
     fresh()
     miss = {"data": {"organization": None, "user": None}}
     with patch.dict(os.environ, {**APP_ENV, "ACP_PROJECT_ALLOWLIST": "*"}), \
@@ -57,8 +57,14 @@ def test_a_user_installation_is_not_told_to_grant_an_org_permission():
         else:
             raise AssertionError("must raise")
     assert body["error"] == "PROJECTS_PERMISSION_MISSING" and body["account_type"] == "User"
-    assert "account-level Projects permission" in body["remedy"], body["remedy"]
-    assert "organization_projects` grant does not apply" in body["remedy"]
+    # Checked against GitHub's own App and PAT settings pages: Projects exists as
+    # an App permission only at repository (classic) and organization level, and
+    # a fine-grained PAT has no Projects permission at all. Pointing an operator
+    # at an account-level App permission sends them looking for a row that is
+    # not there -- name the credential that does work instead.
+    assert "No GitHub App can read a user's ProjectsV2 boards" in body["remedy"], body["remedy"]
+    assert "ACP_GITHUB_TOKEN_ZACHSHALLBETTER" in body["remedy"]
+    assert "read:project" in body["remedy"]
 
 
 def fresh():
@@ -251,6 +257,54 @@ def test_items_carry_their_field_values():
     for field in ("assignees", "labels", "milestone", "closedByPullRequestsReferences",
                   "createdAt", "updatedAt", "DraftIssue"):
         assert field in gateway.PROJECT_QUERY, field
+
+
+# ---- 6. the personal-token route for user-owned boards --------------------
+def test_a_personal_token_serves_an_owner_no_app_can_reach():
+    board = {"data": {"user": {"projectV2": {
+        "id": "PVT_x", "title": "Azimuth — World Runtime", "number": 38,
+        "fields": {"totalCount": 0, "nodes": []},
+        "items": {"totalCount": 1, "pageInfo": {"hasNextPage": False},
+                  "nodes": [{"id": "I1", "type": "ISSUE", "isArchived": False}]}}}}}
+    org_miss = {"data": {"organization": None}}
+    with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "*",
+                                 "ACP_GITHUB_TOKEN_ZACHSHALLBETTER": "ghp_secret"}), \
+         patch("gateway.installation_token", side_effect=AssertionError("must not mint an App token")), \
+         patch("gateway.urlopen", side_effect=[resp(org_miss), resp(board)]):
+        out = gateway.project_context("zachshallbetter", "38")
+    assert out["snapshot_source"] == "personal-token"
+    assert out["items_fetched"] == 1
+    # the credential itself must never appear in a response
+    assert "ghp_secret" not in json.dumps(out)
+
+
+def test_personal_token_owners_are_listed_by_name_only():
+    with patch.dict(os.environ, {"ACP_GITHUB_TOKEN_ZACHSHALLBETTER": "ghp_secret",
+                                 "ACP_GITHUB_TOKEN_ANIME_UNIVERSE": "ghp_other"}):
+        owners = gateway.pat_owners()
+    assert owners == ["anime-universe", "zachshallbetter"], owners
+    assert "ghp_secret" not in json.dumps(owners)
+
+
+def test_env_name_normalises_the_login():
+    assert gateway.owner_env_name("zachshallbetter") == "ACP_GITHUB_TOKEN_ZACHSHALLBETTER"
+    assert gateway.owner_env_name("Anime-Universe") == "ACP_GITHUB_TOKEN_ANIME_UNIVERSE"
+
+
+def test_an_uninstalled_owner_hears_about_both_routes():
+    fresh()
+    with patch.dict(os.environ, APP_ENV, clear=False), \
+         patch("gateway.app_jwt", return_value="jwt"), \
+         patch("gateway.urlopen", side_effect=[resp([install("Anime-Universe", 1)]), resp({"slug": "acp"})]):
+        os.environ.pop("ACP_GITHUB_INSTALLATIONS", None)
+        try:
+            gateway.installation_for("someone")
+        except gateway.TargetError as exc:
+            body = exc.payload()
+        else:
+            raise AssertionError("must raise")
+    assert "install the App" in body["remedy"]
+    assert "ACP_GITHUB_TOKEN_SOMEONE" in body["remedy"], body["remedy"]
 
 
 if __name__ == "__main__":
