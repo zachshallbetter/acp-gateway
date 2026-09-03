@@ -73,6 +73,7 @@ modes, different scaling shape, different credential exposure.
 | `ACP_PROJECT_ALLOWLIST` | no | Which boards may be read; see below. Defaults to `2-7`, the range that used to be hardcoded. |
 | `ACP_GITHUB_INSTALLATIONS` | no | `owner:id,owner:id` — pin an owner to an installation, skipping discovery. Only needed to override. |
 | `ACP_GITHUB_INSTALLATION_ID` | no | Legacy single installation. Used as a fallback if the installation list can't be fetched, or when a call names no owner. |
+| `ACP_GITHUB_TOKEN_<OWNER>` | for user boards | A classic PAT with `read:project` for one owner, e.g. `ACP_GITHUB_TOKEN_ZACHSHALLBETTER`. Takes precedence over the App for that owner. Required for **user-owned** boards — see below. |
 | `PORT` | no | Defaults to `8080`. |
 
 `configured()` is `False` (and `/internal/app-status`, `/internal/app-probe`
@@ -82,21 +83,27 @@ liveness check while clearly reporting it can't do App-authenticated reads yet.
 The installation ID is deliberately no longer part of that: installations are
 discovered per owner.
 
-### Which GitHub App permission a board needs
+### Which credential a board needs
 
-ProjectsV2 boards hang off an owner, so only an **owner-level** Projects grant
-reaches them:
+ProjectsV2 boards hang off an owner, so only an **owner-level** grant reaches
+them — and what is available depends on who owns the board:
 
-- an **organization** board needs the App's organization `Projects` permission
-  (`organization_projects`) on that org's installation;
-- a **user** board needs the account-level `Projects` permission on the user's
-  installation — an organization grant does not apply to a user account.
+- an **organization** board: the App's organization `Projects` permission
+  (`organization_projects`) on that org's installation. This is the normal path.
+- a **user** board: **no GitHub App can read one.** Projects exists as an App
+  permission only at repository (classic) and organization level; there is no
+  account-level Projects permission to grant, and a fine-grained PAT has no
+  Projects permission either (both verified against GitHub's own settings pages,
+  2026-09-02). The only credential that works is a **classic PAT** with
+  `read:project`, supplied per owner as `ACP_GITHUB_TOKEN_<OWNER>`. It is held
+  here exactly like the App key and never reaches a caller.
 
 `repository_projects` is Projects (classic), repository-scoped: an installation
 holding it reads zero ProjectsV2 boards, so the gateway does not count it.
 `/internal/installations` reports each installation's raw `permissions` next to
-a `projects_read` verdict, and a board that is invisible for this reason comes
-back as `PROJECTS_PERMISSION_MISSING` rather than "not found".
+a `projects_read` verdict and lists `personal_token_owners` by name (never
+values); a board invisible for this reason comes back as
+`PROJECTS_PERMISSION_MISSING`, naming the variable to set.
 
 ### The allowlist
 
@@ -181,7 +188,7 @@ curl --fail-with-body -sS "${auth[@]}" \
 ```
 
 The snapshot response is `{"snapshot": {...}, "snapshot_source": "github-app",
-"allowed": true, "owner": ..., "owner_type": ..., "items_fetched": ...,
+"allowed": true, "owner": ..., "owner_type": ..., "snapshot_source": "github-app" | "personal-token", "items_fetched": ...,
 "items_total": ..., "truncated": ..., "pages": ...}` — `snapshot` is the raw
 ProjectsV2 `id`/`title`/`number`/`fields`/`items` payload from GitHub's GraphQL
 API.

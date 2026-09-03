@@ -13,7 +13,7 @@ Two design rules shape the whole file:
      to retry correctly -- rather than an opaque 400/502 it has to guess at.
 """
 from __future__ import annotations
-import base64, hmac, http.server, json, os, subprocess, tempfile, time
+import base64, hmac, http.server, json, os, re, subprocess, tempfile, time
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
@@ -162,10 +162,12 @@ def installations(refresh=False):
 
 def known_owners():
     """Logins we can serve right now -- for advice inside an error. Best effort."""
+    owners = set(pat_owners())
     try:
-        return sorted(entry["login"] for entry in installations() if entry["login"])
+        owners.update(entry["login"] for entry in installations() if entry["login"])
     except Exception:
-        return sorted(installation_overrides())
+        owners.update(installation_overrides())
+    return sorted(owners)
 
 
 def owner_installation(owner):
@@ -206,10 +208,44 @@ def installation_for(owner):
             return str(entry["installation_id"])
     raise TargetError(404, "OWNER_NOT_INSTALLED",
                       f"The GitHub App behind this gateway is not installed on '{owner}'.",
-                      remedy="Install it on that account with Projects: read"
+                      remedy="For an organization, install the App there with Projects: read"
                              + (f" — {install_url()}" if install_url() else "")
-                             + ". The gateway discovers the installation itself; no ID to copy, no redeploy.",
+                             + " (the gateway discovers the installation itself; no ID to copy, no redeploy). "
+                             "For a user account, no App can read its boards: set "
+                             f"{owner_env_name(owner)} on this deployment to a classic PAT with read:project.",
                       owner=owner, owners_available=sorted(e["login"] for e in known if e["login"]))
+
+
+def owner_env_name(owner):
+    """ACP_GITHUB_TOKEN_<OWNER>, with the login normalised (Anime-Universe -> ANIME_UNIVERSE)."""
+    return "ACP_GITHUB_TOKEN_" + re.sub(r"[^A-Za-z0-9]", "_", owner).upper()
+
+
+def pat_owners():
+    """Owners configured with a personal token -- names only; values never leave this process."""
+    prefix = "ACP_GITHUB_TOKEN_"
+    return sorted(name[len(prefix):].lower().replace("_", "-")
+                  for name in os.environ if name.startswith(prefix) and os.environ[name])
+
+
+def owner_token(owner):
+    """A token that can read `owner`'s boards, and what kind it is.
+
+    A GitHub App cannot reach a *user-owned* ProjectsV2 board at all: Projects
+    exists as an App permission only at repository (classic) and organization
+    level -- there is no account-level Projects permission to grant, on the App
+    or on a fine-grained PAT. The only credential that reads a user's board is a
+    classic PAT with `read:project`, so one may be supplied per owner and takes
+    precedence over the App for that owner. It is held here, exactly like the
+    App key, and never travels to a caller.
+    """
+    personal = os.getenv(owner_env_name(owner))
+    if personal:
+        return personal, "personal-token"
+    token = (installation_token(owner) or {}).get("token")
+    if not token:
+        raise UpstreamError(502, "TOKEN_UNAVAILABLE", "GitHub installation token response did not contain a token.")
+    return token, "github-app"
 
 
 def default_installation():
@@ -379,9 +415,11 @@ def missing_board(owner, project, errors):
         return TargetError(403, "PROJECTS_PERMISSION_MISSING",
                            f"The App is installed on '{owner}' ({entry['account_type'].lower()} account) but that "
                            "installation holds no owner-level Projects permission, so it sees no ProjectsV2 board.",
-                           remedy=("Add the account-level Projects permission (read) to the App and accept it on this "
-                                   "installation. An `organization_projects` grant does not apply to a user account, "
-                                   "and `repository_projects` is Projects (classic), which ProjectsV2 ignores."
+                           remedy=(f"No GitHub App can read a user's ProjectsV2 boards -- Projects exists as an App "
+                                   "permission only at repository (classic) and organization level, and a "
+                                   "fine-grained PAT has no Projects permission either. Set "
+                                   f"{owner_env_name(owner)} on this deployment to a classic PAT with "
+                                   "read:project, or move the board under an organization."
                                    if user else
                                    "Grant the App's organization Projects permission (read) on "
                                    f"'{owner}' and accept the updated permissions."),
@@ -410,9 +448,7 @@ def require_owner(owner):
 def project_list(owner):
     """Every board `owner` exposes to this App, with the number to ask for next."""
     owner = require_owner(owner)
-    token = (installation_token(owner) or {}).get("token")
-    if not token:
-        raise UpstreamError(502, "TOKEN_UNAVAILABLE", "GitHub installation token response did not contain a token.")
+    token, credential = owner_token(owner)
     boards, cursor, pages, root, block, errors = [], None, 0, None, {}, []
     while pages < MAX_PAGES:
         root, found, page_errors = owner_scoped(token, PROJECTS_QUERY, {"owner": owner, "after": cursor}, root)
@@ -432,7 +468,7 @@ def project_list(owner):
         if not info.get("hasNextPage"):
             break
     return {
-        "owner": owner, "owner_type": root, "projects": boards,
+        "owner": owner, "owner_type": root, "projects": boards, "snapshot_source": credential,
         "count": len(boards), "total": block.get("totalCount"),
         "allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", "2-7"),
         "note": "Pass a board's `number` as ?project= to /internal/project-context. `allowed:false` means "
@@ -462,9 +498,7 @@ def project_context(owner: str, project: str):
                           owner=owner, project=int(project),
                           allowlist=os.getenv("ACP_PROJECT_ALLOWLIST", "2-7"))
 
-    token = (installation_token(owner) or {}).get("token")
-    if not token:
-        raise UpstreamError(502, "TOKEN_UNAVAILABLE", "GitHub installation token response did not contain a token.")
+    token, credential = owner_token(owner)
 
     snapshot, cursor, pages, root, truncated, errors = None, None, 0, None, False, []
     while True:
@@ -490,7 +524,7 @@ def project_context(owner: str, project: str):
     total = snapshot["items"].get("totalCount")
     return {
         "snapshot": snapshot,
-        "snapshot_source": "github-app",
+        "snapshot_source": credential,
         "allowed": True,
         "owner": owner,
         "owner_type": root,
@@ -543,6 +577,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return {"configured": configured(),
                     "installation_resolution": "pinned+discovery" if pinned else "discovery",
                     "pinned_installations": pinned,
+                    "personal_token_owners": pat_owners(),
                     "fallback_installation_id": os.getenv("ACP_GITHUB_INSTALLATION_ID"),
                     "project_allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", "2-7"),
                     "owners_available": known_owners(),
@@ -550,15 +585,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "endpoints": ENDPOINTS}
         if route == "/internal/app-probe":
             owner = first("owner")
+            if owner and os.getenv(owner_env_name(owner)):
+                return {"configured": True, "owner": owner, "credential": "personal-token",
+                        "installation_token": "not-applicable",
+                        "note": "This owner is served by a personal token, so no installation token is minted."}
             token = installation_token(owner or None)
-            return {"configured": True, "installation_token": "minted", "owner": owner or None,
+            return {"configured": True, "installation_token": "minted", "credential": "github-app",
+                    "owner": owner or None,
                     "token_expires_at": token.get("expires_at"), "permissions": token.get("permissions", {}),
                     "repositories_url": "/installation/repositories"}
         if route == "/internal/installations":
             found = installations(refresh=first("refresh") in ("1", "true", "yes"))
             return {"installations": found, "count": len(found), "install_url": install_url(),
                     "cache_ttl_seconds": INSTALLATION_TTL,
-                    "note": "Any account here can be read without a redeploy; install the App elsewhere to add one."}
+                    "personal_token_owners": pat_owners(),
+                    "note": "Any account here can be read without a redeploy; install the App elsewhere to add one. "
+                            "A user's ProjectsV2 boards are unreachable to any App -- those owners need a classic "
+                            "PAT with read:project in ACP_GITHUB_TOKEN_<OWNER>, listed above by name only."}
         if route == "/internal/projects":
             return project_list(first("owner"))
         if route == "/internal/project-context":
