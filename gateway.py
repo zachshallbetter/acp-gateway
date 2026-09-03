@@ -295,7 +295,13 @@ PROJECT_QUERY = """
     OWNER_ROOT(login:$owner) {
       projectV2(number:$number) {
         id title number
-        fields(first:100) { totalCount nodes { __typename ... on ProjectV2FieldCommon { id name } } }
+        fields(first:100) { totalCount nodes { __typename
+          ... on ProjectV2FieldCommon { id name dataType }
+          ... on ProjectV2SingleSelectField { options { id name } }
+          ... on ProjectV2IterationField { configuration {
+            iterations { id title startDate duration }
+            completedIterations { id title startDate duration } } }
+        } }
         items(first:%d, after:$after) {
           totalCount
           pageInfo { hasNextPage endCursor }

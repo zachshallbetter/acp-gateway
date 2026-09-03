@@ -227,6 +227,17 @@ def test_project_list_reports_numbers_and_whether_they_are_allowed():
     assert [b["allowed"] for b in out["projects"]] == [True, False]
 
 
+# ---- 5. the field roster a writer needs -----------------------------------
+def test_snapshot_asks_for_what_set_field_needs():
+    # set-field.sh resolves a single-select by its option id, from the field
+    # roster this query returns. Asking only for id/name left every Status write
+    # with dataType null and no options -- a read that looks fine and blocks
+    # every write built on it.
+    assert "dataType" in gateway.PROJECT_QUERY
+    assert "ProjectV2SingleSelectField { options { id name } }" in gateway.PROJECT_QUERY
+    assert "ProjectV2IterationField" in gateway.PROJECT_QUERY
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
