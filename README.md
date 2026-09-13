@@ -1219,3 +1219,70 @@ A client that needs an owner or board number it doesn't have should ask the
 gateway rather than guess: the two discovery endpoints above answer it, and any
 refusal already names what's missing. Surface the error body to the operator
 verbatim — it is written to be actionable.
+
+## Onboarding a new project
+
+`scripts/onboard-project.sh <repo> [--owner O --project N]` wires a repository
+to this gateway and then proves the wiring works. It is idempotent — re-running
+it reports what is already in place and changes nothing.
+
+```sh
+scripts/onboard-project.sh ../draft-smarter --owner zachshallbetter --project 39
+scripts/onboard-project.sh ../some-repo --dry-run     # show the plan, write nothing
+```
+
+It does four things:
+
+1. **Vendors the `github-projects` skill** into `<repo>/.agents/skills/`, from
+   this repository's own copy. That copy is the source of truth: the skill's
+   `tests/test_acp_context.sh` pins *this* gateway's error contract, so the
+   client and the contract it asserts now live together.
+2. **Un-ignores `.agents/`** in the repo's `.gitignore`.
+3. **Writes `ACP_GATEWAY_URL` / `ACP_GATEWAY_TOKEN`** into `<repo>/.env.local`,
+   read from Railway (`railway variables --service acp-gateway --environment
+   production`). The token is never printed.
+4. **Binds the board**, when `--owner`/`--project` are given, by writing
+   `.agents/board.env` — after which the skill's scripts need no flags anywhere
+   inside that repo.
+
+Then it verifies, because configuration is not proof: `/health`, an
+authenticated read of the owner's boards, and — if a board was named — that the
+gateway reports it as `allowed=true`. A refusal is printed with the gateway's
+own `error`/`detail`/`remedy`, not as an exit code.
+
+### Two failure modes it exists to prevent
+
+**A global gitignore swallows the skill silently.** A `core.excludesFile` that
+excludes `.agents/` — a common scaffolding default — makes `git add` report
+success while staging nothing. The skill then lives on one machine and
+disappears on the next clone. A global ignore cannot be overridden from
+anywhere except the repo's own `.gitignore`, which is why step 2 exists and why
+it writes there rather than anywhere more tasteful.
+
+**A bearer token in a tracked file.** `ACP_GATEWAY_TOKEN` authenticates to a
+service that mints GitHub App installation tokens. The script refuses to write
+it unless `git check-ignore` says `.env.local` is actually ignored — asked of
+git rather than read from `.gitignore`, because only git knows the answer once
+a global excludesfile is involved. That check runs in preflight, so a refusal
+leaves the repository untouched rather than half-configured.
+
+### What ends up committed, and what does not
+
+| Path | Committed | Why |
+| --- | --- | --- |
+| `.agents/skills/github-projects/` | yes | the client, and the tests that pin this gateway's contract |
+| `.agents/board.env` | yes | which board this repo belongs to — not a secret |
+| `.env.local` | **no** | the bearer token |
+
+### If the board is refused
+
+`allowed=false` means the board is outside `ACP_PROJECT_ALLOWLIST` on this
+service. That is a deployment change, not a client one:
+
+```sh
+railway variables --service acp-gateway --environment production \
+  --set 'ACP_PROJECT_ALLOWLIST=2-9,11,zachshallbetter:*'
+```
+
+An `<owner>:*` entry admits every board that owner holds, which is what keeps a
+newly created board from needing a gateway edit before it can be read.
