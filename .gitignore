@@ -1,3 +1,13 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# `.agents/` is tracked here. The global core.excludesFile
+# (~/.config/git/ignore) excludes `.agents/` as "local tooling
+# configuration", which is right for a scratch `.claude/` and wrong for a
+# vendored skill: the repo copy carries this project's local law and is
+# useless to anyone who clones without it. `git add` fails silently against a
+# global ignore, so the negation has to be stated here — same reasoning as
+# Azimuth and Infinite-Verse, which hit this first.
+!.agents/
+!**/.agents/
