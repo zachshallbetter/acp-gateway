@@ -11,3 +11,27 @@ __pycache__/
 # Azimuth and Infinite-Verse, which hit this first.
 !.agents/
 !**/.agents/
+
+# --- added for Antigravity/indexer parity (auto) ---
+node_modules/
+dist/
+build/
+out/
+target/
+.next/
+.turbo/
+.vercel/
+coverage/
+playwright-report/
+test-results/
+graphify-out/
+.reports/
+.venv/
+venv/
+DerivedData/
+.gradle/
+.expo/
+.env
+.env.*
+
+!.env.example
