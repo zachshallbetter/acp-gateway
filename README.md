@@ -33,7 +33,9 @@ pattern, not just that one ecosystem.
   `GET /internal/projects?owner=` (which boards that account has, each with the
   number to ask for, and whether the allowlist admits it), and
   `GET /internal/project-context?owner=&project=` — a live ProjectsV2 GraphQL
-  snapshot (fields + **every** item, paged) for an allowlisted board.
+  snapshot (fields + **every** item, including archived items, paged) for an
+  allowlisted board. Each item carries `isArchived`; coordinator queues must
+  exclude archived items from active work.
 
   The snapshot reports its own completeness — `items_fetched`, `items_total`,
   `pages`, and an explicit `truncated` flag. Never infer completeness from the

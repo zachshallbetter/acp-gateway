@@ -355,7 +355,7 @@ PROJECT_QUERY = """
             iterations { id title startDate duration }
             completedIterations { id title startDate duration } } }
         } }
-        items(first:%d, after:$after) {
+        items(first:%d, after:$after, archivedStates:[ARCHIVED, NOT_ARCHIVED]) {
           totalCount
           pageInfo { hasNextPage endCursor }
           nodes { id type isArchived createdAt updatedAt
