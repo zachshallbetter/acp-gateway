@@ -29,33 +29,33 @@ J="$(gp_snapshot_jsonl)"
 #   S = the item's status   A = the item's agent
 case "$VIEW" in
   summary)
-    echo "by $GP_FIELD_STATUS:"; jq -r '.fields[env.GP_FIELD_STATUS] // "—"' "$J" | sort | uniq -c | sort -rn | sed 's/^/  /'
-    echo "by $GP_FIELD_BAND:";   jq -r '.fields[env.GP_FIELD_BAND]   // "—"' "$J" | sort | uniq -c | sort -rn | sed 's/^/  /'
-    echo "claimed by:"; c=$(jq -r 'select((.fields[env.GP_FIELD_AGENT]//"")!="")|.fields[env.GP_FIELD_AGENT]' "$J" | sort | uniq -c | sort -rn)
+    echo "by $GP_FIELD_STATUS:"; jq -r 'select(.isArchived != true) | .fields[env.GP_FIELD_STATUS] // "—"' "$J" | sort | uniq -c | sort -rn | sed 's/^/  /'
+    echo "by $GP_FIELD_BAND:";   jq -r 'select(.isArchived != true) | .fields[env.GP_FIELD_BAND]   // "—"' "$J" | sort | uniq -c | sort -rn | sed 's/^/  /'
+    echo "claimed by:"; c=$(jq -r 'select(.isArchived != true and (.fields[env.GP_FIELD_AGENT]//"")!="")|.fields[env.GP_FIELD_AGENT]' "$J" | sort | uniq -c | sort -rn)
     [ -n "$c" ] && echo "$c" | sed 's/^/  /' || echo "  (no active claims)"
     ;;
   ready)
-    jq -r 'select(((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_READY|ascii_downcase)) and ((.fields[env.GP_FIELD_AGENT]//"")=="")) | "\(.id)\t\(.title)"' "$J"
+    jq -r 'select(.isArchived != true and ((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_READY|ascii_downcase)) and ((.fields[env.GP_FIELD_AGENT]//"")=="")) | "\(.id)\t\(.title)"' "$J"
     ;;
   triage)
-    jq -r 'select(((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_TRIAGE|ascii_downcase)) and ((.fields[env.GP_FIELD_AGENT]//"")=="")) | "\(.id)\t\(.title)"' "$J"
+    jq -r 'select(.isArchived != true and ((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_TRIAGE|ascii_downcase)) and ((.fields[env.GP_FIELD_AGENT]//"")=="")) | "\(.id)\t\(.title)"' "$J"
     ;;
   mine)
     a="${ARG:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
     [ -n "$a" ] || { echo "no agent given and no git branch" >&2; exit 2; }
-    jq -r --arg a "$a" 'select((.fields[env.GP_FIELD_AGENT]//"")==$a) | "[\(.fields[env.GP_FIELD_STATUS]//"—")] \(.title)"' "$J"
+    jq -r --arg a "$a" 'select(.isArchived != true and (.fields[env.GP_FIELD_AGENT]//"")==$a) | "[\(.fields[env.GP_FIELD_STATUS]//"—")] \(.title)"' "$J"
     ;;
   orphans)
-    jq -r 'select(((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_ACTIVE|ascii_downcase)) and ((.fields[env.GP_FIELD_AGENT]//"")=="")) | "\(.id)\t\(.title)"' "$J"
+    jq -r 'select(.isArchived != true and ((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_ACTIVE|ascii_downcase)) and ((.fields[env.GP_FIELD_AGENT]//"")=="")) | "\(.id)\t\(.title)"' "$J"
     ;;
   stale)
-    jq -r 'select(((.fields[env.GP_FIELD_AGENT]//"")!="") and ((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase!=(env.GP_STATUS_ACTIVE|ascii_downcase))) | "[\(.fields[env.GP_FIELD_STATUS]//"—")] \(.fields[env.GP_FIELD_AGENT]): \(.title)"' "$J"
+    jq -r 'select(.isArchived != true and ((.fields[env.GP_FIELD_AGENT]//"")!="") and ((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase!=(env.GP_STATUS_ACTIVE|ascii_downcase))) | "[\(.fields[env.GP_FIELD_STATUS]//"—")] \(.fields[env.GP_FIELD_AGENT]): \(.title)"' "$J"
     ;;
   prs)
-    jq -r 'select((.linkedPRs|length)>0) | .title as $t | .linkedPRs[] | "\(.state)\t\(.url)\t\($t)"' "$J"
+    jq -r 'select(.isArchived != true and (.linkedPRs|length)>0) | .title as $t | .linkedPRs[] | "\(.state)\t\(.url)\t\($t)"' "$J"
     ;;
   done-open)
-    jq -r 'select((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_DONE|ascii_downcase))
+    jq -r 'select(.isArchived != true and ((.fields[env.GP_FIELD_STATUS]//"")|ascii_downcase==(env.GP_STATUS_DONE|ascii_downcase)))
            | select((.linkedPRs|length)>0)
            | select(([.linkedPRs[]|select(.state=="MERGED")]|length)==0)
            | "\(.title) → PRs: \([.linkedPRs[].state]|join(","))"' "$J"
