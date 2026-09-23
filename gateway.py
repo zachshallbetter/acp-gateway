@@ -413,10 +413,11 @@ def owner_scoped(token, template, variables, root=None):
     errors = []
     for candidate in ((root,) if root else ("organization", "user")):
         result = graphql(token, template.replace("OWNER_ROOT", candidate), variables)
-        errors.extend(result.get("errors") or [])
+        candidate_errors = result.get("errors") or []
         found = (result.get("data") or {}).get(candidate)
         if found:
-            return candidate, found, errors
+            return candidate, found, candidate_errors
+        errors.extend(candidate_errors)
     return None, None, errors
 
 
@@ -547,9 +548,15 @@ def project_context(owner: str, project: str):
                                                 {"owner": owner, "number": int(project), "after": cursor}, root)
         errors.extend(page_errors)
         page = (found or {}).get("projectV2")
+        if not page and snapshot is None:
+            raise missing_board(owner, int(project), errors)
+        if page_errors:
+            raise UpstreamError(502, "PROJECT_SNAPSHOT_INCOMPLETE",
+                                f"GitHub returned GraphQL errors while reading board #{project} of '{owner}'.",
+                                remedy="Retry the read. The gateway refuses to label partial Project data as a complete snapshot.",
+                                owner=owner, project=int(project), pages=pages + 1,
+                                graphql_errors=graphql_notes(page_errors))
         if not page:
-            if snapshot is None:
-                raise missing_board(owner, int(project), errors)
             break
         if snapshot is None:
             snapshot = page
