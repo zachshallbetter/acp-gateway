@@ -29,18 +29,18 @@ if gp_acp_enabled; then
   (env.GP_FIELD_AGENT) as $ak |
   (env.GP_FIELD_STATUS) as $sk |
   (env.GP_STATUS_ACTIVE) as $active |
-  ([.[] | select((.fields[$ak] // "")|length>0)] | sort_by(.fields[$ak])) as $claimed
+  ([.[] | select(.isArchived != true and ((.fields[$ak] // "")|length>0))] | sort_by(.fields[$ak])) as $claimed
   | "CLAIMED  (\($claimed|length)):",
     ($claimed | group_by(.fields[$ak])[] |
        "  ▸ \(.[0].fields[$ak])  (\(length))",
        (.[] | "      [\(.fields[$sk] // "—")] \(.title)")),
     "",
     "⚠ \(env.GP_STATUS_ACTIVE) with NO agent:",
-    ([.[] | select((.fields[$sk]//"") == $active and ((.fields[$ak]//"")|length)==0)]
+    ([.[] | select(.isArchived != true and (.fields[$sk]//"") == $active and ((.fields[$ak]//"")|length)==0)]
        | if length==0 then "  none" else (.[] | "  - \(.title)") end),
     "",
     "⚠ Agent set but not \(env.GP_STATUS_ACTIVE) (possibly stale):",
-    ([.[] | select(((.fields[$ak]//"")|length)>0 and (.fields[$sk]//"") != $active)]
+    ([.[] | select(.isArchived != true and ((.fields[$ak]//"")|length)>0 and (.fields[$sk]//"") != $active)]
        | if length==0 then "  none" else (.[] | "  - [\(.fields[$sk] // "—")] \(.fields[$ak]): \(.title)") end)
   ' "$(gp_snapshot_jsonl)"
   exit 0

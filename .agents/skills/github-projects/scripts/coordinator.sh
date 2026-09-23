@@ -72,6 +72,7 @@ echo "refreshing snapshot…"; "$SCRIPT_DIR/snapshot.sh" --owner "$OWNER" --proj
 process_item() {
   local ID="$1" TITLE="$2" REC GATE REPOS CLAIMED BRANCH WT checkcmd ticket rp on cr res
   REC="$("$SCRIPT_DIR/snapshot.sh" get "$ID" 2>/dev/null)"
+  [ "$(printf '%s' "$REC" | jq -r '.isArchived // false')" != true ] || { echo "  SKIP: archived item"; return 0; }
   GATE="$(printf '%s' "$REC" | jget '.fields[env.GP_FIELD_GATE]')"
   REPOS="$(printf '%s' "$REC" | jget '.fields[env.GP_FIELD_REPOS]')"
   CLAIMED="$(printf '%s' "$REC" | jget '.fields[env.GP_FIELD_AGENT]')"

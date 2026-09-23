@@ -135,12 +135,13 @@ mutation($p:ID!,$i:ID!){ unarchiveProjectV2Item(input:{projectId:$p, itemId:$i})
 mutation($p:ID!,$i:ID!){ deleteProjectV2Item(input:{projectId:$p, itemId:$i}){ deletedItemId } }
 ```
 
-`gh project item-list` hides archived items, so to **find what's archived** (e.g. to
-restore it) query `isArchived` directly — it's the only way to enumerate them:
+`gh project item-list` hides archived items. The default GraphQL `items` connection
+also returns only non-archived items; use `archivedStates:[ARCHIVED]` to find archived
+items (e.g. to restore one):
 ```bash
 gh api graphql -f owner=S2Forge -F number=2 -f query='
 query($owner:String!,$number:Int!){ organization(login:$owner){ projectV2(number:$number){
-  items(first:100){ nodes { id isArchived content{ ... on Issue { title } ... on DraftIssue { title } } } } } } }' \
+  items(first:100,archivedStates:[ARCHIVED]){ nodes { id isArchived content{ ... on Issue { title } ... on DraftIssue { title } } } } } } }' \
   | jq -r '.data.organization.projectV2.items.nodes[] | select(.isArchived) | "\(.id)\t\(.content.title)"'
 ```
 
