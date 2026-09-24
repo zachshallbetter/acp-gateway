@@ -8,6 +8,7 @@
 # read still passes through untouched, and a refusal is explained and fatal.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SKILL="$PWD"
 STUB="$(mktemp -d)"; trap 'rm -rf "$STUB"' EXIT
 PATH="$STUB:$PATH"
 fails=0
@@ -59,9 +60,17 @@ stub_curl '<html>502 Bad Gateway</html>' 502
 err="$(gp_acp_context 2>&1 >/dev/null)"
 check "non-JSON body is shown"    "the raw body"         "$err" "502 Bad Gateway"
 
+# A bare 429 is Railway's edge (WAF Under Attack Mode), never the gateway: say so.
+stub_curl 'rate limited' 429
+err="$(gp_acp_context 2>&1 >/dev/null)"
+check "a bare 429 is named as the WAF" "the edge, not ACP"  "$err" "WAF Under Attack Mode"
+
 # 5. no board selected: the gateway is asked what exists
+# Run from outside the repository. Inside it, <git-root>/.agents/board.env binds the board and
+# fills an empty GH_PROJECT_OWNER/NUMBER (#113), so "nothing selected" cannot happen here -- which
+# is the profile doing its job, not the hint failing. $STUB is a temp dir with no git above it.
 stub_curl '{"installations":[{"login":"testorg"},{"login":"testowner"}]}' 200
-err="$(OWNER="" PROJECT="" GH_PROJECT_OWNER="" GH_PROJECT_NUMBER="" GH_PROJECT_CONFIG=/nonexistent bash -c '. scripts/lib.sh; gp_resolve; gp_require_target' 2>&1)"
+err="$(cd "$STUB" && OWNER="" PROJECT="" GH_PROJECT_OWNER="" GH_PROJECT_NUMBER="" GH_PROJECT_CONFIG=/nonexistent bash -c ". '$SKILL/scripts/lib.sh'; gp_resolve; gp_require_target" 2>&1)"
 check "missing target lists owners" "the owner hint"     "$err" "--owner testowner"
 
 [ "$fails" = 0 ] && echo "acp context tests passed" || { echo "$fails failing"; exit 1; }

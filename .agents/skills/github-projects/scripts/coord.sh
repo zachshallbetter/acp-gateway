@@ -13,7 +13,7 @@
 #   coord.sh done-open      Status=Done but a linked PR isn't MERGED (needs attention)
 #
 # Field/status names come from the board vocabulary (lib.sh: GP_FIELD_*, GP_STATUS_*),
-# so this works on any board's schema — override those env vars for a non-S2Forge board.
+# so this works on any board's schema — override those env vars (or set them in .agents/board.env) for any board.
 # Refresh the model first with `snapshot.sh`; coord.sh never hits the API itself.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

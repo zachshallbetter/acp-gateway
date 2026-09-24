@@ -146,3 +146,54 @@ scripts/protect.sh S2Forge/compute main "build"   # require the "build" CI check
 ```
 Until you do that, `--apply` (even with merge on) behaves as propose-only for that repo —
 which is the safe default.
+
+### Admission and qualification handshakes
+
+When the repository provides them (they are repository scripts, not part of this
+engine), admission is the first coordinator operation, not an agent judgment. Run
+`scripts/coordinator-admission.sh` with the Project item, issue, branch, and
+developer. It returns `INVALID`, `BLOCKED`, `APPROVED`, or `REJECTED`; only
+`APPROVED` may claim or create a worktree. A worker resolves only the returned
+blocker and resubmits. After a PR is open, run `scripts/coordinator-finalize.sh`;
+it requires the scope audit, passed checks, mergeability, and a human comment
+matching `Reviewed delivery record; approve next action:` before returning
+`QUALIFIED`.
+
+Before dispatch, the coordinator requires the unversioned and versioned
+`llms`/`llms-full` files to exist and match. It records the versioned corpus
+filename and digest in the resolver ticket, alongside the issue body, recent
+evidence comments, labels, milestone, and assignees. The resolver must also
+read the issue's native parent and blocked-by relationships, `docs/VERSIONING.md`,
+and any linked canonical documents before editing. A missing or stale corpus is
+a hard stop; it is never silently replaced with an older context file.
+
+```bash
+scripts/snapshot.sh                                   # 1. reconcile the model
+scripts/coord.sh orphans; scripts/coord.sh stale      # 2. heal: attribute/clear bad claims
+for row in $(scripts/coord.sh ready | cut -f1); do    # 3. dispatch ready work
+  scripts/claim.sh --item "$row" --agent dispatcher   #    (or hand the id to a worker)
+done
+scripts/coord.sh prs                                  # 4. verify PRs (state from the snapshot)
+#    deeper check status, per PR:  gh pr checks <url>  /  gh pr view <url> --json reviewDecision,mergeable
+scripts/coord.sh done-open                            # 5. catch Done items whose PR never merged
+```
+
+## Verifying PRs
+
+The snapshot carries each item's `linkedPRs` and their `state` (and for PR-type items,
+`reviewDecision`/`isDraft`). That's enough to triage. For the actual check run — green
+or red — call the CLI on demand (it's authoritative and cheap per PR):
+
+```bash
+gh pr checks <pr-url>                                  # CI status
+gh pr view  <pr-url> --json state,reviewDecision,mergeable,statusCheckRollup
+```
+
+Fold the result back onto the item with `set-field.sh` (e.g. `--set "Status=In review"`
+or `Done`), which keeps the snapshot aligned for free.
+
+## Autonomous mode: spawning micro-agents
+
+Everything above is the coordinator's *senses* (the model) and *hands* (the board
+scripts). To actually resolve work it **spawns cheap headless `claude -p` workers** —
+one per ticket, minimal context, smallest sufficient model — via `spawn.sh`.

@@ -37,28 +37,27 @@ unset _gp_profile
 
 # ── Board field vocabulary ──────────────────────────────────────────────────────
 # The claim/coord/coordinator layer needs to know which fields/values mean what.
-# Defaults match the S2Forge board; override via env for any other board's schema.
+# Generic defaults. A repository sets its board's own schema in .agents/board.env
+# (parsed below, never sourced); the environment wins over both.
 # Exported so jq filters can read them as `env.GP_FIELD_STATUS`, etc.
 export GP_FIELD_STATUS="${GP_FIELD_STATUS:-Status}"   # the workflow single-select
 export GP_FIELD_AGENT="${GP_FIELD_AGENT:-Agent}"      # text field holding the claiming agent's id
-export GP_FIELD_BAND="${GP_FIELD_BAND:-Band}"         # grouping (wave/epic/phase)
-export GP_FIELD_REPOS="${GP_FIELD_REPOS:-Repos}"      # repo hint the coordinator resolves
+export GP_FIELD_BAND="${GP_FIELD_BAND:-Band}"         # grouping (wave/epic/phase; a native Milestone works too)
+export GP_FIELD_REPOS="${GP_FIELD_REPOS:-Repos}"      # repo/component hint the coordinator resolves
 export GP_FIELD_GATE="${GP_FIELD_GATE:-Gate}"         # acceptance/done condition
 export GP_STATUS_READY="${GP_STATUS_READY:-Ready}"        # claimable
 export GP_STATUS_ACTIVE="${GP_STATUS_ACTIVE:-In progress}" # being worked
 export GP_STATUS_REVIEW="${GP_STATUS_REVIEW:-In review}"  # done, PR open
 export GP_STATUS_DONE="${GP_STATUS_DONE:-Done}"          # completed/merged
 export GP_STATUS_TRIAGE="${GP_STATUS_TRIAGE:-To triage}"  # the triage queue
+# Space-separated board numbers this repository may select. Empty = no local
+# restriction (the gateway's own allowlist still applies to reads).
+export GP_ALLOWED_PROJECTS="${GP_ALLOWED_PROJECTS:-}"
+# Stop before a loop drains the shared GraphQL budget (see gp_require_graphql_budget).
+export GP_GRAPHQL_MIN_REMAINING="${GP_GRAPHQL_MIN_REMAINING:-500}"
 
-# ── ACP gateway (optional read path) ────────────────────────────────────────────
-# With ACP_GATEWAY_URL set, board READS go through a hosted gateway that holds
-# the GitHub App credentials, so no agent ever holds them. Writes are unaffected:
-# the gateway is pull-only by design, and add-item/set-field/claim/new-item keep
-# using the operator's own `gh` credentials. Everything here is inert when
-# ACP_GATEWAY_URL is unset -- the skill behaves exactly as before.
-#
-# ACP_GATEWAY_URL / ACP_GATEWAY_TOKEN normally live in the repository's
-# .env.local (never committed). Load them from there when not already exported.
+# ACP_GATEWAY_URL / ACP_GATEWAY_TOKEN normally live in the repository's .env.local
+# (never committed). Load them from there when the caller has not exported them.
 if [ -z "${ACP_GATEWAY_URL:-}" ]; then
   _gp_env="$(git rev-parse --show-toplevel 2>/dev/null)/.env.local"
   if [ -f "$_gp_env" ]; then
@@ -69,6 +68,9 @@ if [ -z "${ACP_GATEWAY_URL:-}" ]; then
   unset _gp_env
 fi
 
+# When ACP is configured, Project reads are served by the hosted Railway
+# gateway. This is the default authority for reusable skills; local gh/GraphQL
+# is an explicit fallback only when ACP_GATEWAY_URL is unset.
 # ACP is on when a gateway is configured -- unless the operator has explicitly
 # asked for the native fallback. Without that second clause the documented
 # escape hatch did nothing: the read paths short-circuited to the gateway on the
@@ -83,11 +85,13 @@ gp_uri() { printf '%s' "$1" | jq -sRr @uri; }
 
 # gp_gateway_get <path> — one authenticated gateway read, body on stdout.
 #
-# The gateway answers a refusal with JSON saying what to do about it: an error
-# code, a detail, a remedy, and the context needed to retry (which owners it can
-# read, the allowlist entry to add, the App install URL). `curl -f` throws that
-# body away and reports only its own exit code, so a fixable misconfiguration
-# reaches the caller as an unexplained failure. Capture body and status instead.
+# The gateway answers a refusal with JSON that says what to do about it: an
+# error code, a detail, a remedy, and the context needed to retry (which owners
+# it can read, the allowlist entry to add, the App install URL). `curl -f`
+# throws that body away and reports only its own exit code, so a fixable
+# misconfiguration -- a board outside the allowlist, an account the App is not
+# installed on -- reached the agent as an unexplained failure. Capture the body
+# and the status instead, and surface the advice verbatim.
 gp_gateway_get() {
   [ -n "${ACP_GATEWAY_TOKEN:-}" ] || {
     echo "error: ACP_GATEWAY_URL is set but ACP_GATEWAY_TOKEN is missing; refusing local GitHub Project fallback" >&2
@@ -119,20 +123,27 @@ gp_gateway_explain() {
         (if .owners_available then "  owners available: \(.owners_available | join(", "))" else empty end),
         (if .allowlist then "  gateway allowlist: \(.allowlist)" else empty end),
         (if .permissions then "  installation permissions: \(.permissions | to_entries | map("\(.key)=\(.value)") | join(", "))" else empty end)'
+    elif [ "$1" = 429 ] && [ "$3" = "rate limited" ]; then
+      # Not the gateway: it never sends 429 and always sends JSON. This is Railway's edge with
+      # WAF Under Attack Mode on, which turns every non-browser client away (gotchas.md §16).
+      echo "  Railway's edge, not the gateway: WAF Under Attack Mode blocks API clients."
+      echo "  Waiting or retrying will not help. Check and clear it with:"
+      echo "    railway waf under-attack status  --service acp-gateway --environment production"
+      echo "    railway waf under-attack disable --service acp-gateway --environment production"
     else
       printf '  %s\n' "$3"
     fi
   } >&2
 }
 
-# gp_acp_context — the live board snapshot for the active project.
 gp_acp_context() {
   gp_require_target
   gp_gateway_get "/internal/project-context?owner=$(gp_uri "$OWNER")&project=$(gp_uri "$PROJECT")"
 }
 
-# gp_target_hint — when no board is selected, ask the gateway what it can see
-# rather than leaving the caller to guess an owner or a number. Best effort.
+# gp_target_hint — when no board was selected, ask the gateway what it can see
+# rather than leaving the agent to guess an owner or a number. Best effort: it
+# stays silent when the gateway is unset, unreachable, or jq is missing.
 gp_target_hint() {
   gp_acp_enabled && [ -n "${ACP_GATEWAY_TOKEN:-}" ] && command -v jq >/dev/null 2>&1 || return 0
   if [ -n "${OWNER:-}" ]; then
@@ -145,6 +156,18 @@ gp_target_hint() {
       "  owners this gateway can read:", (.installations[]? | "    --owner \(.login)")' >&2
   fi
   return 0
+}
+
+# gp_require_native_allowed — refuse a direct GitHub *read* of the board while a
+# gateway is configured; that is the whole reason the gateway exists. It does
+# not cover writes: the gateway is pull-only by design, so claim/set-field/
+# add-item/new-item legitimately use the operator's own gh credentials.
+gp_require_native_allowed() {
+  if gp_acp_enabled && [ "${ACP_ALLOW_NATIVE_GITHUB:-0}" != 1 ]; then
+    echo "error: ACP_GATEWAY_URL is set; this board read must go through the gateway" >&2
+    echo "       refusing direct GitHub/GraphQL access. Set ACP_ALLOW_NATIVE_GITHUB=1 only for an explicit emergency fallback." >&2
+    return 78
+  fi
 }
 
 # gp_config_get <key> — read one value (owner|number|title) from the config file.
@@ -167,6 +190,41 @@ gp_require_target() {
     gp_target_hint
     exit 2
   fi
+  if [ -n "$GP_ALLOWED_PROJECTS" ]; then
+    case " $GP_ALLOWED_PROJECTS " in
+      *" $PROJECT "*) ;;
+      *) echo "error: Project #$PROJECT is not in this repository's GP_ALLOWED_PROJECTS ($GP_ALLOWED_PROJECTS); selecting another board requires a tracked governance issue" >&2; exit 2;;
+    esac
+  fi
+}
+
+# gp_require_graphql_budget — prevent an agent loop from consuming the shared
+# org GraphQL budget. `gh project` and ProjectsV2 field operations use GraphQL
+# internally even when the CLI command is REST-shaped.
+gp_require_graphql_budget() {
+  command -v gh >/dev/null 2>&1 || { echo "error: gh is required" >&2; exit 1; }
+  local rate_response rate_json reset_utc remaining
+  # Beside this file, wherever the skill is installed (vendored or global).
+  if ! rate_json="$("$(dirname "${BASH_SOURCE[0]}")/rate-limit.sh" 2>&1)"; then
+    rate_response="$rate_json"
+    case "$rate_response" in
+      *"Bad credentials"*|*"HTTP 401"*)
+        echo "error: GitHub token rejected; verify GITHUB_TOKEN/GH_TOKEN precedence and credentials before project operations" >&2
+        ;;
+      *)
+        echo "error: unable to read GitHub GraphQL rate limit; do not retry project operations blindly" >&2
+        ;;
+    esac
+    exit 78
+  fi
+  remaining="$(printf '%s' "$rate_json" | jq -r '.graphql.remaining // empty')"
+  reset_utc="$(printf '%s' "$rate_json" | jq -r '.reset_utc // empty')"
+  case "$remaining" in ''|*[!0-9]*) echo "error: unable to read GitHub GraphQL rate limit; do not retry project operations blindly" >&2; exit 78;; esac
+  if [ "$remaining" -lt "$GP_GRAPHQL_MIN_REMAINING" ]; then
+    echo "error: GitHub GraphQL budget is $remaining (minimum $GP_GRAPHQL_MIN_REMAINING); reset $reset_utc; stop project mutations and escalate one management issue" >&2
+    exit 78
+  fi
+  export GP_GRAPHQL_REMAINING="$remaining"
 }
 
 # ── Local board snapshot (the coordinator's cached model of the board) ──────────

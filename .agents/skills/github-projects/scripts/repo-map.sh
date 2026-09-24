@@ -51,13 +51,26 @@ generate() {
 resolve() {
   local hint="$1" cand row best=""
   [ -f "$MAP" ] || generate >/dev/null 2>&1
-  # 1) an explicit path inside the hint
+  # 1) Repository-declared aliases. A board's Component/Repos vocabulary is the
+  # repository's own law, so it lives in the repository, not in this engine:
+  #   <git-root>/.agents/component-aliases.tsv    hint <TAB> map key   (# comments)
+  # Matching is case-insensitive on the whole hint.
+  local aliases="${GP_COMPONENT_ALIASES:-$ROOT/.agents/component-aliases.tsv}" canonical=""
+  if [ -f "$aliases" ]; then
+    canonical="$(awk -F"$TAB" -v h="$(printf '%s' "$hint" | tr '[:upper:]' '[:lower:]')" \
+      '!/^#/ && NF>=2 && tolower($1)==h {print $2; exit}' "$aliases")"
+  fi
+  if [ -n "$canonical" ]; then
+    row="$(awk -F"$TAB" -v k="$canonical" '$1==k{print;exit}' "$MAP" 2>/dev/null)"
+    [ -n "$row" ] && { printf '%s' "$row" | cut -f2-4; return 0; }
+  fi
+  # 2) an explicit path inside the hint
   for cand in $(printf '%s' "$hint" | tr ',()' '   '); do
     [ -n "$cand" ] && [ -d "$ROOT/$cand" ] || continue
     rp="$(git -C "$ROOT/$cand" rev-parse --show-toplevel 2>/dev/null)"
     [ -n "$rp" ] && { printf '%s\t%s\t%s\n' "$rp" "$(owner_name "$rp")" ""; return 0; }
   done
-  # 2) token match; prefer a key whose row carries a crate (more specific)
+  # 3) token match; prefer a key whose row carries a crate (more specific)
   for cand in $(printf '%s' "$hint" | tr ',()/ ' '\n' | grep -v '^$' | sort -u); do
     row="$(awk -F"$TAB" -v k="$cand" '$1==k{print;exit}' "$MAP" 2>/dev/null)"
     [ -n "$row" ] || continue

@@ -62,7 +62,8 @@ apply_one() {
   local base=(gh project item-edit --id "$ITEM" --project-id "$PROJECT_ID" --field-id "$id")
   # apply_one is always called under `|| rc=1`, which switches `set -e` off for
   # the whole call -- so a failed item-edit used to fall through to the snapshot
-  # patch and the "set ..." line, reporting a write that never landed.
+  # patch and the "set ..." line, reporting a write that never landed and
+  # leaving the local snapshot claiming a value the board does not have.
   local edit=0
   case "$dtype" in
     TEXT)   "${base[@]}" --text "$value" >/dev/null || edit=$? ;;

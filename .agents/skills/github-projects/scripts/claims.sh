@@ -49,6 +49,7 @@ fi
 # Item-list keys fields by lowercased name, so the configured Agent/Status fields are
 # `.<agent-name-lowercased>` / `.<status-name-lowercased>`. Pipe to EXTERNAL jq (gh's
 # embedded jq doesn't expose env) and bind those keys from the board vocabulary.
+gp_require_native_allowed
 gh project item-list "$PROJECT" --owner "$OWNER" --limit "$LIMIT" --format json \
 | jq -r '
   (env.GP_FIELD_AGENT  | ascii_downcase) as $ak |
