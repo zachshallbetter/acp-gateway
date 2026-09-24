@@ -1360,6 +1360,11 @@ EVENT_SEVERITY = {
     "NOTICE_MODIFIED": "HIGH",
     "NOTICE_REMOVED": "CRITICAL", "CONTROL_ARTIFACT_REMOVED": "CRITICAL",
     "BOOTSTRAP_MISSING": "CRITICAL",
+    # checkpoints a bound project reports as a matter of course
+    "SESSION_STARTED": "INFO", "SESSION_RESUMED": "INFO", "PROTECTED_EFFECT_PENDING": "INFO",
+    "REMOTE_CHANGED": "NOTICE", "BRANCH_PROTECTION_CHANGED": "NOTICE",
+    "POLICY_DIGEST_CHANGED": "NOTICE", "NOTICE_DIGEST_CHANGED": "NOTICE",
+    "CREDENTIALS_ROTATED": "NOTICE",
 }
 SEVERITIES = ("INFO", "NOTICE", "WARNING", "HIGH", "CRITICAL")
 SEVERITY_RANK = {name: index for index, name in enumerate(SEVERITIES)}
@@ -1372,6 +1377,18 @@ REPORTABLE_EVENTS = frozenset({
     "FORGED_AUTHORIZATION_ATTEMPT", "CREDENTIAL_EXTRACTION_ATTEMPT", "AUDIT_SUPPRESSION_ATTEMPT",
     "IDENTITY_MISMATCH", "PROVIDER_ACCESS_LOST", "REPOSITORY_MISMATCH", "REMOTE_MISMATCH",
     "NOTICE_MISMATCH"})
+
+# The routine side of reporting: where a session is, and what it saw change in
+# the control plane. A project bound through formal-project-bootstrap reports
+# these at session start/resume and before every protected effect. They are
+# INFO/NOTICE, so they never open an incident and never move authority -- an
+# observed legitimate change is not tampering, and saying "I am about to push"
+# is not permission to push.
+CHECKPOINT_EVENTS = frozenset({"SESSION_STARTED", "SESSION_RESUMED", "PROTECTED_EFFECT_PENDING"})
+CONTROL_PLANE_CHANGE_EVENTS = frozenset({"REMOTE_CHANGED", "BRANCH_PROTECTION_CHANGED",
+                                         "POLICY_DIGEST_CHANGED", "NOTICE_DIGEST_CHANGED",
+                                         "CREDENTIALS_ROTATED"})
+REPORTABLE_EVENTS = REPORTABLE_EVENTS | CHECKPOINT_EVENTS | CONTROL_PLANE_CHANGE_EVENTS
 
 # Reported tampering with the control plane. While a resource is already
 # contained, a repeat of this is the escalation §12 describes.
@@ -2807,7 +2824,7 @@ REPORT_PRINCIPAL_FIELDS = {"actor_id", "agent_id", "session_id", "client_type", 
                            "reported_github_login", "reported_github_user_id"}
 REPORT_RESOURCE_FIELDS = {"resource_id", "owner", "name", "remote_url", "ref"}
 REPORT_EVIDENCE_FIELDS = {"path", "previous_sha256", "current_sha256", "expected_sha256", "detail",
-                          "command_redacted", "observed_agent_id", "count"}
+                          "command_redacted", "observed_agent_id", "count", "action", "checkpoint"}
 
 
 def report_event(body, now=None):
@@ -2834,6 +2851,14 @@ def report_event(body, now=None):
     principal = _strict_object(body.get("principal"), REPORT_PRINCIPAL_FIELDS, "principal")
     resource = _strict_object(body.get("resource"), REPORT_RESOURCE_FIELDS, "resource")
     evidence = _strict_object(body.get("evidence"), REPORT_EVIDENCE_FIELDS, "evidence")
+    if evidence.get("action") is not None and not ACTION_RE.match(evidence["action"]):
+        raise TargetError(400, "INVALID_REQUEST", "`evidence.action` is not a valid action name.",
+                          remedy="Name the pending effect the way /internal/authorize would, "
+                                 "e.g. git.protected_ref.update.", field="evidence.action")
+    if evidence.get("checkpoint") is not None and evidence["checkpoint"] not in CHECKPOINTS:
+        raise TargetError(400, "INVALID_REQUEST", "`evidence.checkpoint` is not a known checkpoint.",
+                          remedy="Use one of: " + ", ".join(CHECKPOINTS), field="evidence.checkpoint",
+                          checkpoints=list(CHECKPOINTS))
     owner, name = resource.get("owner"), resource.get("name")
     if not (owner and name) and resource.get("resource_id") and "/" in resource["resource_id"]:
         owner, _, name = resource["resource_id"].partition("/")
@@ -2883,8 +2908,10 @@ def report_event(body, now=None):
                        {"QUARANTINED": "QUARANTINE", "LOCKED": "LOCKED",
                         "RECOVERY_AUTHORIZED": "RECOVERY_AUTHORIZED",
                         "VERIFY_RECOVERY": "VERIFY_RECOVERY"}.get(state, "ALLOW")))
+    kind = ("checkpoint" if event_type in CHECKPOINT_EVENTS else
+            "control_plane_change" if event_type in CONTROL_PLANE_CHANGE_EVENTS else "anomaly")
     return {"accepted": True, "event_id": record["event_id"], "severity": record["severity"],
-            "incident_id": incident_id, "authorization_state": state,
+            "incident_id": incident_id, "authorization_state": state, "kind": kind,
             "authorizes": False,
             "note": "Telemetry recorded. A report never authorizes an operation; use "
                     "POST /internal/authorize for a decision."}
