@@ -56,6 +56,17 @@ blame() { printf '%s\t%s\n' "$(date -u +%FT%TZ)" "$2" >> "$LOGDIR/$1.log"; echo 
 # robust: pull the last well-formed JSON object out of a worker's (maybe fenced) output.
 last_json() { grep -oE '\{.*\}' | while IFS= read -r l; do printf '%s' "$l" | jq -ce . 2>/dev/null; done | tail -1; }
 jget() { jq -r "$1 // \"\"" 2>/dev/null; }
+corpus_preflight() {
+  local full index versioned_full versioned_index
+  full="$PDIR/.agents/llms-full-iv.txt"; index="$PDIR/.agents/llms-iv.txt"
+  versioned_full="$(find "$PDIR/.agents" -maxdepth 1 -type f -name 'llms-full-v*-iv.txt' | sort | tail -1)"
+  versioned_index="$(find "$PDIR/.agents" -maxdepth 1 -type f -name 'llms-v*-iv.txt' | sort | tail -1)"
+  [ -s "$full" ] && [ -s "$index" ] && [ -n "$versioned_full" ] && [ -n "$versioned_index" ] \
+    || { echo "coordinator: STOP — versioned llms corpus is missing; run python3 scripts/gen-llms.py" >&2; return 1; }
+  cmp -s "$full" "$versioned_full" && cmp -s "$index" "$versioned_index" \
+    || { echo "coordinator: STOP — unversioned and versioned llms corpus differ; regenerate before dispatch" >&2; return 1; }
+  printf '%s\t%s\n' "$(basename "$versioned_full")" "$(sha256sum "$versioned_full" 2>/dev/null || shasum -a 256 "$versioned_full" | cut -d' ' -f1)"
+}
 # True only if the repo's base branch has REQUIRED status checks, so "auto-merge on
 # green" actually gates on CI. Without this, `gh pr merge --auto` would merge a PR with
 # no checks immediately — so we withhold auto-merge where green isn't enforced.
@@ -70,12 +81,19 @@ echo "coordinator: project=$OWNER #$PROJECT  dir=$PDIR  queue=$QUEUE  apply=$APP
 echo "refreshing snapshot…"; "$SCRIPT_DIR/snapshot.sh" --owner "$OWNER" --project "$PROJECT" >/dev/null 2>&1
 
 process_item() {
-  local ID="$1" TITLE="$2" REC GATE REPOS CLAIMED BRANCH WT checkcmd ticket rp on cr res
+  local ID="$1" TITLE="$2" REC GATE COMPONENT CLAIMED BRANCH WT checkcmd ticket rp on cr res NUMBER ISSUE_REPO ISSUE_PACKET CORPUS PR_BODY ADMISSION
   REC="$("$SCRIPT_DIR/snapshot.sh" get "$ID" 2>/dev/null)"
   [ "$(printf '%s' "$REC" | jq -r '.isArchived // false')" != true ] || { echo "  SKIP: archived item"; return 0; }
   GATE="$(printf '%s' "$REC" | jget '.fields[env.GP_FIELD_GATE]')"
   REPOS="$(printf '%s' "$REC" | jget '.fields[env.GP_FIELD_REPOS]')"
   CLAIMED="$(printf '%s' "$REC" | jget '.fields[env.GP_FIELD_AGENT]')"
+  NUMBER="$(printf '%s' "$REC" | jget '.number')"
+  ISSUE_REPO="$(printf '%s' "$REC" | jget '.repository')"
+  ISSUE_PACKET=""
+  if [ -n "$NUMBER" ] && [ -n "$OWNER" ]; then
+    ISSUE_PACKET="$(gh issue view "$NUMBER" --repo "$ISSUE_REPO" --json body,comments,labels,milestone,assignees 2>/dev/null | jq -c '{body,comments:[.comments[-5:][]?|{author:.author.login,body}],labels:[.labels[].name],milestone:.milestone.title,assignees:[.assignees[].login]}')"
+  fi
+  CORPUS="$(corpus_preflight 2>/dev/null || true)"
   rp="$REPO_PATH"; on="$REPO"; cr="$CRATE"
   echo; echo "▸ $ID  $TITLE"
 
@@ -95,14 +113,34 @@ process_item() {
     res="$("$SCRIPT_DIR/repo-map.sh" resolve "$REPOS" 2>/dev/null)"
     [ -n "$res" ] && { [ -z "$rp" ] && rp="$(printf '%s' "$res" | cut -f1)"; [ -z "$on" ] && on="$(printf '%s' "$res" | cut -f2)"; [ -z "$cr" ] && cr="$(printf '%s' "$res" | cut -f3)"; }
   fi
+  if [ -z "$ISSUE_PACKET" ] || ! printf '%s' "$ISSUE_PACKET" | jq -e '.body | test("## (Authorized paths|Exclusions|Acceptance criteria|Evidence requirements|Definition of done)"; "i")' >/dev/null 2>&1; then
+    echo "  STOP: issue packet lacks required scope, acceptance, evidence, or completion sections"; return 0
+  fi
   if [ -z "$on" ] || [ -z "$rp" ]; then
     echo "  SKIP: couldn't resolve a repo from Repos='${REPOS:-—}' (multi-repo or unmapped)"; return 0; fi
+
+  if [ -z "$NUMBER" ]; then echo "  STOP: issue number missing from board snapshot"; return 0; fi
+  if [ ! -d "$rp/.git" ] && [ ! -f "$rp/.git" ]; then echo "  STOP: target is not a git repository: $rp"; return 0; fi
+  repo_remote="$(git -C "$rp" remote get-url origin 2>/dev/null || true)"
+  case "$repo_remote" in
+    *github.com/$on.git|*github.com:$on.git) ;;
+    *) echo "  STOP: repository mismatch; expected $on, found '$repo_remote'"; return 0;;
+  esac
+  BRANCH="coord/${NUMBER}-$(slug "$TITLE")"
+  if [ -x "$PDIR/scripts/coordinator-admission.sh" ]; then
+    if ! ADMISSION="$("$PDIR/scripts/coordinator-admission.sh" --owner "$OWNER" --project "$PROJECT" --issue "$NUMBER" --item "$ID" --branch "$BRANCH" --developer "$AGENT_ID" 2>&1)"; then
+      echo "  STOP: coordinator admission — $ADMISSION"; return 0
+    fi
+    echo "  admission: $ADMISSION"
+  else
+    echo "  STOP: coordinator admission script is missing: $PDIR/scripts/coordinator-admission.sh"; return 0
+  fi
 
   if [ "$APPLY" -ne 1 ]; then
     echo "  WOULD: claim → worktree in $on → resolver → verify → $([ "$MERGE" = 1 ] && echo 'auto-merge if CI-gated' || echo 'PR only')"; return 0; fi
   echo "  repo: $on  ($rp)${cr:+  crate=$cr}"
 
-  BRANCH="coord/$(slug "$TITLE")"; WT="$rp/.wt/coord-$(slug "$TITLE")"
+  WT="$rp/.wt/issue-${NUMBER}-$(slug "$TITLE")"
   "$SCRIPT_DIR/claim.sh" --owner "$OWNER" --project "$PROJECT" --item "$ID" --agent "$AGENT_ID" --verify-delay 0 >/dev/null 2>&1 \
     || { echo "  could not claim — skipping"; return 0; }
 
@@ -118,6 +156,12 @@ Board item: $TITLE
 Gate / acceptance: ${GATE:-<infer from the title>}
 ${NOTE}
 
+Canonical issue packet (re-read the issue, parent epic, and blocked-by items before editing):
+${ISSUE_PACKET:-<issue packet unavailable; stop if acceptance or dependencies are unclear>}
+
+Versioning/corpus contract: this ecosystem uses independent SemVer + build definitions.
+Read docs/VERSIONING.md and the current corpus ${CORPUS%%$'\t'*} (SHA ${CORPUS#*$'\t'}) before changing versioned artifacts. Never use an older llms corpus or infer compatibility from matching version numbers. Run the documented corpus/gate command when source context changes.
+
 1. Make the smallest change that satisfies the gate. Match style; no version bumps.
 2. Prove it compiles: run \`$checkcmd\` in the worktree. If that regenerated Cargo.lock and you did not intend a dependency change, restore it (git checkout -- Cargo.lock).
 3. Commit to branch $BRANCH (end the message with a Co-Authored-By: Claude trailer). Do NOT push and do NOT open a PR — the coordinator does that.
@@ -125,7 +169,7 @@ If blocked or ambiguous, STOP and report."
 
   local SESSION="" FEEDBACK="" ok=0 PR="" attempt OUT V rv VOUT vv
   for attempt in $(seq 1 "$MAXR"); do
-    echo "  resolver attempt $attempt…"
+    echo "  resolver attempt ${attempt}…"
     if [ -z "$SESSION" ]; then
       OUT="$("$SCRIPT_DIR/spawn.sh" --role resolver --model "$MODEL" --dir "$WT" --ticket "$ticket" 2>/dev/null)"
     else
@@ -154,7 +198,8 @@ If blocked or ambiguous, STOP and report."
     PR="" pr_err=""
     for try in 1 2 3 4; do
       PR="$(gh pr view "$BRANCH" -R "$on" --json url -q .url 2>/dev/null)"; [ -n "$PR" ] && break
-      PR="$(gh pr create -R "$on" --base "$BASE" --head "$BRANCH" --fill 2>/tmp/coord-prerr)"; [ -n "$PR" ] && break
+      PR_BODY="Refs ${ISSUE_REPO:+$ISSUE_REPO}#$NUMBER\n\nCoordinator delivery for issue #$NUMBER. Scope and exclusions are defined by the canonical issue packet.\n\nResolver: $BRANCH\nChecks: $checkcmd"
+      PR="$(gh pr create -R "$on" --base "$BASE" --head "$BRANCH" --fill --body "$PR_BODY" 2>/tmp/coord-prerr)"; [ -n "$PR" ] && break
       pr_err="$(tail -1 /tmp/coord-prerr 2>/dev/null)"; sleep 3
     done
     [ -n "$PR" ] || blame "$ID" "pr-create failed after retries: ${pr_err:-unknown}"

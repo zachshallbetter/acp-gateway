@@ -140,3 +140,23 @@ If a board's items are all **draft issues**, you'll see empty `Created`/`Updated
 "Repos" field), no assignees/labels, and no link from code. That's not a bug — it's
 the cost of drafts. Make actionable items **real issues** instead; the built-ins then
 fill themselves. See `references/conventions.md`.
+
+## 16. A bare `429 rate limited` from the gateway is Railway's WAF, not a rate limit
+
+The ACP gateway never answers 429 and every refusal it does send is JSON with `error`,
+`detail` and `remedy`. A 12-byte `text/plain` body of `rate limited`, with `server: railway-hikari`
+and an `x-hikari-trace` header but **no** `x-railway-request-id`, is Railway's edge answering
+before the request reaches the service. The cause on 2026-09-06 to 2026-09-11 was Railway's WAF
+**Under Attack Mode** left on with no expiry on the `acp-gateway` production service: browsers get
+a Turnstile check, every API client gets that 429, and the service's HTTP metrics show zero
+requests. Retrying and waiting for a "window" do nothing; `lib.sh` now says so.
+
+```bash
+railway waf under-attack status  --service acp-gateway --project a3dbbfc5-3fe7-4365-a754-9a7856766f05 --environment production
+railway waf under-attack disable --service acp-gateway --project a3dbbfc5-3fe7-4365-a754-9a7856766f05 --environment production
+```
+
+The mode is per service and takes ~20 s to propagate. A domain that serves only an API cannot
+use it at all (Railway's WAF docs say so); an edge rule scoped by client IP is the defence that
+keeps the token clients working.
+

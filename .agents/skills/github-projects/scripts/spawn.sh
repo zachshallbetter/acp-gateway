@@ -62,7 +62,7 @@ if [ "$DRY" -eq 1 ]; then printf 'WOULD RUN: '; printf '%q ' "${cmd[@]}"; echo; 
 OUT="${OUT:-$(mktemp -t spawn)}"
 # Run in the worktree if given, so relative paths resolve there.
 ( [ -n "$DIR" ] && cd "$DIR"; "${cmd[@]}" ) > "$OUT" 2>"$OUT.err" || true
-res="$(jq -c '.[-1] // {}' "$OUT" 2>/dev/null || echo '{}')"
+res="$(jq -c 'if type == "array" then (.[-1] // {}) else . end' "$OUT" 2>/dev/null || echo '{}')"
 if [ -z "$res" ] || [ "$res" = "{}" ]; then
   echo "spawn produced no result (role=$ROLE). stderr:" >&2; head -3 "$OUT.err" >&2; exit 1
 fi
