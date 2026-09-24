@@ -51,7 +51,11 @@ scripts exist to erase it.
 > **ProjectsV2 is GraphQL-only. There is no REST API.** The REST `/…/projects`
 > endpoints are *classic* Projects (deprecated) and return 404/410 here. Use
 > `gh project …` for common work and `gh api graphql` for the rest — never
-> `gh api /orgs/.../projects`.
+> `gh api /orgs/.../projects`. Prefer the bundled scripts over ad-hoc queries,
+> and never retry a query in a loop: the GraphQL budget is shared across every
+> agent on the account, and `snapshot.sh` stops (exit `78`) once fewer than
+> `GP_GRAPHQL_MIN_REMAINING` points (default 500) remain — see
+> `scripts/rate-limit.sh`, which caches the probe for 30 s.
 
 ## Preflight (do this first)
 
@@ -89,6 +93,10 @@ than retrying or reaching for `ACP_ALLOW_NATIVE_GITHUB=1`:
 | `OWNER_NOT_INSTALLED` | the App is not installed on that account; the body carries the install URL |
 | `PROJECTS_PERMISSION_MISSING` | the installation exists but holds no owner-level Projects permission |
 | `APP_NOT_CONFIGURED` / `UPSTREAM_FAILURE` | gateway-side; check its `/internal/app-probe` |
+| bare `429 rate limited` (not JSON) | Railway's edge, not the gateway: WAF Under Attack Mode is on. Waiting won't help — `references/gotchas.md` §16 |
+
+While a gateway is configured, direct GitHub board *reads* are refused
+(`gp_require_native_allowed`); writes still use your own `gh` credentials.
 
 With no board selected, the "no project selected" error also lists the owners
 the gateway can read — or, when an owner is known, that owner's boards and
@@ -239,8 +247,11 @@ Every script in `scripts/` — each has a usage header at the top of the file, a
 | `spawn.sh` | Spawn a cheap headless `claude -p` worker for one ticket (`--role`, `--resume` for rework) |
 | `coordinator.sh` | Autonomous loop: pick → claim → worktree → resolve → verify → PR → CI-gated auto-merge → blame/retry |
 | `protect.sh` | Enable a required CI check on a repo branch (opt a repo into safe auto-merge) |
+| `rate-limit.sh` | Cached GraphQL budget probe (quota metadata only) behind the budget guard |
+| `webhook_receiver.py` | Signed GitHub webhook receiver that spools deliveries for a local coordinator (`github_app.py` mints its installation tokens) |
+| `coordinator-bridge.sh` | Pulls one verified delivery from that receiver and runs one bounded `coordinator.sh` cycle (`--no-merge`) |
 
-Worker role prompts live in `assets/roles/{resolver,verifier,triager}.md`.
+Worker role prompts live in `assets/roles/{resolver,verifier,triager,triage-agent,pr-merge-analyzer}.md`.
 
 ## Files this skill creates
 
@@ -269,6 +280,18 @@ GP_FIELD_BAND=Phase
 Only `GH_PROJECT_OWNER`, `GH_PROJECT_NUMBER` and `GP_*` keys are honoured, the
 file is parsed rather than sourced (a repo file must not run code), and an
 exported environment variable always wins over it.
+
+Two optional guards belong here too. `GP_ALLOWED_PROJECTS="38"` (space-separated)
+refuses any other board from inside this repository, so selecting a different
+board becomes a governance decision rather than a typo. And when a board's
+`Component`/`Repos` values are portfolio names rather than repository names,
+`<git-root>/.agents/component-aliases.tsv` (`hint<TAB>repo-map key`, `#` comments,
+case-insensitive) tells `repo-map.sh` which repository each one means.
+
+A repository may also carry its own `SKILL.md` overlay — an execution profile with
+its board rules — next to this engine. Where the two disagree, the overlay wins
+for structure and vocabulary; the scripts here are shared and never edited per
+repository.
 
 ## Using it on another board
 

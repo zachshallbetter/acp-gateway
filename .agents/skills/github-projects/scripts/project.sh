@@ -40,12 +40,14 @@ case "$cmd" in
     fi
     ;;
   list)
-    owner="${1:-$(gp_config_get owner)}"; owner="${owner:-@me}"
-    active_owner="$(gp_config_get owner)"; star=""
-    [ "$owner" = "$active_owner" ] && star="$(gp_config_get number)"
+    # Same precedence as every other script: argument, then this repository's
+    # board binding (.agents/board.env / GH_PROJECT_*), then the machine-wide pick.
+    gp_resolve
+    owner="${1:-${OWNER:-@me}}"; star=""
+    [ "$owner" = "$OWNER" ] && star="$PROJECT"
     echo "projects for $owner  (★ = active):"
-    # Listing boards is a read, so it goes through the gateway when one is set;
-    # it also marks the boards that gateway is not allowed to serve.
+    # A read: serve it from the gateway when one is configured, marking the
+    # boards that gateway is not allowed to serve.
     if gp_acp_enabled; then
       gp_gateway_get "/internal/projects?owner=$(gp_uri "$owner")" \
         | jq -r --arg a "$star" '.projects[] |

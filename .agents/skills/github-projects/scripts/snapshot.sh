@@ -23,17 +23,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v jq >/dev/null || { echo "error: jq not found" >&2; exit 1; }
 
 SUB="generate"; case "${1:-}" in find|id|get) SUB="$1"; shift;; generate) shift;; esac
-OWNER="" PROJECT="" BASE="" QUERY=""
+OWNER="" PROJECT="" BASE="" QUERY="" FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --owner)   OWNER="$2"; shift 2;;
     --project) PROJECT="$2"; shift 2;;
     --out)     BASE="$2"; shift 2;;          # base path; .jsonl/.tsv appended
+    --force)   FORCE=1; shift;;
     -*) echo "error: unknown flag '$1'" >&2; exit 2;;
     *)  QUERY="$1"; shift;;
   esac
 done
 gp_resolve; gp_require_target
+if [ "$SUB" = "generate" ] && ! gp_acp_enabled; then
+  gp_require_graphql_budget
+fi
 [ "$OWNER" = "@me" ] && OWNER="$(gh api user -q .login)"
 [ -n "$BASE" ] && { GH_SNAPSHOT_FILE="$BASE"; }
 JSONL="$(gp_snapshot_jsonl)"; TSV="$(gp_snapshot_tsv)"
@@ -67,9 +71,8 @@ fv_frag='fieldValues(first:50){nodes{ __typename
   ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}}
   ... on ProjectV2ItemFieldIterationValue{title field{... on ProjectV2FieldCommon{name}}} }}'
 
-# Org or user root? probe once.
-# Native path only: the gateway resolves the owner root itself, and that mode
-# must not need gh auth.
+# Org or user root? probe once -- native path only; the gateway resolves the
+# root itself, and this mode must not need gh auth or the GraphQL budget.
 ROOT="organization"
 if ! gp_acp_enabled && [ -z "$(gh api graphql -f query="query{organization(login:\"$OWNER\"){projectV2(number:$PROJECT){id}}}" 2>/dev/null | jq -r '.data.organization.projectV2.id // empty')" ]; then
   ROOT="user"
@@ -78,7 +81,8 @@ fi
 regen() {
   : > "$JSONL.tmp"
   if gp_acp_enabled; then
-    gp_acp_context | jq -c '.snapshot.items.nodes' | jq -c "$JQ_RECORD" > "$JSONL.tmp"
+    context="$(gp_acp_context)"
+    printf '%s\n' "$context" | jq -c '.snapshot.items.nodes' | jq -c "$JQ_RECORD" > "$JSONL.tmp"
     mv "$JSONL.tmp" "$JSONL"
     jq -r '[.id, (.fields[env.GP_FIELD_BAND]//""), (.fields[env.GP_FIELD_STATUS]//""), (.fields[env.GP_FIELD_AGENT]//""), .title] | @tsv' "$JSONL" > "$TSV"
     return 0
@@ -99,7 +103,21 @@ regen() {
 }
 
 if [ "$SUB" = "generate" ]; then
+  STAMP="$JSONL.last_refresh"; MARK="$JSONL.board"; LOCK="$JSONL.refresh.lock"
+  now="$(date +%s)"; min="${GH_SNAPSHOT_MIN_INTERVAL:-60}"; want="$OWNER/$PROJECT"
+  # The age check alone is not enough: one snapshot path serves whatever board
+  # was asked for, so a call naming a *different* board within the interval used
+  # to be answered from the previous board's file -- silently, and reported as a
+  # cache hit. Reuse only when the file holds the board that was requested.
+  if [ "$FORCE" -ne 1 ] && [ -s "$JSONL" ] && [ -r "$STAMP" ] && [ "$(cat "$MARK" 2>/dev/null)" = "$want" ]; then
+    age=$((now - $(cat "$STAMP")))
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$min" ]; then echo "using cached snapshot of $want ($age seconds old)"; exit 0; fi
+  fi
+  if ! mkdir "$LOCK" 2>/dev/null; then echo "snapshot refresh already in progress; refusing a duplicate GraphQL pull" >&2; exit 78; fi
+  trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
   regen
+  printf '%s\n' "$want" > "$MARK"
+  printf '%s\n' "$(date +%s)" > "$STAMP"
   echo "wrote $(grep -c . "$JSONL" 2>/dev/null || echo 0) items → $JSONL (+ .tsv view)"
   exit 0
 fi
