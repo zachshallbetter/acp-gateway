@@ -79,14 +79,14 @@ APP_ENV = {"ACP_GITHUB_APP_ID": "4555426", "ACP_GITHUB_PRIVATE_KEY": "test-key"}
 # ---- 1. any account the App is installed on, discovered not deployed -------
 def test_owner_resolves_to_its_own_installation():
     fresh()
-    listing = [install("Anime-Universe", 152854738), install("zachshallbetter", 999001, "User")]
+    listing = [install("Example-Org", 900001), install("zachshallbetter", 999001, "User")]
     with patch.dict(os.environ, APP_ENV, clear=False), \
          patch("gateway.app_jwt", return_value="jwt"), \
          patch("gateway.urlopen", side_effect=[resp(listing)]):
         os.environ.pop("ACP_GITHUB_INSTALLATIONS", None)
         assert gateway.installation_for("zachshallbetter") == "999001"
         # cached: the org lookup costs no second call
-        assert gateway.installation_for("Anime-Universe") == "152854738"
+        assert gateway.installation_for("Example-Org") == "900001"
 
 
 def test_owner_match_is_case_insensitive():
@@ -100,7 +100,7 @@ def test_owner_match_is_case_insensitive():
 
 def test_pinned_installation_skips_discovery_entirely():
     fresh()
-    with patch.dict(os.environ, {**APP_ENV, "ACP_GITHUB_INSTALLATIONS": "zachshallbetter:42,Anime-Universe:7"}), \
+    with patch.dict(os.environ, {**APP_ENV, "ACP_GITHUB_INSTALLATIONS": "zachshallbetter:42,Example-Org:7"}), \
          patch("gateway.urlopen", side_effect=AssertionError("must not call GitHub")):
         assert gateway.installation_for("ZachShallbetter") == "42"
 
@@ -109,7 +109,7 @@ def test_uninstalled_owner_is_told_how_to_fix_it():
     fresh()
     with patch.dict(os.environ, APP_ENV, clear=False), \
          patch("gateway.app_jwt", return_value="jwt"), \
-         patch("gateway.urlopen", side_effect=[resp([install("Anime-Universe", 152854738)]),
+         patch("gateway.urlopen", side_effect=[resp([install("Example-Org", 900001)]),
                                                resp({"slug": "acp-gateway-app"})]):
         os.environ.pop("ACP_GITHUB_INSTALLATIONS", None)
         try:
@@ -119,26 +119,26 @@ def test_uninstalled_owner_is_told_how_to_fix_it():
         else:
             raise AssertionError("an uninstalled owner must raise")
     assert body["error"] == "OWNER_NOT_INSTALLED" and status == 404
-    assert body["owners_available"] == ["Anime-Universe"], body
+    assert body["owners_available"] == ["Example-Org"], body
     assert "github.com/apps/acp-gateway-app" in body["remedy"], body["remedy"]
 
 
 def test_discovery_failure_falls_back_to_the_single_installation():
     fresh()
-    with patch.dict(os.environ, {**APP_ENV, "ACP_GITHUB_INSTALLATION_ID": "152854738"}), \
+    with patch.dict(os.environ, {**APP_ENV, "ACP_GITHUB_INSTALLATION_ID": "900001"}), \
          patch("gateway.app_jwt", return_value="jwt"), \
          patch("gateway.urlopen", side_effect=OSError("network down")):
         os.environ.pop("ACP_GITHUB_INSTALLATIONS", None)
-        assert gateway.installation_for("Anime-Universe") == "152854738"
+        assert gateway.installation_for("Example-Org") == "900001"
 
 
 # ---- 2. the allowlist can be scoped per owner -----------------------------
 def test_allowlist_admits_every_board_of_one_owner():
-    with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "zachshallbetter:*,Anime-Universe:2-9,11"}):
+    with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "zachshallbetter:*,Example-Org:2-9,11"}):
         assert gateway.project_allowed(38, "zachshallbetter")
-        assert gateway.project_allowed(9, "Anime-Universe") and gateway.project_allowed(11, "anime-universe")
-        assert not gateway.project_allowed(38, "Anime-Universe"), "one owner's rule must not leak to another"
-        assert not gateway.project_allowed(10, "Anime-Universe")
+        assert gateway.project_allowed(9, "Example-Org") and gateway.project_allowed(11, "example-org")
+        assert not gateway.project_allowed(38, "Example-Org"), "one owner's rule must not leak to another"
+        assert not gateway.project_allowed(10, "Example-Org")
 
 
 def test_unqualified_entries_still_apply_to_any_owner():
@@ -161,7 +161,7 @@ def test_missing_owner_says_which_owners_exist():
     fresh()
     with patch.dict(os.environ, APP_ENV, clear=False), \
          patch("gateway.app_jwt", return_value="jwt"), \
-         patch("gateway.urlopen", side_effect=[resp([install("Anime-Universe", 1), install("zachshallbetter", 2, "User")])]):
+         patch("gateway.urlopen", side_effect=[resp([install("Example-Org", 1), install("zachshallbetter", 2, "User")])]):
         try:
             gateway.project_context("", "38")
         except gateway.TargetError as exc:
@@ -169,7 +169,7 @@ def test_missing_owner_says_which_owners_exist():
         else:
             raise AssertionError("a call with no owner must raise")
     assert body["error"] == "OWNER_REQUIRED"
-    assert body["owners_available"] == ["Anime-Universe", "zachshallbetter"], body
+    assert body["owners_available"] == ["Example-Org", "zachshallbetter"], body
 
 
 def test_disallowed_board_names_the_setting_to_change():
@@ -280,22 +280,22 @@ def test_a_personal_token_serves_an_owner_no_app_can_reach():
 
 def test_personal_token_owners_are_listed_by_name_only():
     with patch.dict(os.environ, {"ACP_GITHUB_TOKEN_ZACHSHALLBETTER": "ghp_secret",
-                                 "ACP_GITHUB_TOKEN_ANIME_UNIVERSE": "ghp_other"}):
+                                 "ACP_GITHUB_TOKEN_EXAMPLE_ORG": "ghp_other"}):
         owners = gateway.pat_owners()
-    assert owners == ["anime-universe", "zachshallbetter"], owners
+    assert owners == ["example-org", "zachshallbetter"], owners
     assert "ghp_secret" not in json.dumps(owners)
 
 
 def test_env_name_normalises_the_login():
     assert gateway.owner_env_name("zachshallbetter") == "ACP_GITHUB_TOKEN_ZACHSHALLBETTER"
-    assert gateway.owner_env_name("Anime-Universe") == "ACP_GITHUB_TOKEN_ANIME_UNIVERSE"
+    assert gateway.owner_env_name("Example-Org") == "ACP_GITHUB_TOKEN_EXAMPLE_ORG"
 
 
 def test_an_uninstalled_owner_hears_about_both_routes():
     fresh()
     with patch.dict(os.environ, APP_ENV, clear=False), \
          patch("gateway.app_jwt", return_value="jwt"), \
-         patch("gateway.urlopen", side_effect=[resp([install("Anime-Universe", 1)]), resp({"slug": "acp"})]):
+         patch("gateway.urlopen", side_effect=[resp([install("Example-Org", 1)]), resp({"slug": "acp"})]):
         os.environ.pop("ACP_GITHUB_INSTALLATIONS", None)
         try:
             gateway.installation_for("someone")

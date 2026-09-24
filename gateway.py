@@ -264,7 +264,7 @@ def installation_for(owner):
 
 
 def owner_env_name(owner):
-    """ACP_GITHUB_TOKEN_<OWNER>, with the login normalised (Anime-Universe -> ANIME_UNIVERSE)."""
+    """ACP_GITHUB_TOKEN_<OWNER>, with the login normalised (Example-Org -> EXAMPLE_ORG)."""
     return "ACP_GITHUB_TOKEN_" + re.sub(r"[^A-Za-z0-9]", "_", owner).upper()
 
 
@@ -323,15 +323,15 @@ def allowlist_rules():
 
         2-9,11                      -> those numbers, for any owner
         zachshallbetter:*           -> every board of that user
-        Anime-Universe:2-9,11       -> ...qualification carries across commas
+        Example-Org:2-9,11          -> ...qualification carries across commas
         *                           -> every board of every installed owner
 
     None as a value means "any positive number"; the None key is the bucket for
     unqualified entries, applied to owners with no rule of their own. Default is
-    the historical 2-7 so an existing deployment never silently widens.
+    empty: no board is readable until the deployment says which.
     """
     rules, current = {}, None
-    for part in os.getenv("ACP_PROJECT_ALLOWLIST", "2-7").strip().split(","):
+    for part in os.getenv("ACP_PROJECT_ALLOWLIST", "").strip().split(","):
         part = part.strip()
         if not part:
             continue
@@ -518,7 +518,7 @@ def project_list(owner):
     return {
         "owner": owner, "owner_type": root, "projects": boards, "snapshot_source": credential,
         "count": len(boards), "total": block.get("totalCount"),
-        "allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", "2-7"),
+        "allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", ""),
         "note": "Pass a board's `number` as ?project= to /internal/project-context. `allowed:false` means "
                 "ACP_PROJECT_ALLOWLIST does not admit it yet.",
     }
@@ -544,7 +544,7 @@ def project_context(owner: str, project: str):
                           remedy=f"Add it to ACP_PROJECT_ALLOWLIST on the deployment — '{owner}:{project}' for that "
                                  f"board, '{owner}:*' for every board of that owner, or '*' for all.",
                           owner=owner, project=int(project),
-                          allowlist=os.getenv("ACP_PROJECT_ALLOWLIST", "2-7"))
+                          allowlist=os.getenv("ACP_PROJECT_ALLOWLIST", ""))
 
     # The gate goes here: before a token is minted, so a contained resource never
     # borrows ACP's GitHub credential -- and before any upstream call, so the
@@ -686,7 +686,7 @@ MATERIAL_SIGNALS = CIRCUMVENTION_SIGNALS | CONTROL_PLANE_SIGNALS
 
 MAX_BODY_BYTES = 16 * 1024      # an authorization request is a few hundred bytes
 MAX_FIELD_CHARS = 512
-POLICY_SCOPE_DEFAULT = "Anime-Universe"
+POLICY_SCOPE_DEFAULT = "*"
 
 HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
 POLICY_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -700,9 +700,10 @@ def iso(when):
 def policy_scope():
     """Owners this deployment governs; None means every owner.
 
-    Deliberately narrow by default: this gateway was given policy authority for
-    `Anime-Universe`, and a repository outside that scope gets an explicit
-    `OUT_OF_POLICY_SCOPE` allow rather than a refusal ACP has no standing to make.
+    Every owner by default, so a repository no policy names is refused
+    (POLICY_NOT_FOUND) rather than waved through. Narrow it with
+    ACP_POLICY_SCOPE=owner1,owner2 when ACP should decline jurisdiction outside
+    those owners -- it then answers ALLOW / OUT_OF_POLICY_SCOPE there.
     """
     raw = os.getenv("ACP_POLICY_SCOPE", POLICY_SCOPE_DEFAULT).strip()
     if raw == "*":
@@ -4109,7 +4110,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "pinned_installations": pinned,
                     "personal_token_owners": pat_owners(),
                     "fallback_installation_id": os.getenv("ACP_GITHUB_INSTALLATION_ID"),
-                    "project_allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", "2-7"),
+                    "project_allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", ""),
                     # configured / not configured only -- never a value
                     "policy_signing": bool(os.getenv("ACP_POLICY_SIGNING_KEY")),
                     "admin_credential": bool(os.getenv("ACP_POLICY_ADMIN_TOKEN")),

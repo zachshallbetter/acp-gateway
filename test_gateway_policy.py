@@ -14,7 +14,7 @@ sys.path.insert(0, str(root))
 os.environ.setdefault("ACP_GATEWAY_TOKEN", "test-token")
 import gateway  # noqa: E402
 
-OWNER, REPO = "Anime-Universe", "Infinite-Verse"
+OWNER, REPO = "Example-Org", "Infinite-Verse"
 REMOTE = f"https://github.com/{OWNER}/{REPO}.git"
 NOTICE = hashlib.sha256(b"NOTICE\n").hexdigest()
 SIGNING_KEY = "policy-signing-key-that-is-long-enough"
@@ -160,7 +160,7 @@ def test_oversized_and_unmeasured_requests_are_rejected():
         status, body = served.post(b"x" * 16, length=gateway.MAX_BODY_BYTES + 1)
         assert status == 413 and body["error"] == "REQUEST_TOO_LARGE", body
         assert body["max_bytes"] == gateway.MAX_BODY_BYTES
-        for bad in ({"owner": ["Anime-Universe"]}, {"owner": True}, {"name": 7}):
+        for bad in ({"owner": ["Example-Org"]}, {"owner": True}, {"name": 7}):
             status, body = served.post(request("repository.read", repository_claim=bad))
             assert status == 400 and body["error"] == "INVALID_REQUEST", (bad, body)
         status, body = served.post(request("repository.read", context={"force": "yes"}))
@@ -496,7 +496,7 @@ def test_no_secret_ever_appears_in_a_response():
                "ACP_GITHUB_PRIVATE_KEY": "-----BEGIN RSA PRIVATE KEY-----abcdefghijklmnop",
                "ACP_POLICY_SIGNING_KEY": SIGNING_KEY,
                "ACP_POLICY_ADMIN_TOKEN": "admin-token-long-enough",
-               "ACP_GITHUB_TOKEN_ANIME_UNIVERSE": "ghp_averyrealisticlookingtoken"}
+               "ACP_GITHUB_TOKEN_EXAMPLE_ORG": "ghp_averyrealisticlookingtoken"}
     # nothing in this suite may reach the network; the provider is simply absent
     with env(**secrets), patch("gateway.repo_api", side_effect=OSError("offline")), Served() as served:
         seen = []

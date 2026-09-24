@@ -263,7 +263,7 @@ def test_planted_secrets_never_reach_the_audit_log():
     fresh()
     planted = {"ACP_GATEWAY_TOKEN": "test-token-long-enough-to-scrub",
                "ACP_GITHUB_PRIVATE_KEY": PEM, "ACP_POLICY_SIGNING_KEY": SIGNING_KEY,
-               "ACP_POLICY_ADMIN_TOKEN": ADMIN, "ACP_GITHUB_TOKEN_ANIME_UNIVERSE": PAT}
+               "ACP_POLICY_ADMIN_TOKEN": ADMIN, "ACP_GITHUB_TOKEN_EXAMPLE_ORG": PAT}
     with contained_env(**planted):
         gateway.authorize(envelope("git.remote.update", operation={
             "command_redacted": f"git push https://{PAT}@github.com/x/y && "
@@ -464,11 +464,11 @@ def test_an_unrelated_resource_gets_its_own_incident():
     with contained_env():
         lock()
         gateway.report_event(report(event_type="CREDENTIAL_EXTRACTION_ATTEMPT",
-                                    resource={"resource_id": "anime-universe/other", "owner": OWNER,
+                                    resource={"resource_id": "example-org/other", "owner": OWNER,
                                               "name": "Other"}))
         found = incidents()
     assert len({entry["incident_id"] for entry in found}) == 2, found
-    assert {entry["resource_id"] for entry in found} == {RESOURCE, "anime-universe/other"}
+    assert {entry["resource_id"] for entry in found} == {RESOURCE, "example-org/other"}
 
 
 def test_reported_tampering_while_quarantined_escalates_but_never_grants():
