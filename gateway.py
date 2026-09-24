@@ -189,6 +189,8 @@ def installations(refresh=False):
     personal account you install the App there, and the next request (or the
     next cache expiry) picks it up.
     """
+    if refresh:
+        _APP["value"] = None          # a rename changes the slug, and with it the install URL
     now = time.time()
     if _INSTALLATIONS["value"] is not None and not refresh and now - _INSTALLATIONS["fetched_at"] < INSTALLATION_TTL:
         return _INSTALLATIONS["value"]
