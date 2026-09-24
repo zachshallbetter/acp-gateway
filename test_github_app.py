@@ -30,7 +30,7 @@ def test_the_app_is_read_only_and_listens_to_nothing():
 
 
 def test_the_manifest_names_the_app_and_says_what_it_does():
-    assert MANIFEST["name"] == "Agent Control Plane"
+    assert MANIFEST["name"] == "ACP Agent Control Plane"
     assert len(MANIFEST["name"]) <= 34, "GitHub App names are limited to 34 characters"
     assert "read" in MANIFEST["description"].lower() and len(MANIFEST["description"]) < 1000
 
