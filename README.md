@@ -529,7 +529,20 @@ POST /internal/authorize  -> a decision      (controls whether an operation may 
 POST /internal/report     -> an acknowledgement (contributes evidence; authorizes nothing)
 ```
 
-Both sit behind the same `ACP_GATEWAY_TOKEN`. Telemetry is evidence, never
+Both sit behind the same `ACP_GATEWAY_TOKEN`.
+
+`report` accepts three kinds of typed event, returned as `kind`:
+
+| Kind | Events | Severity |
+| --- | --- | --- |
+| `checkpoint` | `SESSION_STARTED`, `SESSION_RESUMED`, `PROTECTED_EFFECT_PENDING` | INFO |
+| `control_plane_change` | `REMOTE_CHANGED`, `BRANCH_PROTECTION_CHANGED`, `POLICY_DIGEST_CHANGED`, `NOTICE_DIGEST_CHANGED`, `CREDENTIALS_ROTATED` | NOTICE |
+| `anomaly` | `LOCAL_POLICY_MODIFIED`, `REMOTE_MISMATCH`, `ALTERNATE_AGENT_OBSERVED`, `CREDENTIAL_EXTRACTION_ATTEMPT`, … | graded by ACP |
+
+Checkpoints and control-plane changes are what a well-behaved client says as a
+matter of course; they never open an incident and never move state.
+`evidence.checkpoint` (one of the integrity checkpoints) and `evidence.action`
+(the pending protected action) are validated when present. Telemetry is evidence, never
 authority: no volume of reporting unlocks a resource, and a client cannot report
 a decision or a state transition into existence — `report` accepts observations
 only. The one state change it can cause moves *downward*: reported tampering
@@ -1173,6 +1186,7 @@ python3 test_gateway_lockout.py
 python3 test_gateway_telemetry.py
 python3 test_gateway_integrity.py
 python3 test_gateway_board_gate.py
+python3 test_register_policy.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials
@@ -1222,8 +1236,8 @@ verbatim — it is written to be actionable.
 
 ## Onboarding a new project
 
-`scripts/onboard-project.sh <repo> [--owner O --project N]` wires a repository
-to this gateway and then proves the wiring works. It is idempotent — re-running
+`scripts/onboard-project.sh <repo> [--owner O --project N] [--govern [--apply]]`
+wires a repository to this gateway and then proves the wiring works. It is idempotent — re-running
 it reports what is already in place and changes nothing.
 
 ```sh
@@ -1249,6 +1263,37 @@ Then it verifies, because configuration is not proof: `/health`, an
 authenticated read of the owner's boards, and — if a board was named — that the
 gateway reports it as `allowed=true`. A refusal is printed with the gateway's
 own `error`/`detail`/`remedy`, not as an exit code.
+
+### Governing the repository, not just wiring it
+
+Wiring proves the gateway answers. It does not make the gateway *govern* the
+repository: that takes a policy naming it. Without one, a protected action is
+refused with `POLICY_NOT_FOUND` inside `ACP_POLICY_SCOPE`, and answered
+`ALLOW` / `OUT_OF_POLICY_SCOPE` (`policy_effect: NOT_GOVERNED`) outside it.
+
+```sh
+scripts/onboard-project.sh ../my-project --govern            # show the policy it would register
+scripts/onboard-project.sh ../my-project --govern --apply    # register it (redeploys the gateway)
+scripts/register-policy.py --owner O --name N --board O:3    # the same, directly
+```
+
+`scripts/register-policy.py` reads the deployment's `ACP_POLICY`, replaces any
+policy for the same repository at the next version (keeping boards, notice,
+artifact manifest and recovery grants it was not told to change), signs it when
+the deployment holds `ACP_POLICY_SIGNING_KEY` (`--sign-all` when a key is first
+introduced, since a keyed deployment refuses unsigned policy), validates the
+whole registry with this gateway's own loader, and prints the summary. Nothing
+is written without `--apply`. `--local FILE` edits a file instead of Railway.
+
+### formal-project-bootstrap projects
+
+A project initialized from formal-project-bootstrap ≥ 0.5.3 carries
+`scripts/acp.py` (the client) and `scripts/acp-check.py`. `onboard-project.sh`
+detects one by its `PROJECT_PROFILE.json`, runs its `acp-check.py` after the
+gateway checks, and with `--govern` registers the candidate policy the project
+emits (`acp.py policy`: repository, bound board, and an artifact manifest of the
+project's control files). The project's side of the contract lives in its own
+`docs/ACP_INTEGRATION.md`.
 
 ### Two failure modes it exists to prevent
 
