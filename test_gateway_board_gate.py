@@ -284,7 +284,7 @@ def test_the_notice_lookup_reports_containment_to_anyone():
 
 def test_the_notice_lookup_grants_nothing_and_leaks_nothing():
     fresh()
-    with governed_env(ACP_GITHUB_TOKEN_ANIME_UNIVERSE="ghp_averyrealisticlookingtoken"), \
+    with governed_env(ACP_GITHUB_TOKEN_EXAMPLE_ORG="ghp_averyrealisticlookingtoken"), \
             Served() as served:
         status, body = served.get("/notice?owner=%s&name=%s" % (OWNER, REPO), token=None)
         blob = json.dumps(body)

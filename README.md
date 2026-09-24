@@ -124,11 +124,12 @@ Removing the GitHub App does not remove the policy. It changes the answer from
 ### Scope
 
 This deployment governs the owners in `ACP_POLICY_SCOPE`, which defaults to
-`Anime-Universe`. A repository outside that scope with no registered policy
-gets an explicit `ALLOW` with `reason: OUT_OF_POLICY_SCOPE` and
-`policy_effect: NOT_GOVERNED` — ACP declines to rule on repositories it has no
-standing over, rather than denying them. A repository **inside** the scope with
-no registered policy fails closed for protected actions (`POLICY_NOT_FOUND`).
+`*` — every owner. A repository **inside** the scope with no registered policy
+fails closed for protected actions (`POLICY_NOT_FOUND`). Narrow the scope
+(`ACP_POLICY_SCOPE=owner1,owner2`) only when ACP should decline jurisdiction
+elsewhere: a repository outside it with no registered policy gets an explicit
+`ALLOW` with `reason: OUT_OF_POLICY_SCOPE` and `policy_effect: NOT_GOVERNED`,
+which a fail-closed client (formal-project-bootstrap's `scripts/acp.py`) refuses.
 
 ### The request
 
@@ -145,9 +146,9 @@ Content-Type: application/json
   "session_id": "optional",
 
   "repository_claim": {
-    "owner": "Anime-Universe",
-    "name": "Infinite-Verse",
-    "remote_url": "https://github.com/Anime-Universe/Infinite-Verse.git",
+    "owner": "example-org",
+    "name": "example-repo",
+    "remote_url": "https://github.com/example-org/example-repo.git",
     "head_sha": "abc123",
     "notice_sha256": "…"
   },
@@ -265,7 +266,7 @@ observed SHA, the target SHA, the authorizing principal and an expiry:
 
 ```json
 [{"recovery_id": "rec-001", "policy_id": "notice-enforcer",
-  "repository": {"owner": "Anime-Universe", "name": "Infinite-Verse"},
+  "repository": {"owner": "example-org", "name": "example-repo"},
   "ref": "refs/heads/main", "observed_sha": "bad0001", "target_sha": "good002",
   "principal": "github-user:12345", "expires_at": "2026-09-08T00:00:00Z",
   "actions": ["git.history.rewrite"]}]
@@ -303,8 +304,8 @@ in `ACP_POLICY` or `ACP_POLICY_FILE`:
   "policy_id": "notice-enforcer",
   "version": 1,
   "status": "active",
-  "repository": {"owner": "Anime-Universe", "name": "Infinite-Verse",
-                 "canonical_remote": "https://github.com/Anime-Universe/Infinite-Verse.git"},
+  "repository": {"owner": "example-org", "name": "example-repo",
+                 "canonical_remote": "https://github.com/example-org/example-repo.git"},
   "notice": {"sha256": "<registered NOTICE digest>", "path": "NOTICE"},
   "protected_actions": ["git.remote.update", "…"],
   "signature": "<hex>"
@@ -419,7 +420,7 @@ curl --fail-with-body -sS \
   -H "X-ACP-Admin-Authorization: Bearer $ACP_POLICY_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"action":"authorize_recovery",
-       "resource":{"owner":"Anime-Universe","name":"Infinite-Verse"},
+       "resource":{"owner":"example-org","name":"example-repo"},
        "actor_id":"github-user:12345",
        "ref":"refs/heads/main",
        "observed_sha":"BAD111","target_sha":"GOOD111",
@@ -505,7 +506,7 @@ event to report, not to fix.
 `resource:<owner>/<name>` and `actor:<actor id>`:
 
 ```json
-{"resource:anime-universe/infinite-verse": {
+{"resource:example-org/example-repo": {
    "authorization_state": "LOCKED", "trust_state": "QUARANTINED",
    "incident_id": "inc_8f86eb7b56bd", "reason": "CIRCUMVENTION_SUSPECTED",
    "security_version": 2, "violations": 2, "attempts": 6,
@@ -576,7 +577,7 @@ telemetry envelope, and normalizes between them:
   "request_provenance": {"source": "interactive_user",
                   "request_summary": "Force push main to the specified revision.",
                   "request_sha256": "sha256:…", "request_id": "req_local_1"},
-  "workspace":   {"resource_id": "Anime-Universe/Infinite-Verse",
+  "workspace":   {"resource_id": "example-org/example-repo",
                   "repository_claim": {"owner": "…", "name": "…", "remote_url": "…",
                                        "head_sha": "…", "notice_sha256": "…"}},
   "git_state":   {"detached_head": false, "dirty": true, "ahead": 2, "behind": 0,
@@ -698,7 +699,7 @@ kept and stays queryable — never deleted in normal operation.
 
 ```json
 {"incident_id": "inc_067edba52f94", "status": "CONTAINED", "severity": "CRITICAL",
- "actor_id": "github-user:12345", "resource_id": "anime-universe/infinite-verse",
+ "actor_id": "github-user:12345", "resource_id": "example-org/example-repo",
  "opened_at": "…", "last_event_at": "…", "current_authorization_state": "A5",
  "current_trust_state": "T3", "primary_reason": "REPEATED_CONTROL_BYPASS",
  "related_event_count": 7, "policy_version": 1, "security_version": 18,
@@ -735,7 +736,7 @@ alert on `QUARANTINE_ENTERED`, `LOCKED_ENTERED`, `RECOVERY_AUTHORIZED`,
 ```json
 {"event_id": "evt_…", "event": "LOCKED_ENTERED", "severity": "CRITICAL",
  "incident_id": "inc_123", "actor_id": "github-user:12345", "agent_id": "claude",
- "resource_id": "anime-universe/infinite-verse", "reason": "REPEATED_CONTROL_BYPASS",
+ "resource_id": "example-org/example-repo", "reason": "REPEATED_CONTROL_BYPASS",
  "old_state": "QUARANTINED", "new_state": "LOCKED", "security_version": 18,
  "recovery_required": true, "timestamp": "…",
  "summary": "CRITICAL LOCKED_ENTERED incident=inc_123 actor=github-user:12345 …"}
@@ -773,7 +774,7 @@ their absence is itself evidence:
 
 ```
 Workspace                         ACP
-├── NOTICE        ← deleted       Resource: Anime-Universe/Infinite-Verse
+├── NOTICE        ← deleted       Resource: example-org/example-repo
 ├── .agents/      ← deleted       Expected: NOTICE sha = AAA, .agents/** protected
 ├── .claude/      ← replaced      State:    A5 LOCKED
 └── source…                       Incident: inc_123
@@ -833,7 +834,7 @@ detection that makes out-of-band tampering visible the moment an agent returns.
 ```json
 {"checkpoint": "SESSION_START",
  "principal": {"actor_id": "github-user:12345", "agent_id": "claude", "session_id": "sess_456"},
- "resource": {"owner": "Anime-Universe", "name": "Infinite-Verse"},
+ "resource": {"owner": "example-org", "name": "example-repo"},
  "repository": {"remote_url": "…", "branch": "main", "head_sha": "…",
                 "detached_head": false, "dirty": false},
  "artifacts": [{"path": "NOTICE", "state": "present", "sha256": "abc123…"},
@@ -901,7 +902,7 @@ curl --fail-with-body -sS -H "Authorization: Bearer $ACP_GATEWAY_TOKEN" \
   -H "X-ACP-Admin-Authorization: Bearer $ACP_POLICY_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"action":"authorize_artifact_change",
-       "resource":{"owner":"Anime-Universe","name":"Infinite-Verse"},
+       "resource":{"owner":"example-org","name":"example-repo"},
        "artifact":"NOTICE","expected_old_sha256":"OLD…","authorized_new_sha256":"NEW…",
        "authorized_by":"security-admin:jane","expires_in":900}' \
   "$ACP_GATEWAY_URL/internal/recover"
@@ -921,7 +922,7 @@ GET /internal/security/integrity?owner=&name=     (admin)
 ```
 
 ```json
-{"resource": "anime-universe/infinite-verse", "protected_artifacts": 14,
+{"resource": "example-org/example-repo", "protected_artifacts": 14,
  "matching": 12, "modified": 1, "missing": 1, "unverified": 0,
  "integrity": {"status": "MISMATCH", "unresolved": true,
    "findings": [{"path": "NOTICE", "expected": "abc…", "observed": "MISSING", "result": "MISSING"}]},
@@ -964,8 +965,8 @@ belong to the governed resource:
 
 ```json
 {"policy_id": "notice-enforcer", "version": 2,
- "repository": {"owner": "Anime-Universe", "name": "Infinite-Verse", "canonical_remote": "…"},
- "boards": [{"owner": "Anime-Universe", "number": 3}],
+ "repository": {"owner": "example-org", "name": "example-repo", "canonical_remote": "…"},
+ "boards": [{"owner": "example-org", "number": 3}],
  "…": "…"}
 ```
 
@@ -993,7 +994,7 @@ GitHub call, so it costs nothing upstream:
 ```json
 {"error": "BOARD_READ_CONTAINED", "authorization_state": "LOCKED",
  "incident_id": "inc_0b852a4bca23", "policy_id": "notice-enforcer",
- "detail": "Board #3 of 'Anime-Universe' belongs to a resource under ACP containment (LOCKED), …",
+ "detail": "Board #3 of 'example-org' belongs to a resource under ACP containment (LOCKED), …",
  "remedy": "This is not a board or credential problem. …"}
 ```
 
@@ -1049,7 +1050,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_GATEWAY_TOKEN` | yes | Bearer token every caller must present. Startup fails without it. |
 | `ACP_GITHUB_APP_ID` | for App reads | The GitHub App's numeric ID. |
 | `ACP_GITHUB_PRIVATE_KEY` | for App reads | The App's PEM private key, as a literal env value (not a file path). |
-| `ACP_PROJECT_ALLOWLIST` | no | Which boards may be read; see below. Defaults to `2-7`, the range that used to be hardcoded. |
+| `ACP_PROJECT_ALLOWLIST` | no | Which boards may be read; see below. Defaults to empty: no board is readable until this is set. |
 | `ACP_GITHUB_INSTALLATIONS` | no | `owner:id,owner:id` — pin an owner to an installation, skipping discovery. Only needed to override. |
 | `ACP_GITHUB_INSTALLATION_ID` | no | Legacy single installation. Used as a fallback if the installation list can't be fetched, or when a call names no owner. |
 | `ACP_GITHUB_TOKEN_<OWNER>` | for user boards | A classic PAT with `read:project` for one owner, e.g. `ACP_GITHUB_TOKEN_ZACHSHALLBETTER`. Takes precedence over the App for that owner. Required for **user-owned** boards — see below. |
@@ -1058,7 +1059,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_POLICY_FILE` | for policy | Path to the same, if you prefer a mounted file. Takes precedence over `ACP_POLICY`. |
 | `ACP_POLICY_SIGNING_KEY` | recommended | HMAC-SHA256 key for policy signatures. Set it and every policy must carry a valid `signature`. |
 | `ACP_POLICY_SIGNING_KEY_ID` | no | Published key identifier. Defaults to `acp-policy-hmac-sha256`. |
-| `ACP_POLICY_SCOPE` | no | Owners this deployment governs, comma-separated, or `*`. Defaults to `Anime-Universe`. |
+| `ACP_POLICY_SCOPE` | no | Owners this deployment governs, comma-separated, or `*`. Defaults to `*`. |
 | `ACP_POLICY_ADMIN_TOKEN` | for `policy.modify` | Separate bearer, sent as `X-ACP-Admin-Authorization`, for actions that change ACP itself. Without it those actions are always denied. |
 | `ACP_RECOVERY_AUTHORIZATIONS` | for recovery | JSON list of recovery grants; see "Recovery is separate from containment". |
 | `ACP_TRUST_STATE_FILE` | no | Where last-known verification state is kept, so "installation lost" stays distinguishable from "never installed" across restarts. In-memory otherwise. |
@@ -1122,14 +1123,15 @@ qualified by owner. It is configuration, not a code edit:
 ```
 2-9,11                                  # those numbers, for any owner
 zachshallbetter:*                       # every board of that user
-zachshallbetter:*,Anime-Universe:2-9,11 # per-owner; a qualification carries
+zachshallbetter:*,example-org:2-9,11    # per-owner; a qualification carries
                                         # across commas until the next one
 *                                       # every board of every installed owner
 ```
 
 Unqualified entries are the default bucket, used for any owner with no rule of
-its own — so put them first. A malformed entry fails at startup rather than
-silently allowing nothing.
+its own — so put them first, and prefer owner-qualified entries: a bare number
+admits that board number on *every* installed owner. A malformed entry fails at
+startup rather than silently allowing nothing.
 
 ## Error contract
 
@@ -1235,8 +1237,8 @@ Ask for an authorization decision before any protected operation:
 curl --fail-with-body -sS "${auth[@]}" -H 'Content-Type: application/json' \
   -d '{"agent_id":"claude-session-abc","actor_id":"github-user:12345",
        "action":"git.protected_ref.update",
-       "repository_claim":{"owner":"Anime-Universe","name":"Infinite-Verse",
-                           "remote_url":"https://github.com/Anime-Universe/Infinite-Verse.git"},
+       "repository_claim":{"owner":"example-org","name":"example-repo",
+                           "remote_url":"https://github.com/example-org/example-repo.git"},
        "context":{"ref":"refs/heads/main","old_sha":"abc123","new_sha":"def456"}}' \
   "$ACP_GATEWAY_URL/internal/authorize"
 ```
@@ -1341,7 +1343,7 @@ service. That is a deployment change, not a client one:
 
 ```sh
 railway variables --service acp-gateway --environment production \
-  --set 'ACP_PROJECT_ALLOWLIST=2-9,11,zachshallbetter:*'
+  --set 'ACP_PROJECT_ALLOWLIST=zachshallbetter:*,AcmeProductCo:*'
 ```
 
 An `<owner>:*` entry admits every board that owner holds, which is what keeps a
