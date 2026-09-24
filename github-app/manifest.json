@@ -1,0 +1,18 @@
+{
+  "name": "Agent Control Plane",
+  "url": "https://github.com/zachshallbetter/acp-gateway",
+  "description": "Read-only GitHub access for the ACP gateway: agents read ProjectsV2 boards through it without holding GitHub credentials, and ACP verifies repository state as evidence before it authorizes a protected effect. It never writes to GitHub.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://acp-gateway-production.up.railway.app/",
+    "active": false
+  },
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "read",
+    "issues": "read",
+    "pull_requests": "read",
+    "organization_projects": "read"
+  },
+  "default_events": []
+}
