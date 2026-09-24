@@ -68,6 +68,18 @@ pattern, not just that one ecosystem.
   (`INSTALLATION_TTL`, 5 minutes; `?refresh=1` bypasses it) — neither holds
   board state.
 
+## The GitHub App
+
+<img src="github-app/logo.png" alt="" width="64" align="left">
+
+The gateway reads GitHub through one App, **Agent Control Plane**, defined in
+[`github-app/manifest.json`](github-app/manifest.json): read-only (`metadata`,
+`contents`, `issues`, `pull_requests`, `organization_projects`), no webhook, no
+events. `GET /internal/installations` reports each installation's
+`permissions_missing` / `permissions_excess` against that definition. Why each
+permission, installing, personal boards, bringing the live App in line, and key
+rotation: [`docs/GITHUB_APP.md`](docs/GITHUB_APP.md).
+
 ## Boundary
 
 This gateway must not be merged with or replaced by a webhook/event-receiving
@@ -1189,6 +1201,7 @@ python3 test_gateway_telemetry.py
 python3 test_gateway_integrity.py
 python3 test_gateway_board_gate.py
 python3 test_register_policy.py
+python3 test_github_app.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials

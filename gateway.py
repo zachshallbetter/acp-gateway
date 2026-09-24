@@ -142,6 +142,33 @@ def install_url():
 # as Projects-capable when it could not see a single board.
 PROJECT_PERMISSIONS = ("organization_projects", "projects")
 
+# What the App should hold -- and all it should hold. github-app/manifest.json is
+# the same set (test_github_app.py keeps the two equal); docs/GITHUB_APP.md says
+# which call needs which. Read-only on purpose: the gateway never writes to GitHub.
+APP_PERMISSIONS = {
+    "metadata": "read",               # GET /repos/{o}/{n}: repository identity
+    "contents": "read",               # notice file, git refs, compare: ref-state evidence
+    "issues": "read",                 # issue items on a board
+    "pull_requests": "read",          # pull-request items on a board
+    "organization_projects": "read",  # ProjectsV2 on an organization
+}
+_LEVEL = {"none": 0, "read": 1, "write": 2, "admin": 3}
+
+
+def permission_drift(permissions, account_type):
+    """Where an installation's grant differs from APP_PERMISSIONS.
+
+    Organization permissions cannot exist on a user installation, so they are not
+    'missing' there -- a user's boards are served by a personal token instead.
+    """
+    expected = {name: level for name, level in APP_PERMISSIONS.items()
+                if account_type == "Organization" or not name.startswith("organization_")}
+    missing = sorted(name for name, level in expected.items()
+                     if _LEVEL.get(permissions.get(name, "none"), 0) < _LEVEL[level])
+    excess = sorted(name for name, level in permissions.items()
+                    if _LEVEL.get(level, 0) > _LEVEL.get(APP_PERMISSIONS.get(name, "none"), 0))
+    return {"permissions_missing": missing, "permissions_excess": excess}
+
 
 def installation_entry(raw):
     account, permissions = raw.get("account") or {}, raw.get("permissions") or {}
@@ -151,6 +178,7 @@ def installation_entry(raw):
         "installation_id": raw.get("id"),
         "projects_read": any(permissions.get(name) in ("read", "write", "admin") for name in PROJECT_PERMISSIONS),
         "permissions": permissions,
+        **permission_drift(permissions, account.get("type") or ""),
     }
 
 
