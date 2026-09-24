@@ -1,5 +1,5 @@
 {
-  "name": "Agent Control Plane",
+  "name": "ACP Agent Control Plane",
   "url": "https://github.com/zachshallbetter/acp-gateway",
   "description": "Read-only GitHub access for the ACP gateway: agents read ProjectsV2 boards through it without holding GitHub credentials, and ACP verifies repository state as evidence before it authorizes a protected effect. It never writes to GitHub.",
   "public": false,

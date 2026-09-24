@@ -1,6 +1,6 @@
-# The GitHub App: Agent Control Plane
+# The GitHub App: ACP Agent Control Plane
 
-<img src="../github-app/logo.png" alt="Agent Control Plane" width="96" align="right">
+<img src="../github-app/logo.png" alt="ACP Agent Control Plane" width="96" align="right">
 
 The gateway reads GitHub through one GitHub App. Agents never hold its key; they
 hold a gateway bearer token, and the gateway mints short-lived installation tokens
@@ -8,8 +8,10 @@ on their behalf.
 
 | | |
 |---|---|
-| Name | **Agent Control Plane** (`agent-control-plane`) |
-| Formerly | `anime-universe-agent-control-plane` — named for an org that no longer holds any repositories |
+| Name | **ACP Agent Control Plane** (`acp-agent-control-plane`) |
+| Why not plain *Agent Control Plane* | `agent-control-plane` is an existing GitHub account, and an App's slug cannot collide with an account |
+| Formerly | `anime-universe-agent-control-plane` — named for an org that no longer holds any repositories (renamed 2026-09-23) |
+| App ID | 4555426 (unchanged by the rename) |
 | Owner | `zachshallbetter` |
 | Visibility | private — only its owner installs it |
 | Definition | [`github-app/manifest.json`](../github-app/manifest.json) (GitHub App manifest format) |
@@ -63,7 +65,7 @@ the user account for repository evidence — `metadata` and `contents` — which
 | `Anime-Universe` | Organization | nothing now — the org holds no repositories or boards; uninstall when convenient |
 | `AcmeProductCo` | Organization | **not installed yet** — needed for Infinite-Verse and Infinite-Studio evidence and their org boards |
 
-Install from `https://github.com/apps/agent-control-plane/installations/new` (the
+Install from `https://github.com/apps/acp-agent-control-plane/installations/new` (the
 gateway derives this link from the App's own record, so it follows a rename).
 
 ## Configuration

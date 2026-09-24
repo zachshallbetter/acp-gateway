@@ -72,7 +72,7 @@ pattern, not just that one ecosystem.
 
 <img src="github-app/logo.png" alt="" width="64" align="left">
 
-The gateway reads GitHub through one App, **Agent Control Plane**, defined in
+The gateway reads GitHub through one App, **ACP Agent Control Plane**, defined in
 [`github-app/manifest.json`](github-app/manifest.json): read-only (`metadata`,
 `contents`, `issues`, `pull_requests`, `organization_projects`), no webhook, no
 events. `GET /internal/installations` reports each installation's
