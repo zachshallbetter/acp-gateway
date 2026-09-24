@@ -487,7 +487,7 @@ def test_snapshot_findings_reach_the_incident_timeline_and_the_operator_view():
 def test_no_secret_reaches_a_snapshot_log_or_response():
     fresh()
     pat = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
-    with governed_env(ACP_GITHUB_TOKEN_ANIME_UNIVERSE=pat), Served() as served:
+    with governed_env(ACP_GITHUB_TOKEN_EXAMPLE_ORG=pat), Served() as served:
         status, body = served.post({
             "checkpoint": "PRE_PUSH", "resource": {"owner": OWNER, "name": REPO},
             "principal": {"actor_id": ACTOR},

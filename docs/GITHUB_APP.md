@@ -10,7 +10,6 @@ on their behalf.
 |---|---|
 | Name | **ACP Agent Control Plane** (`acp-agent-control-plane`) |
 | Why not plain *Agent Control Plane* | `agent-control-plane` is an existing GitHub account, and an App's slug cannot collide with an account |
-| Formerly | `anime-universe-agent-control-plane` — named for an org that no longer holds any repositories (renamed 2026-09-23) |
 | App ID | 4555426 (unchanged by the rename) |
 | Owner | `zachshallbetter` |
 | Visibility | private — only its owner installs it |
@@ -62,7 +61,6 @@ the user account for repository evidence — `metadata` and `contents` — which
 | Account | Type | Serves |
 |---|---|---|
 | `zachshallbetter` | User | repository evidence for personal repositories (boards via the PAT above) |
-| `Anime-Universe` | Organization | nothing now — the org holds no repositories or boards; uninstall when convenient |
 | `AcmeProductCo` | Organization | **not installed yet** — needed for Infinite-Verse and Infinite-Studio evidence and their org boards |
 
 Install from `https://github.com/apps/acp-agent-control-plane/installations/new` (the

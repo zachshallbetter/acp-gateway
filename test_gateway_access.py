@@ -30,11 +30,12 @@ def item(i):
     return {"id": f"I{i}", "type": "ISSUE", "isArchived": False, "content": {"__typename": "Issue"}}
 
 # ---- 1. the allowlist is configuration, not a code edit -------------------
-def test_allowlist_default_matches_the_old_hardcoded_range():
+def test_with_no_allowlist_no_board_is_readable():
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ACP_PROJECT_ALLOWLIST", None)
-        assert gateway.project_allowed(3) and gateway.project_allowed(7)
-        assert not gateway.project_allowed(9), "default must not silently widen"
+        assert not any(gateway.project_allowed(n) for n in (1, 2, 3, 7, 38)), \
+            "an unconfigured deployment must not read any board"
+        assert not gateway.project_allowed(3, "example-org")
 
 def test_allowlist_can_admit_the_boards_that_were_unreachable():
     # 8 Worlds, 9 Evidence, 11 Publication Ingestion — all 400ed before.
@@ -55,7 +56,7 @@ def test_pages_past_the_hundred_item_cap():
     with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "*"}), \
          patch("gateway.installation_token", return_value={"token": "t"}), \
          patch("gateway.urlopen", side_effect=[resp(p) for p in pages]) as u:
-        out = gateway.project_context("Anime-Universe", "9")
+        out = gateway.project_context("Example-Org", "9")
     assert out["items_fetched"] == 150, out["items_fetched"]
     assert out["items_total"] == 150
     assert out["truncated"] is False
@@ -69,7 +70,7 @@ def test_truncation_is_reported_not_hidden():
     with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "*"}), \
          patch("gateway.installation_token", return_value={"token": "t"}), \
          patch("gateway.urlopen", side_effect=[resp(p) for p in pages]):
-        out = gateway.project_context("Anime-Universe", "9")
+        out = gateway.project_context("Example-Org", "9")
     assert out["truncated"] is True
     assert out["pages"] == gateway.MAX_PAGES
 
@@ -77,7 +78,7 @@ def test_short_count_against_totalcount_is_also_truncation():
     with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "*"}), \
          patch("gateway.installation_token", return_value={"token": "t"}), \
          patch("gateway.urlopen", side_effect=[resp(board([item(1)], has_next=False, total=40))]):
-        out = gateway.project_context("Anime-Universe", "9")
+        out = gateway.project_context("Example-Org", "9")
     assert out["truncated"] is True, "1 of 40 fetched must not read as complete"
 
 # ---- 3. user-owned boards, not organizations only ------------------------
