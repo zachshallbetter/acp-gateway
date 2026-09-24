@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # onboard-project.sh — wire a repository to this ACP gateway.
 #
-#   scripts/onboard-project.sh <repo-path> [--owner O --project N] [--dry-run]
+#   scripts/onboard-project.sh <repo-path> [--owner O --project N] [--govern [--apply]] [--dry-run]
 #
 # Does the four things a project needs, and nothing else:
 #
@@ -13,7 +13,14 @@
 #
 # Then it VERIFIES, because none of the above proves the path works:
 # /health, an authenticated owner read, and — if a board was named — that the
-# gateway reports that board as allowed=true.
+# gateway reports that board as allowed=true. A formal-project-bootstrap project
+# (PROJECT_PROFILE.json + scripts/acp-check.py) is also checked with its own
+# acp-check, which additionally asks whether a policy governs the repository.
+#
+# --govern registers the repository's policy (scripts/register-policy.py, from
+# the project's `scripts/acp.py policy` candidate when it has one). Without
+# --apply that is a dry run; with it, ACP_POLICY is set on Railway, which
+# redeploys the gateway.
 #
 # WHY #1. A global core.excludesFile that ignores `.agents/` (a common
 # scaffolding default, and the one on this machine) makes `git add` report
@@ -33,17 +40,19 @@ RAILWAY_SERVICE="${ACP_RAILWAY_SERVICE:-acp-gateway}"
 RAILWAY_ENV="${ACP_RAILWAY_ENV:-production}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-REPO=""; OWNER=""; PROJECT=""; DRY=0
+REPO=""; OWNER=""; PROJECT=""; DRY=0; GOVERN=0; APPLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --owner) OWNER="$2"; shift 2;;
     --project) PROJECT="$2"; shift 2;;
     --dry-run) DRY=1; shift;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0;;
+    --govern) GOVERN=1; shift;;
+    --apply) APPLY=1; shift;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0;;
     *) REPO="$1"; shift;;
   esac
 done
-[ -n "$REPO" ] || { echo "usage: $0 <repo-path> [--owner O --project N] [--dry-run]" >&2; exit 2; }
+[ -n "$REPO" ] || { echo "usage: $0 <repo-path> [--owner O --project N] [--govern [--apply]] [--dry-run]" >&2; exit 2; }
 
 REPO="$(cd "$REPO" && git rev-parse --show-toplevel)" || { echo "error: $REPO is not a git repository" >&2; exit 2; }
 say() { printf '%s\n' "$*"; }
@@ -131,6 +140,35 @@ if [ -n "$OWNER" ]; then
     allowed="$(printf '%s' "$body" | jq -r --argjson n "$PROJECT" '(.projects // [])[] | select(.number==$n) | .allowed')"
     say "  board #$PROJECT → allowed=${allowed:-not-visible}"
     [ "$allowed" = true ] || { echo "  remedy: add '$OWNER:*' or '$PROJECT' to ACP_PROJECT_ALLOWLIST on the gateway service" >&2; exit 1; }
+  fi
+fi
+
+# 6. Governance. Wiring proves the gateway answers; only a policy makes it govern.
+BOOTSTRAP=0
+[ -f "$REPO/PROJECT_PROFILE.json" ] && [ -f "$REPO/scripts/acp-check.py" ] && BOOTSTRAP=1
+if [ "$GOVERN" = 1 ]; then
+  CANDIDATE="$(mktemp -t acp-policy.XXXXXX)"
+  if [ "$BOOTSTRAP" = 1 ] && [ -f "$REPO/scripts/acp.py" ]; then
+    (cd "$REPO" && python3 scripts/acp.py policy) > "$CANDIDATE"
+    REG=(--from "$CANDIDATE")
+  else
+    REMOTE="$(cd "$REPO" && git remote get-url origin)"
+    TAIL="${REMOTE%.git}"; NAME="${TAIL##*/}"; TAIL="${TAIL%/*}"; ROWNER="${TAIL##*[:/]}"
+    REG=(--owner "$ROWNER" --name "$NAME")
+    [ -n "$OWNER" ] && [ -n "$PROJECT" ] && REG+=(--board "$OWNER:$PROJECT")
+  fi
+  say "governance:"
+  if [ "$APPLY" = 1 ]; then python3 "$HERE/scripts/register-policy.py" "${REG[@]}" --apply
+  else python3 "$HERE/scripts/register-policy.py" "${REG[@]}"; fi
+  rm -f "$CANDIDATE"
+fi
+if [ "$BOOTSTRAP" = 1 ]; then
+  say "bootstrap acp-check:"
+  if ! (cd "$REPO" && python3 scripts/acp-check.py); then
+    # Only an ungoverned repository is tolerated here; any other refusal stops.
+    (cd "$REPO" && python3 scripts/acp-check.py --allow-ungoverned >/dev/null 2>&1) || exit 1
+    if [ "$GOVERN" = 1 ] && [ "$APPLY" = 1 ]; then say "  policy set; it is enforced once the redeploy finishes — re-run acp-check then"
+    else say "  not governed yet: re-run with --govern (dry run), then --govern --apply"; fi
   fi
 fi
 say "done."

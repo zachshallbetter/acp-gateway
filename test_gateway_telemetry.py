@@ -148,6 +148,45 @@ def test_a_report_cannot_authorize_anything():
     assert out["decision"] == "LOCKED", "no volume of telemetry unlocks a resource"
 
 
+def test_routine_checkpoints_are_reportable_and_stay_quiet():
+    """A bound project reports at session start and before each protected effect.
+    Those reports must be accepted, and must never open an incident or move state."""
+    fresh()
+    with contained_env(), Served() as served:
+        for event_type, evidence in (
+                ("SESSION_STARTED", {"checkpoint": "SESSION_START"}),
+                ("SESSION_RESUMED", {"checkpoint": "SESSION_RESUME"}),
+                ("PROTECTED_EFFECT_PENDING", {"checkpoint": "PRE_PUSH", "action": "git.protected_ref.update"}),
+                ("REMOTE_CHANGED", {"detail": "origin moved"}),
+                ("BRANCH_PROTECTION_CHANGED", {}), ("POLICY_DIGEST_CHANGED", {}),
+                ("NOTICE_DIGEST_CHANGED", {}), ("CREDENTIALS_ROTATED", {})):
+            status, body = served.post(report(event_type=event_type, evidence=evidence),
+                                       path="/internal/report")
+            assert status == 200 and body["accepted"] is True, (event_type, body)
+            assert body["authorizes"] is False and body["incident_id"] is None, (event_type, body)
+            assert body["severity"] in ("INFO", "NOTICE"), (event_type, body)
+            assert body["kind"] == ("checkpoint" if event_type in gateway.CHECKPOINT_EVENTS
+                                    else "control_plane_change"), body
+            assert body["authorization_state"] == "NORMAL", body
+        status, body = served.post(report(event_type="PROTECTED_EFFECT_PENDING",
+                                          evidence={"action": "Push Main"}), path="/internal/report")
+        assert status == 400 and body["field"] == "evidence.action", body
+        status, body = served.post(report(event_type="SESSION_STARTED",
+                                          evidence={"checkpoint": "WHENEVER"}), path="/internal/report")
+        assert status == 400 and body["field"] == "evidence.checkpoint", body
+    assert last("PROTECTED_EFFECT_PENDING")["evidence"]["action"] == "git.protected_ref.update"
+
+
+def test_a_checkpoint_report_never_lifts_containment():
+    fresh()
+    with contained_env():
+        quarantine()
+        out = gateway.report_event(report(event_type="SESSION_STARTED", evidence={}))
+        assert out["authorization_state"] == "QUARANTINED" and out["authorizes"] is False, out
+        decided = gateway.authorize(request("git.remote.update"), verifier=verifier())
+    assert decided["decision"] == "QUARANTINE", decided
+
+
 def test_a_client_cannot_grade_its_own_severity():
     fresh()
     with contained_env():
