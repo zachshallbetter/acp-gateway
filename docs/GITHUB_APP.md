@@ -60,8 +60,8 @@ the user account for repository evidence — `metadata` and `contents` — which
 
 | Account | Type | Serves |
 |---|---|---|
-| `zachshallbetter` | User | repository evidence for personal repositories (boards via the PAT above) |
-| `AcmeProductCo` | Organization | **not installed yet** — needed for Infinite-Verse and Infinite-Studio evidence and their org boards |
+| `zachshallbetter` | User | all repositories — evidence for personal repositories (boards via the PAT above) |
+| `AcmeProductCo` | Organization | selected repositories only — `Infinite-Verse`, `Infinite-Studio` (the two governed there) — plus the org's boards. Add a repository here when its policy is registered |
 
 Install from `https://github.com/apps/acp-agent-control-plane/installations/new` (the
 gateway derives this link from the App's own record, so it follows a rename).
@@ -106,6 +106,9 @@ creates the App from `manifest.json` in one step: POST the manifest to
 
 ## Rotating the private key
 
+Last rotated 2026-09-25 (current key `SHA256:zPKHPrmGF886yn0ZByo2lyEbxfVfgNWaCoOKc+l9ARs=`);
+the previous key, which had been exposed in a session transcript, is deleted.
+
 Rotate whenever the key may have been exposed — including being printed to a
 terminal or transcript — and otherwise on a schedule.
 
@@ -114,6 +117,11 @@ terminal or transcript — and otherwise on a schedule.
 2. `railway variables --service acp-gateway --environment production --set "ACP_GITHUB_PRIVATE_KEY=$(cat <new-key>.pem)"` — this redeploys.
 3. `GET /internal/app-probe` must return `installation_token: minted`.
 4. Delete the old key in App settings, then delete the downloaded `.pem`.
+
+Generate the key in a browser that saves downloads to disk: GitHub offers each key
+for download exactly once, and a key whose file was never saved can only be deleted.
+Load it with `railway variable set ACP_GITHUB_PRIVATE_KEY --stdin < key.pem` rather than
+`--set "…$(cat …)"`, so the PEM never appears in a command line.
 
 Never read the Railway variables with line-oriented tools (`cut`, `grep` on the
 plain listing): the PEM is multi-line and its body prints. Use `--json` and select
