@@ -38,7 +38,7 @@ import gateway  # noqa: E402
 
 
 def railway_vars(service, environment):
-    out = subprocess.run(["railway", "variables", "--service", service, "--environment", environment,
+    out = subprocess.run(["railway", "variable", "list", "--service", service, "--environment", environment,
                           "--json"], capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit("error: could not read Railway variables "
@@ -195,9 +195,9 @@ def main():
     if args.local:
         Path(args.local).write_text(document + "\n", encoding="utf-8")
     else:
-        out = subprocess.run(["railway", "variables", "--service", args.service, "--environment",
-                              args.environment, "--set", f"ACP_POLICY={document}"],
-                             capture_output=True, text=True)
+        out = subprocess.run(["railway", "variable", "set", "ACP_POLICY", "--service", args.service,
+                              "--environment", args.environment, "--stdin"],
+                             input=document, capture_output=True, text=True)
         if out.returncode != 0:
             raise SystemExit(f"error: railway refused the update: {out.stderr.strip()[:300]}")
     print(f"registered {target['policy_id']} v{target['version']}", file=sys.stderr)

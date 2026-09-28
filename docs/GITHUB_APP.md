@@ -114,7 +114,7 @@ terminal or transcript — and otherwise on a schedule.
 
 1. App settings → **Private keys** → *Generate a private key* (the old one keeps
    working until you delete it).
-2. `railway variables --service acp-gateway --environment production --set "ACP_GITHUB_PRIVATE_KEY=$(cat <new-key>.pem)"` — this redeploys.
+2. `railway variable set ACP_GITHUB_PRIVATE_KEY --service acp-gateway --environment production --stdin < <new-key>.pem` — this redeploys.
 3. `GET /internal/app-probe` must return `installation_token: minted`.
 4. Delete the old key in App settings, then delete the downloaded `.pem`.
 

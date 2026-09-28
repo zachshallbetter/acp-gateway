@@ -55,6 +55,11 @@ pattern, not just that one ecosystem.
   verifying the App credentials are configured and can actually mint a token)
   round out the surface.
 
+Deployment verification is read-only: `python3 scripts/validate-deployment.py --url "$ACP_GATEWAY_URL"` checks both contracts and emits only sanitized status fields. Add `--require-security` after production signing keys, durable state, and audit storage are enabled. Set `ACP_REQUIRE_PRODUCTION_CONTROLS=1` on the service only after those variables and a durable Railway volume are ready; the gateway then refuses to start if any control is absent.
+
+The complete staged transition is documented in [`docs/PRODUCTION_HARDENING.md`](docs/PRODUCTION_HARDENING.md).
+`scripts/harden-railway.py` performs that transition with a read-only default; production mutation requires the explicit pair `--apply --confirm-production`.
+
 ## What it deliberately does not do
 
 - No webhook receiving, no event queue. This is pull-only. (A companion
@@ -1058,6 +1063,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_POLICY` | for policy | The policy document as literal JSON. |
 | `ACP_POLICY_FILE` | for policy | Path to the same, if you prefer a mounted file. Takes precedence over `ACP_POLICY`. |
 | `ACP_POLICY_SIGNING_KEY` | recommended | HMAC-SHA256 key for policy signatures. Set it and every policy must carry a valid `signature`. |
+| `ACP_REQUIRE_PRODUCTION_CONTROLS` | no | `1`/`true`/`yes` makes startup fail unless policy signing, capability signing, durable security state, audit logging, and audit hash chaining are enabled. |
 | `ACP_POLICY_SIGNING_KEY_ID` | no | Published key identifier. Defaults to `acp-policy-hmac-sha256`. |
 | `ACP_POLICY_SCOPE` | no | Owners this deployment governs, comma-separated, or `*`. Defaults to `*`. |
 | `ACP_POLICY_ADMIN_TOKEN` | for `policy.modify` | Separate bearer, sent as `X-ACP-Admin-Authorization`, for actions that change ACP itself. Without it those actions are always denied. |
@@ -1270,7 +1276,7 @@ It does four things:
    client and the contract it asserts now live together.
 2. **Un-ignores `.agents/`** in the repo's `.gitignore`.
 3. **Writes `ACP_GATEWAY_URL` / `ACP_GATEWAY_TOKEN`** into `<repo>/.env.local`,
-   read from Railway (`railway variables --service acp-gateway --environment
+   read from Railway (`railway variable list --service acp-gateway --environment
    production`). The token is never printed.
 4. **Binds the board**, when `--owner`/`--project` are given, by writing
    `.agents/board.env` — after which the skill's scripts need no flags anywhere
@@ -1304,7 +1310,7 @@ is written without `--apply`. `--local FILE` edits a file instead of Railway.
 
 ### formal-project-bootstrap projects
 
-A project initialized from formal-project-bootstrap ≥ 0.5.3 carries
+A project initialized from formal-project-bootstrap ≥ 0.6.0 carries
 `scripts/acp.py` (the client) and `scripts/acp-check.py`. `onboard-project.sh`
 detects one by its `PROJECT_PROFILE.json`, runs its `acp-check.py` after the
 gateway checks, and with `--govern` registers the candidate policy the project
@@ -1342,8 +1348,8 @@ leaves the repository untouched rather than half-configured.
 service. That is a deployment change, not a client one:
 
 ```sh
-railway variables --service acp-gateway --environment production \
-  --set 'ACP_PROJECT_ALLOWLIST=zachshallbetter:*,AcmeProductCo:*'
+railway variable set 'ACP_PROJECT_ALLOWLIST=zachshallbetter:*,AcmeProductCo:*' \
+  --service acp-gateway --environment production
 ```
 
 An `<owner>:*` entry admits every board that owner holds, which is what keeps a

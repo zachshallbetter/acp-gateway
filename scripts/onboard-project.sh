@@ -102,7 +102,7 @@ elif [ "$DRY" = 1 ]; then
   say "    would: append ACP_GATEWAY_URL / ACP_GATEWAY_TOKEN to .env.local"
 else
   command -v railway >/dev/null || { echo "error: railway CLI not found; install it or set ACP_GATEWAY_TOKEN" >&2; exit 1; }
-  TOKEN="${ACP_GATEWAY_TOKEN:-$(railway variables --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENV" --json 2>/dev/null | jq -r '.ACP_GATEWAY_TOKEN // empty')}"
+  TOKEN="${ACP_GATEWAY_TOKEN:-$(railway variable list --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENV" --json 2>/dev/null | jq -r '.ACP_GATEWAY_TOKEN // empty')}"
   [ -n "$TOKEN" ] || { echo "error: could not read ACP_GATEWAY_TOKEN from Railway ($RAILWAY_SERVICE/$RAILWAY_ENV)" >&2; echo "remedy: 'railway link' to the agent-control-plane project, or export ACP_GATEWAY_TOKEN" >&2; exit 1; }
   { printf '\n# ACP gateway — board READS route here instead of local gh credentials.\n'
     printf '# Railway: service %s, environment %s. Never commit this file.\n' "$RAILWAY_SERVICE" "$RAILWAY_ENV"

@@ -1495,6 +1495,19 @@ def hash_chain_enabled():
     return os.getenv("ACP_AUDIT_HASH_CHAIN", "").strip().lower() in ("1", "true", "yes")
 
 
+def production_hardening_error():
+    """Return missing controls when an operator explicitly requires production hardening."""
+    required = {
+        "ACP_POLICY_SIGNING_KEY": bool(os.getenv("ACP_POLICY_SIGNING_KEY", "").strip()),
+        "ACP_CAPABILITY_SIGNING_KEY": bool(capability_key()),
+        "ACP_SECURITY_STATE_FILE": bool(os.getenv("ACP_SECURITY_STATE_FILE", "").strip()),
+        "ACP_AUDIT_LOG": bool(os.getenv("ACP_AUDIT_LOG", "").strip()),
+        "ACP_AUDIT_HASH_CHAIN": hash_chain_enabled(),
+    }
+    missing = [name for name, enabled in required.items() if not enabled]
+    return ", ".join(missing) if missing else None
+
+
 def chain_head():
     if _CHAIN["head"] is None:
         _CHAIN["head"] = (security_store().get("chain:head") or {}).get("hash") or ""
@@ -4306,6 +4319,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def main():
     if not os.getenv("ACP_GATEWAY_TOKEN"):
         raise SystemExit("ACP_GATEWAY_TOKEN is required")
+    if os.getenv("ACP_REQUIRE_PRODUCTION_CONTROLS", "").strip().lower() in ("1", "true", "yes"):
+        missing = production_hardening_error()
+        if missing:
+            raise SystemExit("production controls required but missing: " + missing)
     allowlist_rules()                    # fail fast on a malformed allowlist, not on the first read
     # A policy that cannot be parsed must stop the deployment. Starting with an
     # empty registry would look identical to "nothing to enforce".
