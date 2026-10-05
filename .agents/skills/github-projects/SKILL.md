@@ -109,7 +109,7 @@ their numbers (`/internal/installations`, `/internal/projects?owner=`).
 Commands take `--owner <org-or-user> --project <number>`, but you can avoid repeating
 them: pick an **active project** once and the scripts fall back to it.
 ```bash
-scripts/project.sh use S2Forge 2     # set the active project (validated before saving)
+scripts/project.sh use example-org 2     # set the active project (validated before saving)
 scripts/project.sh current           # show it
 scripts/project.sh list              # list the active owner's projects (★ = active)
 scripts/project.sh list someorg      # list another owner's projects to switch to
@@ -118,8 +118,8 @@ scripts/project.sh clear             # forget it
 ```
 After `use`, the four scripts below run with **no** `--owner/--project`. Precedence:
 an explicit flag **>** env `GH_PROJECT_OWNER`/`GH_PROJECT_NUMBER` (one-off override)
-**>** the saved active project (`~/.config/github-projects/current`). The S2Forge org
-board is `S2Forge` #2.
+**>** the saved active project (`~/.config/github-projects/current`). The example-org org
+board is `example-org` #2.
 
 ## The fast path: bundled scripts
 
@@ -131,7 +131,7 @@ All accept `--owner/--project`, but fall back to the active project (above) when
 to make a real issue (built-in fields auto-fill from it — the easy, recommended path);
 omit it for a draft. See `references/conventions.md` for why real issues beat drafts.
 ```bash
-scripts/new-item.sh --owner S2Forge --project 2 --repo S2Forge/generation \
+scripts/new-item.sh --owner example-org --project 2 --repo example-org/generation \
   --title "SSRF guard on fetch-time URL allowlist" --label security \
   --set "Status=To triage" --set "Band=Wave 0" --set "Severity=High"
 ```
@@ -140,7 +140,7 @@ scripts/new-item.sh --owner S2Forge --project 2 --repo S2Forge/generation \
 ID and every field's ID, data type, single-select options, and iterations in one
 call (auto-detecting org vs user; `@me` works too). Run once, cache the JSON, reuse it.
 ```bash
-scripts/project-ids.sh S2Forge 2
+scripts/project-ids.sh example-org 2
 # → { projectId, title, fields:[{name,id,dataType,options,iterations}] }
 ```
 
@@ -150,20 +150,20 @@ flag. Use repeatable `--set "Field=Value"` to set many fields in **one call** (i
 resolves the project once) — prefer this in bulk loops. It prints a line per field
 and exits non-zero if any field fails, so don't suppress its output.
 ```bash
-scripts/set-field.sh --owner S2Forge --project 2 --item PVTI_xxx --field Status --value "In progress"
-scripts/set-field.sh --owner S2Forge --project 2 --item PVTI_xxx --field "Target date" --value 2026-07-01
-scripts/set-field.sh --owner S2Forge --project 2 --item PVTI_xxx --field Status --clear
+scripts/set-field.sh --owner example-org --project 2 --item PVTI_xxx --field Status --value "In progress"
+scripts/set-field.sh --owner example-org --project 2 --item PVTI_xxx --field "Target date" --value 2026-07-01
+scripts/set-field.sh --owner example-org --project 2 --item PVTI_xxx --field Status --clear
 # many fields at once:
-scripts/set-field.sh --owner S2Forge --project 2 --item PVTI_xxx \
+scripts/set-field.sh --owner example-org --project 2 --item PVTI_xxx \
   --set "Status=In progress" --set "Effort=M" --set "Repos=generation"
 ```
 
 **`add-item.sh`** — add an issue/PR by URL and print the new item ID, ready to pipe
 into `set-field.sh` (idempotent — re-adding returns the same ID).
 ```bash
-ITEM=$(scripts/add-item.sh --owner S2Forge --project 2 \
-         --url https://github.com/S2Forge/systems/issues/42)
-scripts/set-field.sh --owner S2Forge --project 2 --item "$ITEM" --field Status --value Ready
+ITEM=$(scripts/add-item.sh --owner example-org --project 2 \
+         --url https://github.com/example-org/systems/issues/42)
+scripts/set-field.sh --owner example-org --project 2 --item "$ITEM" --field Status --value Ready
 ```
 
 ## Common operations at a glance
@@ -301,7 +301,7 @@ default once with `project.sh use <owner> <number>`.
 
 The **coordinator / claim layer** additionally assumes a field schema — an `Agent` field,
 `Status` values `Ready` / `In progress` / `In review`, and the `Band` / `Repos` / `Gate`
-customs. Those are **configurable via env vars** (defaults match the S2Forge board), so a
+customs. Those are **configurable via env vars** (defaults match the example-org board), so a
 board with a different schema just exports the differences:
 ```bash
 export GP_FIELD_AGENT=Owner   GP_FIELD_STATUS=Status   GP_FIELD_REPOS=Repos

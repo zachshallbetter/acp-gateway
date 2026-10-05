@@ -6,7 +6,7 @@
 #
 #   protect.sh <owner/name> <branch> <check-context> [<check-context> ...]
 #
-# Example:  protect.sh S2Forge/compute main "build"   # require the "build" check
+# Example:  protect.sh example-org/compute main "build"   # require the "build" check
 #
 # Needs admin on the repo. This is an explicit, deliberate action — review before running;
 # it turns on branch protection (required checks, strict up-to-date, admins enforced).

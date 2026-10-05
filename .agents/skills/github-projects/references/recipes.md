@@ -1,6 +1,6 @@
 # Recipes — end-to-end project workflows
 
-Copy-paste workflows that chain the primitives. They assume `OWNER=S2Forge`
+Copy-paste workflows that chain the primitives. They assume `OWNER=example-org`
 and a project `NUM`. Scripts referenced live in `../scripts/`.
 
 ## 1. Triage an issue onto the board with a status
@@ -8,7 +8,7 @@ and a project `NUM`. Scripts referenced live in `../scripts/`.
 The most common operation: take an existing issue, put it on the board, set Status.
 ```bash
 ITEM=$(scripts/add-item.sh --owner "$OWNER" --project "$NUM" \
-         --url https://github.com/S2Forge/systems/issues/42)
+         --url https://github.com/example-org/systems/issues/42)
 scripts/set-field.sh --owner "$OWNER" --project "$NUM" --item "$ITEM" --field Status --value "To triage"
 ```
 
@@ -20,7 +20,7 @@ ITEM=$(gh project item-create "$NUM" --owner "$OWNER" --title "Spike: cache laye
 scripts/set-field.sh --owner "$OWNER" --project "$NUM" --item "$ITEM" --field Status --value Backlog
 
 # later: convert it into a real tracked issue in a repo
-REPO_ID=$(gh repo view S2Forge/systems --json id -q .id)
+REPO_ID=$(gh repo view example-org/systems --json id -q .id)
 gh api graphql -f query='
 mutation($item:ID!,$repo:ID!){
   convertProjectV2DraftIssueItemToIssue(input:{itemId:$item, repositoryId:$repo}){
@@ -31,7 +31,7 @@ mutation($item:ID!,$repo:ID!){
 ## 3. Bulk-add every open issue with a label
 
 ```bash
-gh issue list --repo S2Forge/systems --label "needs-triage" --state open \
+gh issue list --repo example-org/systems --label "needs-triage" --state open \
   --json url -q '.[].url' | while read -r url; do
   scripts/add-item.sh --owner "$OWNER" --project "$NUM" --url "$url" >/dev/null
   echo "added $url"
@@ -87,7 +87,7 @@ gh project link "$NUM" --owner "$OWNER" --repo systems              # show it on
 
 You often have the issue URL but need the project-item ID to edit fields:
 ```bash
-ISSUE_URL="https://github.com/S2Forge/systems/issues/42"
+ISSUE_URL="https://github.com/example-org/systems/issues/42"
 ITEM=$(gh project item-list "$NUM" --owner "$OWNER" --limit 500 --format json \
         | jq -r --arg u "$ISSUE_URL" '.items[] | select(.content.url==$u) | .id')
 ```
@@ -100,7 +100,7 @@ ITEM=$(gh project item-list "$NUM" --owner "$OWNER" --limit 500 --format json \
 gh api graphql -f owner="$OWNER" -F number="$NUM" -f query='…items+Status+content.number…' \
   | jq -r '… "\(.number) \(.status)"' \
   | while read -r num st; do
-      gh issue edit "$num" --repo S2Forge/systems --add-label "status:$st"
+      gh issue edit "$num" --repo example-org/systems --add-label "status:$st"
     done
 ```
 (Expand the first line with the query from recipe 5; this is a sketch of the join.)
@@ -113,7 +113,7 @@ loop var names avoid zsh reserved words, the scripts are called directly (never 
 command-in-a-variable), and each item's fields land in a single `--set` call.
 
 ```bash
-OWNER=S2Forge; NUM=2
+OWNER=example-org; NUM=2
 
 # 1. Use the project's REAL Status options (they differ per project). Print them first:
 scripts/project-ids.sh "$OWNER" "$NUM" | jq -r '.fields[] | select(.name=="Status").options[].name'

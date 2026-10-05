@@ -8,7 +8,7 @@
 # workflow needs is this "Rosetta stone". Run it once, cache the JSON, reuse it.
 #
 # Usage:   project-ids.sh <owner> <project-number>
-# Example: project-ids.sh S2Forge 2
+# Example: project-ids.sh example-org 2
 #
 # Works for both organization-owned and user-owned projects (auto-detected).
 # Output: JSON with { projectId, title, number, url, fields:[{name,id,dataType,

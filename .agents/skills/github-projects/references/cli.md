@@ -2,7 +2,7 @@
 
 The `gh project` command group covers ~80% of GitHub Projects work without touching
 GraphQL. Every command takes the project **number** (the integer in the URL, e.g. `2`
-in `/orgs/S2Forge/projects/2`) plus `--owner`. The owner is an **org login**
+in `/orgs/example-org/projects/2`) plus `--owner`. The owner is an **org login**
 or a **user login**; use `@me` for the authenticated user's own projects.
 
 All read commands accept `--format json` and `-q/--jq <expr>` for parsing. Prefer
@@ -30,40 +30,40 @@ overrides the keyring token — verify *that* token's scopes if results surprise
 
 ```bash
 # List projects for an owner (number, title, state, node ID)
-gh project list --owner S2Forge
+gh project list --owner example-org
 gh project list --owner @me --closed          # include closed
 
 # View one project (fields, counts, URL). --web opens it in a browser.
-gh project view 2 --owner S2Forge
-gh project view 2 --owner S2Forge --format json
+gh project view 2 --owner example-org
+gh project view 2 --owner example-org --format json
 
 # Create. Prints the new project's URL and number.
-gh project create --owner S2Forge --title "Q3 Roadmap"
+gh project create --owner example-org --title "Q3 Roadmap"
 
 # Edit metadata
-gh project edit 2 --owner S2Forge --title "New title"
-gh project edit 2 --owner S2Forge --description "..." --readme "## How we work…"
-gh project edit 2 --owner S2Forge --visibility PUBLIC   # or PRIVATE
+gh project edit 2 --owner example-org --title "New title"
+gh project edit 2 --owner example-org --description "..." --readme "## How we work…"
+gh project edit 2 --owner example-org --visibility PUBLIC   # or PRIVATE
 
 # Copy (duplicate fields/views into a new project; --drafts keeps draft items)
-gh project copy 2 --source-owner S2Forge --target-owner S2Forge --title "Q4 Roadmap"
+gh project copy 2 --source-owner example-org --target-owner example-org --title "Q4 Roadmap"
 
 # Templates
-gh project mark-template 2 --owner S2Forge            # org templates only
-gh project close 2 --owner S2Forge                    # --undo to reopen
-gh project delete 2 --owner S2Forge                   # irreversible
+gh project mark-template 2 --owner example-org            # org templates only
+gh project close 2 --owner example-org                    # --undo to reopen
+gh project delete 2 --owner example-org                   # irreversible
 ```
 
 ## Fields
 
 ```bash
 # List fields (id, name, type; single-select options included in JSON)
-gh project field-list 2 --owner S2Forge --format json
+gh project field-list 2 --owner example-org --format json
 
 # Create fields. data-type ∈ {TEXT, SINGLE_SELECT, DATE, NUMBER}
-gh project field-create 2 --owner S2Forge --name "Estimate" --data-type NUMBER
-gh project field-create 2 --owner S2Forge --name "Target date" --data-type DATE
-gh project field-create 2 --owner S2Forge --name "Priority" --data-type SINGLE_SELECT \
+gh project field-create 2 --owner example-org --name "Estimate" --data-type NUMBER
+gh project field-create 2 --owner example-org --name "Target date" --data-type DATE
+gh project field-create 2 --owner example-org --name "Priority" --data-type SINGLE_SELECT \
   --single-select-options "P0,P1,P2,P3"
 
 # Delete a field (needs the field's node ID from field-list)
@@ -86,13 +86,13 @@ item has its own node ID (`PVTI_…`), distinct from the issue/PR's own node ID.
 
 ```bash
 # List items. DEFAULT LIMIT IS 30 — always raise it for real boards.
-gh project item-list 2 --owner S2Forge --limit 200 --format json
+gh project item-list 2 --owner example-org --limit 200 --format json
 
 # Add an existing issue/PR by URL (idempotent — re-adding returns the same item)
-gh project item-add 2 --owner S2Forge --url https://github.com/S2Forge/systems/issues/42
+gh project item-add 2 --owner example-org --url https://github.com/example-org/systems/issues/42
 
 # Create a draft issue (lives only inside the project until "converted")
-gh project item-create 2 --owner S2Forge --title "Spike: evaluate X" --body "notes…"
+gh project item-create 2 --owner example-org --title "Spike: evaluate X" --body "notes…"
 
 # Edit a single field value per call. Needs item ID + project ID + field ID.
 # Value flag must match the field's data type:
@@ -107,8 +107,8 @@ gh project item-edit --id PVTI_xxx --project-id PVT_xxx --field-id PVTF_xxx --cl
 gh project item-edit --id PVTI_xxx --title "new title" --body "new body"
 
 # Archive keeps the item (recoverable); delete removes the row from the project.
-gh project item-archive 2 --owner S2Forge --id PVTI_xxx          # --undo to restore
-gh project item-delete 2 --owner S2Forge --id PVTI_xxx
+gh project item-archive 2 --owner example-org --id PVTI_xxx          # --undo to restore
+gh project item-delete 2 --owner example-org --id PVTI_xxx
 ```
 
 > The fiddly part is supplying three node IDs and the right value flag — especially
@@ -121,24 +121,24 @@ Link a project to a repo or team so it appears in that repo/team's Projects tab 
 can power auto-add workflows.
 
 ```bash
-gh project link   2 --owner S2Forge --repo systems
-gh project link   2 --owner S2Forge --team platform
-gh project unlink 2 --owner S2Forge --repo systems
+gh project link   2 --owner example-org --repo systems
+gh project link   2 --owner example-org --team platform
+gh project unlink 2 --owner example-org --repo systems
 ```
 
 ## Output and parsing
 
 ```bash
 # Map every item to "status | title"
-gh project item-list 2 --owner S2Forge --limit 200 --format json \
+gh project item-list 2 --owner example-org --limit 200 --format json \
   | jq -r '.items[] | "\(.status // "—") | \(.title)"'
 
 # Just the IDs of items currently "In progress"
-gh project item-list 2 --owner S2Forge --limit 200 --format json \
+gh project item-list 2 --owner example-org --limit 200 --format json \
   | jq -r '.items[] | select(.status=="In progress") | .id'
 
 # Field node IDs by name
-gh project field-list 2 --owner S2Forge --format json \
+gh project field-list 2 --owner example-org --format json \
   | jq -r '.fields[] | "\(.name)\t\(.id)"'
 ```
 
@@ -157,6 +157,6 @@ Two parsing facts worth knowing (both verified, easy to trip on):
 
 ```bash
 # correct: read every item's Estimate from the CLI list (lowercased key)
-gh project item-list 2 --owner S2Forge --limit 200 --format json \
+gh project item-list 2 --owner example-org --limit 200 --format json \
   | jq -r '.items[] | "\(.title): \(.estimate // "—")"'
 ```

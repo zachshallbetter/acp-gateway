@@ -8,9 +8,9 @@
 #
 # Usage:   add-item.sh --owner <o> --project <n> --url <issue-or-pr-url>
 # Example:
-#   ITEM=$(add-item.sh --owner S2Forge --project 2 \
-#            --url https://github.com/S2Forge/systems/issues/42)
-#   set-field.sh --owner S2Forge --project 2 --item "$ITEM" --field Status --value Ready
+#   ITEM=$(add-item.sh --owner example-org --project 2 \
+#            --url https://github.com/example-org/systems/issues/42)
+#   set-field.sh --owner example-org --project 2 --item "$ITEM" --field Status --value Ready
 #
 # Note: adding the same content twice is idempotent — GitHub returns the existing
 # item's ID rather than creating a duplicate.

@@ -18,12 +18,12 @@
 #
 # Examples:
 #   # real issue — Repository/Assignees/Labels auto-fill from the issue:
-#   new-item.sh --owner S2Forge --project 2 --repo S2Forge/generation \
+#   new-item.sh --owner example-org --project 2 --repo example-org/generation \
 #     --title "SSRF guard on fetch-time URL allowlist" --label security \
 #     --set "Status=To triage" --set "Band=Wave 0" --set "Severity=High" --set "Effort=M"
 #
 #   # draft — only the project fields you set:
-#   new-item.sh --owner S2Forge --project 2 --title "Spike: cache layer" \
+#   new-item.sh --owner example-org --project 2 --title "Spike: cache layer" \
 #     --set "Status=Backlog" --set "Band=Wave 0" --set "Effort=S"
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -17,8 +17,8 @@
 #     --set "Status=In progress" --set "Effort=M" --set "Repos=generation"
 #
 # Examples:
-#   set-field.sh --owner S2Forge --project 2 --item PVTI_xxx --field Status --value "In progress"
-#   set-field.sh --owner S2Forge --project 2 --item PVTI_xxx --set "Status=Done" --set "Effort=L"
+#   set-field.sh --owner example-org --project 2 --item PVTI_xxx --field Status --value "In progress"
+#   set-field.sh --owner example-org --project 2 --item PVTI_xxx --set "Status=Done" --set "Effort=L"
 #
 # `--set` splits on the FIRST `=`, so values may contain `=`. Single-select and
 # iteration matching is case-insensitive by name. Prefer `--set` in bulk loops:

@@ -11,7 +11,7 @@ board** and read from it, refreshing only as needed.
 
 ```json
 { "id":"PVTI_…", "type":"DRAFT_ISSUE|ISSUE|PULL_REQUEST", "title":"…",
-  "number":42, "url":"…", "state":"OPEN|MERGED|CLOSED", "repository":"S2Forge/generation",
+  "number":42, "url":"…", "state":"OPEN|MERGED|CLOSED", "repository":"example-org/generation",
   "isArchived":false, "createdAt":"…", "updatedAt":"…",
   "assignees":["…"], "labels":["…"], "milestone":"…",
   "linkedPRs":[{"url":"…","number":5,"state":"OPEN"}],
@@ -142,7 +142,7 @@ isn't enforced (the PR is left for a human). To opt a repo into safe auto-merge,
 required check:
 
 ```bash
-scripts/protect.sh S2Forge/compute main "build"   # require the "build" CI check (needs repo admin)
+scripts/protect.sh example-org/compute main "build"   # require the "build" CI check (needs repo admin)
 ```
 Until you do that, `--apply` (even with merge on) behaves as propose-only for that repo —
 which is the safe default.

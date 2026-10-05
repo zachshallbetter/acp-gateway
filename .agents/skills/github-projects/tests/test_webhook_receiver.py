@@ -10,7 +10,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertTrue(webhook_receiver.verify(secret, body, sig)); self.assertFalse(webhook_receiver.verify(secret, b"bad", sig))
     def test_delivery_is_idempotent_and_versioned(self):
         with tempfile.TemporaryDirectory() as d:
-            db = webhook_receiver.db_open(Path(d) / "deliveries.sqlite3"); payload={"repository":{"full_name":"S2Forge/systems"}}
+            db = webhook_receiver.db_open(Path(d) / "deliveries.sqlite3"); payload={"repository":{"full_name":"example-org/systems"}}
             self.assertTrue(webhook_receiver.enqueue(db,"d1","issues",payload)); self.assertFalse(webhook_receiver.enqueue(db,"d1","issues",payload))
             envelope=json.loads(db.execute("SELECT payload FROM deliveries WHERE delivery_id='d1'").fetchone()[0]); self.assertEqual(envelope["schema_version"],webhook_receiver.EVENT_VERSION)
 

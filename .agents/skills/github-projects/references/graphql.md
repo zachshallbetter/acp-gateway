@@ -11,7 +11,7 @@ pagination.** Run it through `gh api graphql` so it inherits your auth.
 
 Pattern for every call:
 ```bash
-gh api graphql -f owner=S2Forge -F number=2 -f query='…'
+gh api graphql -f owner=example-org -F number=2 -f query='…'
 ```
 `-f` passes a string variable, `-F` a typed (int/bool) variable. Inside the query,
 GraphQL variables are `$owner`, `$number`, etc.
@@ -61,7 +61,7 @@ for this query when you need the field/option **node IDs**, an exact case-sensit
 name mapping, or full iteration internals. `fieldValues` returns the typed value for
 every populated field on each item:
 ```bash
-gh api graphql -f owner=S2Forge -F number=2 -f query='
+gh api graphql -f owner=example-org -F number=2 -f query='
 query($owner: String!, $number: Int!) {
   organization(login: $owner) { projectV2(number: $number) {
     items(first: 50) { nodes {
@@ -139,7 +139,7 @@ mutation($p:ID!,$i:ID!){ deleteProjectV2Item(input:{projectId:$p, itemId:$i}){ d
 also returns only non-archived items; use `archivedStates:[ARCHIVED]` to find archived
 items (e.g. to restore one):
 ```bash
-gh api graphql -f owner=S2Forge -F number=2 -f query='
+gh api graphql -f owner=example-org -F number=2 -f query='
 query($owner:String!,$number:Int!){ organization(login:$owner){ projectV2(number:$number){
   items(first:100,archivedStates:[ARCHIVED]){ nodes { id isArchived content{ ... on Issue { title } ... on DraftIssue { title } } } } } } }' \
   | jq -r '.data.organization.projectV2.items.nodes[] | select(.isArchived) | "\(.id)\t\(.content.title)"'
@@ -210,7 +210,7 @@ every item that held it loses that value. So **always fetch the current options 
 and pass them all back**, editing within the complete list:
 ```bash
 # 1. read current options (keep their ids to preserve history)
-scripts/project-ids.sh S2Forge 2 | jq '.fields[] | select(.name=="Priority").options'
+scripts/project-ids.sh example-org 2 | jq '.fields[] | select(.name=="Priority").options'
 # 2. send the FULL set — existing entries keep their id; new ones omit id
 gh api graphql -f query='
 mutation($f:ID!){
@@ -249,7 +249,7 @@ drive items/fields via the API.
 Assignees, Labels, Milestone, and Repository are **properties of the underlying
 issue/PR**, not project-item field values. Set them on the issue itself:
 ```bash
-gh issue edit 42 --repo S2Forge/systems --add-assignee alice --add-label bug --milestone "v1"
+gh issue edit 42 --repo example-org/systems --add-assignee alice --add-label bug --milestone "v1"
 ```
 They then surface as columns on the board automatically. Sub-issue progress and
 Parent issue likewise derive from the issue graph (`gh issue edit --add-sub-issue`).

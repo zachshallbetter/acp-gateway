@@ -30,12 +30,12 @@ One command creates the item and sets its fields. Pass `--repo` to make a real i
 
 ```bash
 # real issue — Repository/Assignees/Labels fill themselves:
-scripts/new-item.sh --owner S2Forge --project 2 --repo S2Forge/generation \
+scripts/new-item.sh --owner example-org --project 2 --repo example-org/generation \
   --title "SSRF guard on fetch-time URL allowlist" --label security \
   --set "Status=To triage" --set "Band=Wave 0" --set "Severity=High" --set "Effort=M"
 
 # draft — only for an unscoped idea:
-scripts/new-item.sh --owner S2Forge --project 2 --title "Spike: cache layer" \
+scripts/new-item.sh --owner example-org --project 2 --title "Spike: cache layer" \
   --set "Status=Backlog" --set "Band=Wave 0" --set "Effort=S"
 ```
 For many items at once, see the bulk-load recipe (recipes.md #9).
