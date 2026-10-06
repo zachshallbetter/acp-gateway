@@ -15,6 +15,38 @@ Originally built inside `Infinite-Verse` (`docs/ACP_GATEWAY_DEPLOYMENT.md`),
 moved out here 2026-08-26 to be reused across every project that wants this
 pattern, not just that one ecosystem.
 
+## What makes it different
+
+- **GitHub is evidence, not authority.** Losing GitHub access does not switch
+  enforcement off; it makes it stricter. ACP can no longer confirm the
+  repository is what it claims, so trust drops and protected actions fail
+  closed. Uninstalling the App turns `ALLOW` into `REVERIFY_REQUIRED`, never
+  into "no rules apply". See [Policy authority](#policy-authority).
+- **The agent is a sensor; ACP decides.** What the policy expects, what the
+  agent reports seeing, and what ACP confirmed for itself are kept apart. No
+  volume of reporting promotes a self-reported state to verified. Deleting
+  `NOTICE` or the whole `.agents/` tree removes evidence, not rules, and the
+  deletion is itself evidence. See
+  [Protected artifacts and workspace integrity](#protected-artifacts-and-workspace-integrity).
+- **Containment only gets stricter on its own.** A repository moves from
+  re-verification to quarantine to locked, and nothing a caller does moves it
+  back. Recovery needs a server-side authorization for one ref, one SHA pair,
+  one use and a short expiry, and it counts only once ACP has verified the
+  result itself, not when the agent says it is done. See
+  [Containment, lockout and recovery](#containment-lockout-and-recovery).
+- **Every agent gets the same answer.** `agent_id` is recorded for audit and
+  never affects the decision, so handing a denied action to another agent
+  does not help. See [Cross-agent enforcement](#cross-agent-enforcement).
+- **Changing ACP needs a separate credential.** `policy.modify` and
+  `credential.modify` require `ACP_POLICY_ADMIN_TOKEN`; the gateway token every
+  agent holds cannot rewrite the policy that binds it.
+- **Refusals explain themselves.** Each carries a stable code, a detail, a
+  remedy and the data needed to retry, so an agent can correct itself instead
+  of guessing. See [Error contract](#error-contract).
+- **Deliberately small.** No board writes, no webhooks, no board caching:
+  every board read goes to GitHub fresh. See
+  [What it deliberately does not do](#what-it-deliberately-does-not-do).
+
 ## What it does
 
 - Holds the GitHub App credentials (`ACP_GITHUB_APP_ID`,
