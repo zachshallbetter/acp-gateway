@@ -568,7 +568,9 @@ def project_context(owner: str, project: str):
                                  "gateway log or the security webhook for the reason.",
                           owner=owner, project=int(project), authorization_state=state,
                           incident_id=entry.get("incident_id"),
-                          policy_id=record["policy"]["policy_id"])
+                          policy_id=record["policy"]["policy_id"],
+                          **resolve_board_gate(board_read_gate(), state,
+                                               entry.get("incident_id")))
 
     token, credential = owner_token(owner)
 
@@ -3455,6 +3457,20 @@ def board_read_gate():
     return setting if setting in ("off", "locked", "contained") else "locked"
 
 
+def resolve_board_gate(gate_mode, authorization_state, incident_id=None):
+    """Separate the configured read gate from a resource's active block."""
+    blocked = authorization_state in BOARD_GATE_STATES.get(gate_mode, ())
+    active_block = ({"reason": "RESOURCE_CONTAINED",
+                     "authorization_state": authorization_state,
+                     "incident_id": incident_id,
+                     "responsible_role": "security_administrator",
+                     "next_step": "Review the ACP incident and complete authenticated recovery; board configuration changes do not clear containment."}
+                    if blocked else None)
+    return {"gate": gate_mode, "gate_mode": gate_mode,
+            "gate_status": "ACTIVE_BLOCK" if blocked else "CLEAR",
+            "gate_blocked": blocked, "active_block": active_block}
+
+
 def board_policies(owner, number):
     """The governed resources that claim this board."""
     found = []
@@ -3471,14 +3487,12 @@ def board_policies(owner, number):
 
 def board_gate(owner, number):
     """(record, entry, state) when a contained resource owns this board."""
-    gate = board_read_gate()
-    if gate == "off":
-        return None
-    blocking = BOARD_GATE_STATES.get(gate, ("LOCKED",))
+    gate_mode = board_read_gate()
     for record in board_policies(owner, number):
         entry = security_record(security_keys(record["policy"]["repository"])) or {}
-        if entry.get("authorization_state", "NORMAL") in blocking:
-            return record, entry, entry["authorization_state"]
+        state = entry.get("authorization_state", "NORMAL")
+        if resolve_board_gate(gate_mode, state, entry.get("incident_id"))["gate_blocked"]:
+            return record, entry, state
     return None
 
 
@@ -3489,12 +3503,16 @@ def board_advisory(owner, number):
         return None
     policy = records[0]["policy"]
     entry = security_record(security_keys(policy["repository"])) or {}
+    state = entry.get("authorization_state", "NORMAL")
+    gate_mode = board_read_gate()
     return {"resource": f"{policy['repository']['owner']}/{policy['repository']['name']}".lower(),
             "policy_id": policy["policy_id"], "policy_version": policy["version"],
-            "authorization_state": entry.get("authorization_state", "NORMAL"),
+            "authorization_state": state,
             "incident_id": entry.get("incident_id"),
             "integrity": (entry.get("integrity") or {}).get("status"),
-            "gate": board_read_gate()}
+            # `gate` remains the legacy configured-mode field. Current block
+            # status is carried only by the explicit fields from the resolver.
+            **resolve_board_gate(gate_mode, state, entry.get("incident_id"))}
 
 
 # ------------------------------------------------------- public notice lookup

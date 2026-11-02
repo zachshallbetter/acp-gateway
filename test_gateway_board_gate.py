@@ -92,11 +92,22 @@ def test_a_deployment_with_no_policy_at_all_is_unaffected():
 def test_a_claimed_board_reads_and_reports_its_resource_state():
     fresh()
     with governed_env():
+        key = gateway.security_keys({"owner": OWNER, "name": REPO})[0]
+        gateway._SECURITY["records"][key] = {
+            "authorization_state": "NORMAL",
+            "integrity": {"status": "MATCH", "unresolved": False},
+        }
         out, _ = read_board()
     assert out["snapshot"]["number"] == BOARD
-    assert out["acp"] == {"resource": f"{OWNER}/{REPO}".lower(), "policy_id": "notice-enforcer",
-                          "policy_version": 1, "authorization_state": "NORMAL",
-                          "incident_id": None, "integrity": None, "gate": "locked"}
+    assert out["acp"]["resource"] == f"{OWNER}/{REPO}".lower()
+    assert out["acp"]["policy_id"] == "notice-enforcer"
+    assert out["acp"]["policy_version"] == 1
+    assert out["acp"]["authorization_state"] == "NORMAL"
+    assert out["acp"]["integrity"] == "MATCH"
+    assert out["acp"]["gate"] == out["acp"]["gate_mode"] == "locked"
+    assert out["acp"]["gate_status"] == "CLEAR"
+    assert out["acp"]["gate_blocked"] is False
+    assert out["acp"]["active_block"] is None
     assert "BOARD_READ" in types()
 
 
@@ -112,6 +123,10 @@ def test_a_locked_resource_cannot_read_its_board():
             raise AssertionError("a locked resource must not read its board")
     assert status == 403 and body["error"] == "BOARD_READ_CONTAINED", body
     assert body["authorization_state"] == "LOCKED"
+    assert body["gate"] == body["gate_mode"] == "locked"
+    assert body["gate_status"] == "ACTIVE_BLOCK" and body["gate_blocked"] is True
+    assert body["active_block"]["incident_id"] == locked["incident_id"]
+    assert body["active_block"]["responsible_role"] == "security_administrator"
     assert body["incident_id"] == locked["incident_id"]
     assert "administrative recovery" in body["remedy"]
     assert "curl -f" in body["remedy"], "the remedy must say the body is being discarded"
@@ -157,6 +172,9 @@ def test_the_gate_threshold_is_configurable():
         lock()
         out, _ = read_board()
     assert out["snapshot"]["number"] == BOARD, "gate=off restores the old behaviour exactly"
+    assert out["acp"]["gate"] == out["acp"]["gate_mode"] == "off"
+    assert out["acp"]["gate_status"] == "CLEAR"
+    assert out["acp"]["gate_blocked"] is False and out["acp"]["active_block"] is None
 
 
 def test_one_locked_resource_does_not_blind_another_owners_board():
@@ -213,6 +231,7 @@ def test_the_real_client_curl_sees_the_refusal_as_an_error():
                                capture_output=True, text=True)
         body = json.loads(keeps.stdout)
     assert body["error"] == "BOARD_READ_CONTAINED" and body["authorization_state"] == "LOCKED"
+    assert body["gate_status"] == "ACTIVE_BLOCK" and body["gate_blocked"] is True
 
 
 # ---- recovery restores the read -------------------------------------------

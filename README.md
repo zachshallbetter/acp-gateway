@@ -999,13 +999,25 @@ GitHub call, so it costs nothing upstream:
 ```json
 {"error": "BOARD_READ_CONTAINED", "authorization_state": "LOCKED",
  "incident_id": "inc_0b852a4bca23", "policy_id": "notice-enforcer",
+ "gate_mode": "locked", "gate_status": "ACTIVE_BLOCK", "gate_blocked": true,
+ "active_block": {"reason": "RESOURCE_CONTAINED", "responsible_role": "security_administrator",
+                  "next_step": "Review the incident and complete authenticated recovery."},
  "detail": "Board #3 of 'example-org' belongs to a resource under ACP containment (LOCKED), …",
  "remedy": "This is not a board or credential problem. …"}
 ```
 
-A successful read of a claimed board carries an `acp` advisory block —
-`resource`, `policy_id`, `policy_version`, `authorization_state`, `incident_id`,
-`integrity`, `gate` — which existing `jq` filters ignore.
+A successful read of a claimed board carries an `acp` advisory block with the
+resource, policy, authorization, integrity, and gate state. The legacy `gate`
+field is only an alias for the configured read threshold; it is not the current
+authorization state. `gate_mode` repeats that configuration, while
+`gate_status`, `gate_blocked`, and `active_block` report whether this resource
+is currently blocked. Thus `authorization_state: NORMAL` with `gate_mode:
+locked` reports `gate_status: CLEAR`, `gate_blocked: false`, and
+`active_block: null`. A real refusal reports `gate_status: ACTIVE_BLOCK`,
+`gate_blocked: true`, and an `active_block` containing the state, incident,
+responsible role, and next step. Clients must use those explicit status fields
+and never infer a current lock from `gate` or `gate_mode` alone. Older `jq`
+filters that ignore additional fields remain compatible.
 
 ### Clients that use `curl -f`
 
