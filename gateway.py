@@ -1833,7 +1833,9 @@ OBSERVATION_FIELDS = {"bootstrap_present", "local_settings_present", "managed_po
 
 # Bounded on purpose: a summary is not a transcript.
 FIELD_LIMITS = {"request_provenance.request_summary": 2048, "request_provenance.request_text": 65536,
-                "operation.command_redacted": 4096, "operation.effect": 4096}
+                "operation.command_redacted": 4096, "operation.effect": 4096,
+                "context.source_database": 256, "context.target_database": 256,
+                "context.work_item": 128}
 NON_STRING_ENVELOPE = {"git_state.detached_head", "git_state.dirty", "git_state.ahead",
                        "git_state.behind", "git_state.remotes", "operation.force",
                        "operation.non_fast_forward", "policy_observation.bootstrap_present",
@@ -1854,7 +1856,8 @@ def store_full_request_text():
     return os.getenv("ACP_STORE_FULL_REQUEST_TEXT", "").strip().lower() in ("1", "true", "yes")
 CLAIM_FIELDS = {"owner", "name", "remote_url", "head_sha", "notice_sha256"}
 CONTEXT_FIELDS = {"ref", "old_sha", "new_sha", "force", "non_fast_forward",
-                  "recovery_authorization_id", "signals"}
+                  "recovery_authorization_id", "signals", "source_database",
+                  "target_database", "work_item"}
 # The only fields that are not strings. Everywhere else a list or a boolean is a
 # shape error, caught here rather than as a type error deep in the evaluation.
 NON_STRING_FIELDS = {"context.force", "context.non_fast_forward", "context.signals"} | NON_STRING_ENVELOPE
@@ -1928,6 +1931,23 @@ def parse_authorization_request(body):
     claim = _strict_object(body.get("repository_claim") or workspace.get("repository_claim"),
                            CLAIM_FIELDS, "repository_claim")
     context = _strict_object(body.get("context"), CONTEXT_FIELDS, "context")
+    if action == "database.migrate":
+        required = ("source_database", "target_database", "work_item")
+        missing = [name for name in required if not context.get(name)]
+        if missing:
+            raise TargetError(400, "INVALID_REQUEST",
+                              "database.migrate requires source_database, target_database, and work_item.",
+                              remedy="Use non-secret database identifiers and the Ready work-item ID.",
+                              missing=missing)
+        if context["source_database"] == context["target_database"]:
+            raise TargetError(400, "INVALID_REQUEST", "database.migrate source and target must differ.",
+                              field="context.target_database")
+        for name in required:
+            value = context[name]
+            if "@" in value or re.search(r"\b[a-z][a-z0-9+.-]*://|(?:password|secret|token)=", value, re.I):
+                raise TargetError(400, "INVALID_REQUEST",
+                                  "database.migrate context must not contain credentials or URLs.",
+                                  remedy="Pass stable non-secret identifiers only.", field=f"context.{name}")
     # The envelope may carry the operation instead of the flat fields; the
     # normalized action is what ACP decides on, never the command text.
     for envelope_key, context_key in (("ref", "ref"), ("old_sha", "old_sha"), ("new_sha", "new_sha"),
@@ -2152,6 +2172,9 @@ def authorize(request, verifier=None, admin=False, now=None):
                    policy_observation=telemetry.get("policy_observation"),
                    ref=context.get("ref"), old_sha=context.get("old_sha"),
                    new_sha=context.get("new_sha"),
+                   **({"action_context": {name: context[name] for name in
+                                           ("source_database", "target_database", "work_item")}}
+                      if action == "database.migrate" else {}),
                    recovery_authorization_id=context.get("recovery_authorization_id"),
                    verification_state=trace["trust"], verification=trace["verification"],
                    provider_verification_state=trace["verification"].get("available"),
@@ -2550,7 +2573,10 @@ def authorize(request, verifier=None, admin=False, now=None):
                       capability=body, capability_token=token,
                       authorized_action={"action": action, **scope_of})
 
-    scope_of = {"ref": context.get("ref"), "old_sha": context.get("old_sha"), "new_sha": context.get("new_sha")}
+    if action == "database.migrate":
+        scope_of = {name: context[name] for name in ("source_database", "target_database", "work_item")}
+    else:
+        scope_of = {"ref": context.get("ref"), "old_sha": context.get("old_sha"), "new_sha": context.get("new_sha")}
     body, token = build_capability("operation", parsed, claim, policy, action, scope_of, now, trace["keys"])
     return finish("ALLOW", "VERIFIED_AND_PERMITTED",
                   "Independently verified against the governing policy.",

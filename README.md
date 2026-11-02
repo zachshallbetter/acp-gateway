@@ -179,6 +179,12 @@ body is never echoed back.
 `repository_claim` is **evidence, not authority**. Nothing in it grants
 anything; it is the thing ACP checks.
 
+For `database.migrate`, `context` must instead contain exactly the non-secret
+`source_database`, `target_database`, and Ready `work_item` identifiers. ACP
+rejects missing, identical, URL-bearing, or credential-bearing values, then
+binds the three fields unchanged into the audited action and signed capability.
+The identifiers are bounded to 256, 256, and 128 characters respectively.
+
 ### The response
 
 ```json

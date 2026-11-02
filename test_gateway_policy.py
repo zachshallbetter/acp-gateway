@@ -401,6 +401,48 @@ def test_a_recovery_authorization_cannot_reach_another_ref_or_sha():
     assert out["decision"] == "DENY" and "expired" in out["detail"], out
 
 
+def test_database_migration_capability_binds_exact_source_target_and_work_item():
+    fresh()
+    actions = sorted(set(gateway.DEFAULT_PROTECTED_ACTIONS) | {"database.migrate"})
+    migration_policy = signed(policy(protected_actions=actions))
+    context = {
+        "source_database": "source.example/neondb",
+        "target_database": "target.example/neondb",
+        "work_item": "7",
+    }
+    with env(ACP_POLICY=json.dumps(migration_policy),
+             ACP_CAPABILITY_SIGNING_KEY="test-capability-signing-key"):
+        out = gateway.authorize(request("database.migrate", context=context), verifier=verifier())
+        assert out["decision"] == "ALLOW", out
+        assert out["authorized_action"] == {"action": "database.migrate", **context}, out
+        checked = gateway.verify_capability(out["capability_token"])
+        assert checked["valid"] is True, checked
+        assert checked["capability"]["scope"] == context
+        assert gateway.AUDIT[-1]["action_context"] == context
+
+
+def test_database_migration_rejects_missing_or_secret_scope():
+    invalid = (
+        {"source_database": "source.example/neondb", "target_database": "target.example/neondb"},
+        {"source_database": "postgresql://user:secret@source/db",
+         "target_database": "target.example/neondb", "work_item": "7"},
+        {"source_database": "source.example/neondb",
+         "target_database": "https://example.test/target", "work_item": "7"},
+        {"source_database": "same.example/neondb",
+         "target_database": "same.example/neondb", "work_item": "7"},
+        {"source_database": "s" * 257, "target_database": "target.example/neondb", "work_item": "7"},
+        {"source_database": "source.example/neondb", "target_database": "target.example/neondb",
+         "work_item": "w" * 129},
+    )
+    for context in invalid:
+        try:
+            gateway.parse_authorization_request(request("database.migrate", context=context))
+        except gateway.TargetError as error:
+            assert error.code == "INVALID_REQUEST", error
+        else:
+            raise AssertionError("database.migrate accepted an invalid scope")
+
+
 def test_an_agent_cannot_supply_its_own_authorization():
     fresh()
     with env():
