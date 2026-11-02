@@ -405,14 +405,20 @@ def test_database_migration_capability_binds_exact_source_target_and_work_item()
     fresh()
     actions = sorted(set(gateway.DEFAULT_PROTECTED_ACTIONS) | {"database.migrate"})
     migration_policy = signed(policy(protected_actions=actions))
+    revision = "a" * 40
     context = {
         "source_database": "source.example/neondb",
         "target_database": "target.example/neondb",
         "work_item": "7",
+        "environment": "production",
+        "ref": "refs/heads/main",
+        "new_sha": revision,
     }
     with env(ACP_POLICY=json.dumps(migration_policy),
              ACP_CAPABILITY_SIGNING_KEY="test-capability-signing-key"):
-        out = gateway.authorize(request("database.migrate", context=context), verifier=verifier())
+        out = gateway.authorize(request("database.migrate", context=context,
+                                        repository_claim=claim(head_sha=revision)),
+                                verifier=verifier(ref_sha=revision))
         assert out["decision"] == "ALLOW", out
         assert out["authorized_action"] == {"action": "database.migrate", **context}, out
         checked = gateway.verify_capability(out["capability_token"])
@@ -422,17 +428,23 @@ def test_database_migration_capability_binds_exact_source_target_and_work_item()
 
 
 def test_database_migration_rejects_missing_or_secret_scope():
+    revision = "a" * 40
+    base = {"source_database": "source.example/neondb", "target_database": "target.example/neondb",
+            "work_item": "7", "environment": "production", "ref": "refs/heads/main",
+            "new_sha": revision}
     invalid = (
         {"source_database": "source.example/neondb", "target_database": "target.example/neondb"},
-        {"source_database": "postgresql://user:secret@source/db",
-         "target_database": "target.example/neondb", "work_item": "7"},
-        {"source_database": "source.example/neondb",
-         "target_database": "https://example.test/target", "work_item": "7"},
-        {"source_database": "same.example/neondb",
-         "target_database": "same.example/neondb", "work_item": "7"},
-        {"source_database": "s" * 257, "target_database": "target.example/neondb", "work_item": "7"},
-        {"source_database": "source.example/neondb", "target_database": "target.example/neondb",
-         "work_item": "w" * 129},
+        {**base, "source_database": "postgresql://user:secret@source/db"},
+        {**base, "target_database": "https://example.test/target"},
+        {**base, "source_database": "same.example/neondb", "target_database": "same.example/neondb"},
+        {**base, "source_database": "s" * 257},
+        {**base, "work_item": "w" * 129},
+        {**base, "environment": "remote"},
+        {**base, "ref": "main"},
+        {**base, "ref": "refs/heads/release..candidate"},
+        {**base, "ref": "refs/heads/.hidden"},
+        {**base, "ref": "refs/heads/release\nbranch"},
+        {**base, "new_sha": "abc123"},
     )
     for context in invalid:
         try:
@@ -441,6 +453,33 @@ def test_database_migration_rejects_missing_or_secret_scope():
             assert error.code == "INVALID_REQUEST", error
         else:
             raise AssertionError("database.migrate accepted an invalid scope")
+
+
+def test_database_migration_requires_the_exact_checked_out_and_remote_revision():
+    fresh()
+    revision, moved = "a" * 40, "b" * 40
+    actions = sorted(set(gateway.DEFAULT_PROTECTED_ACTIONS) | {"database.migrate"})
+    migration_policy = signed(policy(protected_actions=actions))
+    context = {"source_database": "source.example/neondb", "target_database": "target.example/neondb",
+               "work_item": "7", "environment": "production", "ref": "refs/heads/main",
+               "new_sha": revision}
+    with env(ACP_POLICY=json.dumps(migration_policy)):
+        wrong_checkout = gateway.authorize(request("database.migrate", context=context,
+                                                   repository_claim=claim(head_sha=moved)),
+                                           verifier=verifier(ref_sha=revision))
+        moved_ref = gateway.authorize(request("database.migrate", context=context,
+                                              repository_claim=claim(head_sha=revision)),
+                                      verifier=verifier(ref_sha=moved))
+        wrong_ref = gateway.authorize(request("database.migrate", context=context,
+                                              repository_claim=claim(head_sha=revision)),
+                                      verifier(ref_sha=revision,
+                                               ref={"name": "refs/heads/release", "sha": revision}))
+    assert wrong_checkout["decision"] == "REVERIFY_REQUIRED", wrong_checkout
+    assert wrong_checkout["reason"] == "STALE_REVISION", wrong_checkout
+    assert moved_ref["decision"] == "REVERIFY_REQUIRED", moved_ref
+    assert moved_ref["reason"] == "STALE_REF_STATE", moved_ref
+    assert wrong_ref["decision"] == "REVERIFY_REQUIRED", wrong_ref
+    assert wrong_ref["reason"] == "STALE_REF_STATE", wrong_ref
 
 
 def test_an_agent_cannot_supply_its_own_authorization():

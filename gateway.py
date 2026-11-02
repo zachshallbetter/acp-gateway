@@ -1835,7 +1835,8 @@ OBSERVATION_FIELDS = {"bootstrap_present", "local_settings_present", "managed_po
 FIELD_LIMITS = {"request_provenance.request_summary": 2048, "request_provenance.request_text": 65536,
                 "operation.command_redacted": 4096, "operation.effect": 4096,
                 "context.source_database": 256, "context.target_database": 256,
-                "context.work_item": 128}
+                "context.work_item": 128, "context.environment": 32,
+                "context.ref": 256, "context.new_sha": 64}
 NON_STRING_ENVELOPE = {"git_state.detached_head", "git_state.dirty", "git_state.ahead",
                        "git_state.behind", "git_state.remotes", "operation.force",
                        "operation.non_fast_forward", "policy_observation.bootstrap_present",
@@ -1857,7 +1858,7 @@ def store_full_request_text():
 CLAIM_FIELDS = {"owner", "name", "remote_url", "head_sha", "notice_sha256"}
 CONTEXT_FIELDS = {"ref", "old_sha", "new_sha", "force", "non_fast_forward",
                   "recovery_authorization_id", "signals", "source_database",
-                  "target_database", "work_item"}
+                  "target_database", "work_item", "environment"}
 # The only fields that are not strings. Everywhere else a list or a boolean is a
 # shape error, caught here rather than as a type error deep in the evaluation.
 NON_STRING_FIELDS = {"context.force", "context.non_fast_forward", "context.signals"} | NON_STRING_ENVELOPE
@@ -1932,12 +1933,12 @@ def parse_authorization_request(body):
                            CLAIM_FIELDS, "repository_claim")
     context = _strict_object(body.get("context"), CONTEXT_FIELDS, "context")
     if action == "database.migrate":
-        required = ("source_database", "target_database", "work_item")
+        required = ("source_database", "target_database", "work_item", "environment", "ref", "new_sha")
         missing = [name for name in required if not context.get(name)]
         if missing:
             raise TargetError(400, "INVALID_REQUEST",
-                              "database.migrate requires source_database, target_database, and work_item.",
-                              remedy="Use non-secret database identifiers and the Ready work-item ID.",
+                              "database.migrate requires source_database, target_database, work_item, environment, ref, and new_sha.",
+                              remedy="Use non-secret database identifiers, the Ready work-item ID, a supported environment, and the exact full GitHub revision.",
                               missing=missing)
         if context["source_database"] == context["target_database"]:
             raise TargetError(400, "INVALID_REQUEST", "database.migrate source and target must differ.",
@@ -1948,6 +1949,23 @@ def parse_authorization_request(body):
                 raise TargetError(400, "INVALID_REQUEST",
                                   "database.migrate context must not contain credentials or URLs.",
                                   remedy="Pass stable non-secret identifiers only.", field=f"context.{name}")
+        if context["environment"] not in {"preview", "staging", "production"}:
+            raise TargetError(400, "INVALID_REQUEST", "database.migrate environment is unsupported.",
+                              remedy="Use preview, staging, or production.", field="context.environment")
+        ref = context["ref"]
+        if (not ref.startswith("refs/heads/") or
+                ".." in ref or
+                any(part in ("", ".", "..") or part.startswith(".") or part.endswith((".", ".lock"))
+                    for part in ref.split("/")) or
+                any(ord(char) < 33 or ord(char) == 127 for char in ref) or
+                any(char in ref for char in ("\\", "~", "^", ":", "?", "*", "[", "@{")) or
+                ref.endswith(".")):
+            raise TargetError(400, "INVALID_REQUEST", "database.migrate ref is not a valid full Git ref.",
+                              remedy="Use a full refs/heads/... name.", field="context.ref")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", context["new_sha"]):
+            raise TargetError(400, "INVALID_REQUEST", "database.migrate new_sha must be a full Git object ID.",
+                              remedy="Pass the exact 40-character SHA-1 or 64-character SHA-256 revision.",
+                              field="context.new_sha")
     # The envelope may carry the operation instead of the flat fields; the
     # normalized action is what ACP decides on, never the command text.
     for envelope_key, context_key in (("ref", "ref"), ("old_sha", "old_sha"), ("new_sha", "new_sha"),
@@ -2173,7 +2191,8 @@ def authorize(request, verifier=None, admin=False, now=None):
                    ref=context.get("ref"), old_sha=context.get("old_sha"),
                    new_sha=context.get("new_sha"),
                    **({"action_context": {name: context[name] for name in
-                                           ("source_database", "target_database", "work_item")}}
+                                           ("source_database", "target_database", "work_item",
+                                            "environment", "ref", "new_sha")}}
                       if action == "database.migrate" else {}),
                    recovery_authorization_id=context.get("recovery_authorization_id"),
                    verification_state=trace["trust"], verification=trace["verification"],
@@ -2539,6 +2558,23 @@ def authorize(request, verifier=None, admin=False, now=None):
                       "This action is protected and the repository is self-reported: ACP has never independently "
                       "verified it, so the action is refused rather than trusted.")
 
+    if action == "database.migrate":
+        if claim.get("head_sha") != context["new_sha"]:
+            return finish("REVERIFY_REQUIRED", "STALE_REVISION",
+                          "The requested migration revision is not the revision checked out by the caller. "
+                          "Refresh the checkout and request authorization again.",
+                          expected_revision=context["new_sha"], claimed_revision=claim.get("head_sha"))
+        confirmed, why = confirms(evidence, context["ref"], context["new_sha"])
+        observed_ref = evidence.get("ref") or {}
+        if confirmed and observed_ref.get("name") != context["ref"]:
+            confirmed, why = False, "GitHub returned evidence for a different ref"
+        if not confirmed:
+            return finish("REVERIFY_REQUIRED", "STALE_REF_STATE",
+                          f"ACP could not confirm the exact migration revision: {why}. "
+                          "Refresh the ref and request authorization again.",
+                          expected_ref=context["ref"], expected_revision=context["new_sha"],
+                          observed_ref=observed_ref.get("name"), observed_revision=observed_ref.get("sha"))
+
     # 8. Verified. Ref-level rules still apply.
     fast_forward = None
     if action == "git.protected_ref.update":
@@ -2574,7 +2610,8 @@ def authorize(request, verifier=None, admin=False, now=None):
                       authorized_action={"action": action, **scope_of})
 
     if action == "database.migrate":
-        scope_of = {name: context[name] for name in ("source_database", "target_database", "work_item")}
+        scope_of = {name: context[name] for name in
+                    ("source_database", "target_database", "work_item", "environment", "ref", "new_sha")}
     else:
         scope_of = {"ref": context.get("ref"), "old_sha": context.get("old_sha"), "new_sha": context.get("new_sha")}
     body, token = build_capability("operation", parsed, claim, policy, action, scope_of, now, trace["keys"])

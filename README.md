@@ -179,11 +179,16 @@ body is never echoed back.
 `repository_claim` is **evidence, not authority**. Nothing in it grants
 anything; it is the thing ACP checks.
 
-For `database.migrate`, `context` must instead contain exactly the non-secret
-`source_database`, `target_database`, and Ready `work_item` identifiers. ACP
-rejects missing, identical, URL-bearing, or credential-bearing values, then
-binds the three fields unchanged into the audited action and signed capability.
-The identifiers are bounded to 256, 256, and 128 characters respectively.
+For `database.migrate`, `context` must contain exactly the non-secret
+`source_database`, `target_database`, Ready `work_item`, `environment`, full
+GitHub branch `ref`, and full `new_sha`. The environment is `preview`, `staging`, or
+`production`; the ref is a full branch ref; and the SHA is a full
+40-character SHA-1 or 64-character SHA-256 object ID. ACP rejects missing,
+identical, URL-bearing, or credential-bearing database identifiers and refuses
+authorization unless the checked-out revision and independently read GitHub
+ref both match `new_sha`. It binds all six fields unchanged into the audited
+action and signed capability. The fields are bounded to 256, 256, 128,
+32, 256, and 64 characters respectively.
 
 ### The response
 
