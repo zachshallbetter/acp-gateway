@@ -3482,7 +3482,7 @@ PROJECT_OWNED_ARTIFACTS = frozenset({
     "AGENTS.md", "PROJECT_INTENT.md", "PROJECT_PROFILE.json", "CONTEXT_SOURCES.json",
     "FORMAL_RESOURCE_MANIFEST.json", "bindings/PROJECT_BINDINGS.yaml", ".agents/board.env",
 })
-PROJECT_OWNED_PREFIXES = (".agents/rules/", "contracts/", "records/")
+PROJECT_OWNED_PREFIXES = (".agents/rules/", "contracts/", "records/", ".agents/project/", ".agents/records/")
 _CLIENT_RELEASES = {"path": None, "index": None}
 
 
@@ -3504,6 +3504,40 @@ def client_release_index():
                 index.setdefault((rel, digest.lower()), version)
     _CLIENT_RELEASES.update(path=path, index=index)
     return index
+
+
+def release_versions():
+    """Every release version listed in client_releases.json, oldest first."""
+    try:
+        path = Path(os.getenv("ACP_CLIENT_RELEASES_FILE") or CLIENT_RELEASES_FILE)
+        releases = json.loads(path.read_text(encoding="utf-8")).get("releases") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    return sorted(releases, key=version_key)
+
+
+def version_key(version):
+    try:
+        return tuple(int(part) for part in str(version).split("."))
+    except ValueError:
+        return (0,)
+
+
+CLIENT_FILES = (".agents/acp/lib/acp.py", "scripts/acp.py")
+
+
+def client_status(version, digest):
+    """Is this client a released one, and the latest? Read-only; it never authorizes anything."""
+    versions = release_versions()
+    latest = versions[-1] if versions else None
+    digest = (digest or "").strip().lower()
+    shipped_in = next((released_client_version(path, digest) for path in CLIENT_FILES
+                       if released_client_version(path, digest)), None)
+    return {"latest": latest, "version": version or None, "known": shipped_in is not None,
+            "matches_release": shipped_in, "current": bool(latest and shipped_in == latest),
+            "deprecated_layout": shipped_in is not None and version_key(shipped_in) < (0, 7, 0),
+            "upgrade": None if not latest or shipped_in == latest else
+            f".agents/bootstrap/bootstrap upgrade --to v{latest}"}
 
 
 def released_client_version(path, digest):
@@ -4301,6 +4335,7 @@ ENDPOINTS = {
     "GET /internal/projects?owner=": "boards for one owner, each with the number to pass to project-context",
     "GET /internal/project-context?owner=&project=": "full snapshot of one allowlisted board",
     "GET /internal/policy": "identity, version, digest and signature of every policy held here",
+    "GET /internal/client-status": "?version=&sha256= is this formal-project-bootstrap client a known, current release",
     "GET /internal/policies/<policy_id>": "the same, for one policy",
     "POST /internal/authorize": "authorization decision for one action against the governing policy",
     "POST /internal/verify-capability": "check a capability at the protected boundary",
@@ -4430,6 +4465,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return project_list(first("owner"))
         if route == "/internal/project-context":
             return project_context(first("owner"), first("project"))
+        if route == "/internal/client-status":
+            return client_status(first("version"), first("sha256"))
         if route == "/internal/policy":
             registry = policy_registry()
             if registry["error"]:

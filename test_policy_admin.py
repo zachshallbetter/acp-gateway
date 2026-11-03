@@ -185,5 +185,55 @@ class GrantReleaseTests(unittest.TestCase):
             self.assertIn("scripts/acp.py: bootstrap 0.6.3 client file, accepted without a grant", out.getvalue())
 
 
+class RepinUnregisterTests(unittest.TestCase):
+    def pinned(self):
+        digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
+        return signed({"policy_id": "o-a", "version": 3, "status": "active", "repository": {"owner": "o", "name": "a"},
+                       "artifact_manifest": {"artifact_manifest_version": 1, "artifacts": [
+                           {"id": "scripts-acp.py", "path": "scripts/acp.py", "kind": "client_control",
+                            "required": True, "change_policy": "authorize_and_report",
+                            "expected_sha256": digest("old client\n")},
+                           {"id": "agents.md", "path": "AGENTS.md", "kind": "control_instruction",
+                            "required": True, "change_policy": "authorize_and_report",
+                            "expected_sha256": digest("rules\n")}],
+                           "patterns": [{"id": "deviations", "pattern": "records/deviations.jsonl",
+                                         "kind": "control_tree", "change_policy": "report_only"}]}})
+
+    def test_repin_moves_pinned_paths_to_the_contained_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            (repo / ".agents/acp/lib").mkdir(parents=True)
+            (repo / ".agents/acp/lib/acp.py").write_text("new client\n")
+            (repo / "AGENTS.md").write_text("rules\n")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            # -f: a global excludesFile commonly ignores .agents/
+            subprocess.run(["git", "-C", str(repo), "add", "-f", "-A", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgSign=false", "commit", "-q", "-m", "x"], check=True)
+            fake = FakeVercel([self.pinned()])
+            out = io.StringIO()
+            with patch.object(admin, "keychain", return_value=KEY), patch.object(admin, "vercel_api", fake), \
+                    patch.object(admin, "POLICY_FILE", Path(tmp) / "production.json"), redirect_stdout(out):
+                code = admin.cmd_repin(argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", apply=True))
+            self.assertEqual(code, 0, out.getvalue())
+            policy = fake.patched[0]
+            self.assertEqual(policy["version"], 4)
+            paths = {item["path"]: item["expected_sha256"] for item in policy["artifact_manifest"]["artifacts"]}
+            self.assertEqual(paths[".agents/acp/lib/acp.py"], hashlib.sha256(b"new client\n").hexdigest())
+            self.assertIn("AGENTS.md", paths)
+            self.assertEqual(policy["artifact_manifest"]["patterns"][0]["pattern"], ".agents/records/deviations.jsonl")
+            states = rp.validate(fake.patched, KEY, admin.KEY_ID)
+            self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
+
+    def test_unregister_removes_only_that_policy(self):
+        fake = FakeVercel([self.pinned(), *existing()[:0], signed({"policy_id": "o-b", "version": 1, "status": "active",
+                                                                    "repository": {"owner": "o", "name": "b"}})])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(admin, "keychain", return_value=KEY), \
+                patch.object(admin, "vercel_api", fake), patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(admin.cmd_unregister(argparse.Namespace(repository="o/a", apply=True)), 0)
+        self.assertEqual([p["policy_id"] for p in fake.patched], ["o-b"])
+
+
 if __name__ == "__main__":
     unittest.main()

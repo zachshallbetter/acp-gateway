@@ -3,6 +3,8 @@
 
     .venv/bin/python scripts/policy-admin.py register OWNER/NAME [OWNER/NAME ...] [--apply]
     .venv/bin/python scripts/policy-admin.py grant OWNER/NAME --checkout DIR [--ref REF] [--apply]
+    .venv/bin/python scripts/policy-admin.py repin OWNER/NAME --checkout DIR [--ref REF] [--apply]
+    .venv/bin/python scripts/policy-admin.py unregister OWNER/NAME [--apply]
 
 register  puts repositories under an ACP policy. It reads production's ACP_POLICY from
           Vercel, checks that the Keychain signing key reproduces every existing signature,
@@ -16,6 +18,14 @@ grant     authorizes the pinned-artifact changes a checkout's REF (default HEAD)
           content at HEAD differs from what ACP expects, it asks for a single-use grant from
           the expected digest to the new one (24 hours). ACP advances the baseline when a
           snapshot reports the new digest. Nothing is sent without --apply.
+
+repin     rewrites a pinned policy for a project that moved to the contained layout
+          (bootstrap 0.7): each pinned path is mapped to its new location and re-pinned at
+          the digest REF has there; the policy is signed as version+1.
+
+unregister removes a repository's policy, so ACP stops governing it.
+
+Policy changes take effect on the next production deployment.
 
 Owner credentials come from the macOS Keychain service "ACP Gateway Production"
 (ACP_POLICY_SIGNING_KEY, ACP_POLICY_ADMIN_TOKEN, ACP_GATEWAY_TOKEN). They are read into
@@ -165,6 +175,30 @@ def cmd_register(args) -> int:
     return 0
 
 
+# Pinned paths in the legacy layout and where bootstrap 0.7 moved them.
+CONTAINED_PATHS = {
+    "NEW_AGENT_PROMPT.md": ".agents/bootstrap/NEW_AGENT_PROMPT.md",
+    "PROJECT_PROFILE.json": ".agents/project/profile.json",
+    "PROJECT_INTENT.md": ".agents/project/intent.md",
+    "bindings/PROJECT_BINDINGS.yaml": ".agents/project/bindings.yaml",
+    "contracts/acp-protected-effects.yaml": ".agents/project/contracts/acp-protected-effects.yaml",
+    "docs/ACP_INTEGRATION.md": ".agents/acp/README.md",
+    "scripts/acp.py": ".agents/acp/lib/acp.py",
+    "scripts/acp_endpoint_registry.py": ".agents/acp/lib/acp_endpoint_registry.py",
+    "scripts/acp_override.py": ".agents/acp/lib/acp_override.py",
+    "scripts/acp-check.py": ".agents/acp/lib/acp-check.py",
+    "schemas/acp-endpoint-registry.schema.json": ".agents/acp/schemas/acp-endpoint-registry.schema.json",
+    "scripts/upgrade-project.py": ".agents/bootstrap/scripts/upgrade-project.py",
+    "scripts/reconcile-project.py": ".agents/bootstrap/scripts/reconcile-project.py",
+    "records/deviations.jsonl": ".agents/records/deviations.jsonl",
+}
+
+
+def find_policy(policies, owner, name):
+    return next((p for p in policies if (p.get("repository") or {}).get("owner", "").lower() == owner.lower()
+                 and (p.get("repository") or {}).get("name", "").lower() == name.lower()), None)
+
+
 def git(checkout: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(checkout), *args], capture_output=True)
 
@@ -222,6 +256,101 @@ def cmd_grant(args) -> int:
     return 0
 
 
+def cmd_repin(args) -> int:
+    rp = load_register_policy()
+    owner, _, name = args.repository.partition("/")
+    checkout = Path(args.checkout).expanduser().resolve()
+    head = git(checkout, "rev-parse", "--verify", f"{args.ref}^{{commit}}").stdout.decode().strip()
+    if not head:
+        raise SystemExit(f"error: {args.ref} is not a commit in {checkout}")
+    key = keychain("ACP_POLICY_SIGNING_KEY")
+    entry, document = production_policy_env()
+    policies = list(document["policies"] if isinstance(document, dict) else document)
+    policy = find_policy(policies, owner, name)
+    if policy is None:
+        raise SystemExit(f"error: no production policy governs {owner}/{name}")
+    manifest = policy.get("artifact_manifest") or {}
+    if not manifest.get("artifacts"):
+        print(f"{owner}/{name} pins no artifacts; nothing to repin")
+        return 0
+    changed = []
+    artifacts = []
+    for item in manifest["artifacts"]:
+        path = CONTAINED_PATHS.get(item["path"], item["path"])
+        shown = git(checkout, "show", f"{head}:{path}")
+        digest = hashlib.sha256(shown.stdout).hexdigest() if shown.returncode == 0 else None
+        if digest is None:
+            print(f"  {item['path']}: not present at {head[:7]} as {path}; dropped from the manifest")
+            changed.append(item["path"])
+            continue
+        updated = {**item, "path": path, "id": path.replace("/", "-").lower(), "expected_sha256": digest}
+        if updated != item:
+            changed.append(item["path"])
+            print(f"  {item['path']} -> {path} @ {digest[:12]}")
+        artifacts.append(updated)
+    patterns = [{**pattern, "pattern": CONTAINED_PATHS.get(pattern["pattern"], pattern["pattern"])}
+                for pattern in manifest.get("patterns") or []]
+    if not changed and patterns == (manifest.get("patterns") or []):
+        print(f"{owner}/{name} is already pinned at {head[:7]}")
+        return 0
+    repinned = {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id", "sha256")}
+    repinned["artifact_manifest"] = {**manifest, "artifacts": artifacts, "patterns": patterns}
+    repinned["version"] = int(policy.get("version") or 1) + 1
+    repinned = rp.sign(repinned, key, KEY_ID)
+    policies = [repinned if p is policy else p for p in policies]
+    updated = {**document, "policies": policies} if isinstance(document, dict) else policies
+    try:
+        states = rp.validate(updated, key, KEY_ID)
+        bad = {pid: r["state"] for pid, r in states.items() if r["state"] != "ACTIVE"}
+    except ValueError as exc:
+        bad = str(exc)
+    if bad:
+        raise SystemExit(f"error: the repinned document does not load cleanly: {bad}. Nothing was changed.")
+    print(f"{repinned['policy_id']} v{repinned['version']}: {len(changed)} pinned path(s) updated; "
+          f"the gateway loader accepts all {len(states)} policies")
+    if not args.apply:
+        print("dry run: pass --apply to write it")
+        return 0
+    write_document(entry, updated)
+    return 0
+
+
+def cmd_unregister(args) -> int:
+    rp = load_register_policy()
+    owner, _, name = args.repository.partition("/")
+    key = keychain("ACP_POLICY_SIGNING_KEY")
+    entry, document = production_policy_env()
+    policies = list(document["policies"] if isinstance(document, dict) else document)
+    policy = find_policy(policies, owner, name)
+    if policy is None:
+        print(f"no production policy governs {owner}/{name}; nothing to remove")
+        return 0
+    remaining = [p for p in policies if p is not policy]
+    updated = {**document, "policies": remaining} if isinstance(document, dict) else remaining
+    try:
+        states = rp.validate(updated, key, KEY_ID)
+        bad = {pid: r["state"] for pid, r in states.items() if r["state"] != "ACTIVE"}
+    except ValueError as exc:
+        bad = str(exc)
+    if bad:
+        raise SystemExit(f"error: the remaining policies do not load cleanly: {bad}. Nothing was changed.")
+    print(f"remove {policy['policy_id']} v{policy.get('version')}; {len(states)} policies remain")
+    if not args.apply:
+        print("dry run: pass --apply to write it")
+        return 0
+    write_document(entry, updated)
+    return 0
+
+
+def write_document(entry: dict, document) -> None:
+    text = json.dumps(document, separators=(",", ":"), sort_keys=True)
+    vercel_api(f"/v9/projects/{PROJECT}/env/{entry['id']}", "PATCH", {"value": text})
+    POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    POLICY_FILE.write_text(text + "\n", encoding="utf-8")
+    print("wrote production ACP_POLICY on Vercel and policies/production.json; "
+          "the next production deployment loads it")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -236,10 +365,19 @@ def main() -> int:
     grant.add_argument("--authorized-by", default="repository owner")
     grant.add_argument("--reason", default="formal-project-bootstrap client upgrade")
     grant.add_argument("--apply", action="store_true")
+    repin = sub.add_parser("repin", help="move a pinned policy to bootstrap 0.7's contained paths")
+    repin.add_argument("repository", metavar="OWNER/NAME")
+    repin.add_argument("--checkout", required=True)
+    repin.add_argument("--ref", default="HEAD")
+    repin.add_argument("--apply", action="store_true")
+    unregister = sub.add_parser("unregister", help="remove a repository's policy")
+    unregister.add_argument("repository", metavar="OWNER/NAME")
+    unregister.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if not (HERE / "gateway.py").exists():
         raise SystemExit("error: run this from an acp-gateway checkout")
-    return cmd_register(args) if args.command == "register" else cmd_grant(args)
+    return {"register": cmd_register, "grant": cmd_grant, "repin": cmd_repin,
+            "unregister": cmd_unregister}[args.command](args)
 
 
 if __name__ == "__main__":

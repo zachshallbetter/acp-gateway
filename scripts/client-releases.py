@@ -5,8 +5,9 @@
 
 Reads each release tag (vX.Y.Z) of a bootstrap checkout and lists the sha256 of
 every file a release installs as machinery: scripts/, schemas/, .agents/skills/,
-docs/ and NEW_AGENT_PROMPT.md. Project-owned files (AGENTS.md, the intent,
-profile, bindings, rules, contracts) are left out, so a change to them still
+docs/ and NEW_AGENT_PROMPT.md (before 0.7), and .agents/acp/, .agents/bootstrap/
+and .agents/skills/ (0.7 onward). Project-owned files (AGENTS.md, .agents/project/,
+.agents/records/, the intent, profile, bindings, rules, contracts) are left out, so a change to them still
 needs an exact artifact grant. With --write it replaces client_releases.json,
 which the gateway reads to accept a pinned client file that a release ships.
 """
@@ -21,7 +22,8 @@ import subprocess
 
 HERE = Path(__file__).resolve().parent.parent
 TARGET = HERE / "client_releases.json"
-MACHINERY = re.compile(r"\A(scripts/[^/]+\.py|schemas/[^/]+\.json|docs/[^/]+\.md|\.agents/skills/.+|NEW_AGENT_PROMPT\.md)\Z")
+MACHINERY = re.compile(r"\A(scripts/[^/]+\.py|schemas/[^/]+\.json|docs/[^/]+\.md|\.agents/skills/.+|NEW_AGENT_PROMPT\.md"
+                       r"|\.agents/acp/.+|\.agents/bootstrap/(?!templates/).+)\Z")
 TAG = re.compile(r"\Av(\d+)\.(\d+)\.(\d+)\Z")
 
 

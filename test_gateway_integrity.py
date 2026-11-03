@@ -679,3 +679,28 @@ def test_the_shipped_release_file_lists_the_released_client():
     assert "0.6.2" in data["releases"]
     assert "scripts/acp.py" in data["releases"]["0.6.2"]
     assert "AGENTS.md" not in data["releases"]["0.6.2"]
+
+
+def test_client_status_reports_known_current_and_stale_clients():
+    old = hashlib.sha256(b"client 0.6.3\n").hexdigest()
+    new = hashlib.sha256(b"client 0.7.0\n").hexdigest()
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump({"releases": {"0.6.3": {"scripts/acp.py": old}, "0.7.0": {".agents/acp/lib/acp.py": new}}}, handle)
+    handle.close()
+    with _patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": handle.name}):
+        current = gateway.client_status("0.7.0", new)
+        stale = gateway.client_status("0.6.3", old)
+        unknown = gateway.client_status("0.7.0", "f" * 64)
+    assert current["current"] and current["known"] and current["upgrade"] is None and not current["deprecated_layout"]
+    assert stale["known"] and not stale["current"] and stale["deprecated_layout"]
+    assert stale["upgrade"] == ".agents/bootstrap/bootstrap upgrade --to v0.7.0"
+    assert unknown["known"] is False and unknown["latest"] == "0.7.0"
+
+
+def test_contained_project_files_are_never_accepted_as_a_release():
+    with _patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": releases_file({
+            ".agents/project/profile.json": AGENTS, ".agents/records/evidence.jsonl": AGENTS,
+            ".agents/acp/lib/acp.py": AGENTS})}):
+        assert gateway.released_client_version(".agents/project/profile.json", AGENTS) is None
+        assert gateway.released_client_version(".agents/records/evidence.jsonl", AGENTS) is None
+        assert gateway.released_client_version(".agents/acp/lib/acp.py", AGENTS) == "9.9.9"
