@@ -35,3 +35,4 @@ DerivedData/
 .env.*
 
 !.env.example
+.build-deps/

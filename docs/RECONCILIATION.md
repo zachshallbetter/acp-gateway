@@ -49,25 +49,29 @@ PR #40's Preview deployment serves `/health` (200) and refuses `/ready` with
 `database migration history does not match this release`: its database has no
 `schema_migrations`. Preview also reports `app_configured: false`.
 
-Preview currently defines only `ACP_DATABASE_URL`, `ACP_GATEWAY_TOKEN`,
-`ACP_CONSOLE_BASE_URL` and `ACP_CONSOLE_ENCRYPTION_KEY`. To verify gates there it
-also needs Preview-scoped values for `ACP_POLICY`, `ACP_POLICY_SIGNING_KEY`,
-`ACP_CAPABILITY_SIGNING_KEY`, `ACP_POLICY_ADMIN_TOKEN`, `ACP_GITHUB_APP_ID`,
-`ACP_GITHUB_PRIVATE_KEY` and `ACP_AUDIT_HASH_CHAIN`. Signing keys and admin
-tokens must be distinct from production's; a Preview that shares production
-signing keys can mint decisions production accepts.
+Provisioned 2026-11-03 at the owner's direction:
 
-Initialize the Preview database with the Preview connection string, never
-production's:
+- Shared with production (target widened, values never read): `ACP_GITHUB_APP_ID`,
+  `ACP_GITHUB_PRIVATE_KEY` (the owner chose to reuse the production GitHub App),
+  `ACP_PROJECT_ALLOWLIST`, `ACP_AUDIT_HASH_CHAIN`, `ACP_REQUIRE_PRODUCTION_CONTROLS`.
+- Preview-only and distinct from production: `ACP_POLICY_SIGNING_KEY`,
+  `ACP_CAPABILITY_SIGNING_KEY`, `ACP_POLICY_SIGNING_KEY_ID`
+  (`acp-preview-policy-hmac-sha256`) and `ACP_POLICY`, production's 14 policies
+  re-signed under the Preview key and accepted as ACTIVE by the gateway loader.
+  A Preview decision therefore never verifies against production's keys.
 
-```
-ACP_DATABASE_MIGRATION_URL=<preview url> .venv/bin/python scripts/migrate-db.py --check   # expect pending 0001, 0002
-ACP_DATABASE_MIGRATION_URL=<preview url> .venv/bin/python scripts/migrate-db.py           # applies both, one transaction
-ACP_DATABASE_MIGRATION_URL=<preview url> .venv/bin/python scripts/migrate-db.py --check   # expect current
-```
+The database follows the build (`scripts/vercel-build.py`, run as Vercel's
+`buildCommand` with the deployment's own `ACP_DATABASE_URL`, never printed):
 
-`--check` is read-only and is also the safe way to confirm production's
-history (exit 0 current, 3 pending, 1 conflict).
+- **Preview** builds apply this release's pending migrations, then check.
+- **Production** builds only check. Pending or conflicting migrations fail the
+  build, so a release the production database does not match cannot be built
+  or promoted. Production migrations remain a separate ACP-authorized
+  `scripts/migrate-db.py` run.
+- A commit without `api/index.py` and `vercel.json` refuses to build.
+
+`scripts/migrate-db.py --check` is read-only and remains the way to inspect any
+database by hand (exit 0 current, 3 pending, 1 conflict).
 
 ## Credential and client findings
 
