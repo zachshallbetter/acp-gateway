@@ -40,8 +40,29 @@ It does not authorize a protected effect or replace a signed ACP decision.
   `main` no longer take the alias until one is promoted. ACP could not decide
   its own recovery while down; the transition is recorded as a deviation in
   `records/deviations.jsonl` and still has to be reported to ACP.
-- Until the runtime lands on `main`, `main` is not deployable. Do not promote a
-  production build of `main`, and do not re-enable domain auto-assignment.
+- The deviation could not be reported to ACP as such: the gateway has no
+  reportable event for a completed owner recovery. It remains in
+  `records/deviations.jsonl`; the Keychain repair was reported as
+  `CREDENTIALS_ROTATED`.
+
+## Release, 2026-11-03
+
+- PR #40 fast-forwarded `main` from `3ff0b83` to `aac42cc` under ACP ALLOW
+  `22b7b344ab6dfed5`. Its production build reported the database `current`
+  (`0001`, `0002`).
+- `dpl_8PDbYyYir6SXhjpVVWx5cwBKNpWg` was verified on its own URL before taking
+  traffic: `/health` and `/ready` 200 with PostgreSQL, the same policy digest
+  as the previous alias, an ALLOW for a read, `POLICY_NOT_FOUND` for an
+  ungoverned repository, and exact `database.migrate` scope refusals (#34).
+  It was promoted under `production.deploy` ALLOW `22362abe190a41b3`.
+- Rollback: `vercel rollback dpl_F9anHAxXoa8XvsTtgaLLKHDaGtnU`. Its source
+  `7815fc7` is published as the tag `deploy/production-7815fc7` (#37).
+- Production deploys are automatic, by the owner's decision: each merge to
+  `main` (an ACP-authorized `git.protected_ref.update`) builds and takes the
+  alias without a separate `production.deploy` decision. The build guard is
+  what stops a bad release: a commit without the Vercel runtime, or whose
+  migrations the production database does not match, fails to build and never
+  takes the alias. `main` has no GitHub branch protection; ACP is its only gate.
 
 ## Preview is not a release gate
 
