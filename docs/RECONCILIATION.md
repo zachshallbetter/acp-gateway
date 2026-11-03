@@ -15,12 +15,49 @@ It does not authorize a protected effect or replace a signed ACP decision.
   fresh public `/health` and `/ready` reads returned HTTP 200, and readiness
   reported PostgreSQL. These reads do not prove authorization, database parity,
   backup recoverability, or Titan availability.
-- Bootstrap remains on `codex/issue-16-outage-safe-bootstrap` at `bfef2e8`
-  with staged, unstaged, and untracked work. Preserve it during reconciliation.
-- CUDA's primary checkout remains on `site-release-branding` at `c0b3bd8`
-  with local ACP integration changes. Its clean publication worktree is on
-  `site-content-live` at `405e692`, one commit ahead of its recorded origin/main.
-  Earlier references to publication commit `4dff8d8` are historical.
+- Bootstrap's local work is committed on `feat/issue-16-outage-safe-bootstrap`
+  (renamed from the never-pushed `codex/issue-16-outage-safe-bootstrap`), four
+  or more commits ahead of `bfef2e8`. The earlier Codex worktree candidate is on
+  `feat/acp-client-failover` at `8cd9259`. Neither is on GitHub.
+- CUDA's primary checkout is on `main` at `850ccad`. The publication commit
+  `405e692` is on `docs/site-product-pages` with no upstream; the ACP
+  integration changes are on `chore/acp-endpoint-registry` at `789a4c8`.
+  `site-content-live` was deleted. Earlier references to `4dff8d8` are historical.
+- `7815fc7` exists on no GitHub ref (#37). Locally it is reachable from
+  `feat/acp-shared-state-failover` and the tag `deploy/production-7815fc7`.
+
+## Production incident, 2026-11-03
+
+- 01:59Z: `dpl_Gi91Xh9iQPfaLJXy2LKAbJAbMETJ`, a dashboard redeploy of `main`
+  at `3ff0b83`, took the production alias. `main` has no `api/index.py` or
+  `vercel.json`, so `/health`, `/ready` and `/notice` returned Vercel 404 and
+  every ACP-bound repository failed closed. The git deployment of the same
+  commit at 08:44 (`dpl_92BpFtsPSnoGb1LRDbbcbbPscsG8`) is equally unusable.
+- ~02:10Z: under the owner's instruction to recover autonomously, the alias was
+  rolled back to `dpl_F9anHAxXoa8XvsTtgaLLKHDaGtnU`. `/health` and `/ready`
+  returned 200 with PostgreSQL and a consumer `notice` returned governed and
+  NORMAL. Vercel set `autoAssignCustomDomains=false`, so production builds of
+  `main` no longer take the alias until one is promoted. ACP could not decide
+  its own recovery while down; the transition is recorded as a deviation in
+  `records/deviations.jsonl` and still has to be reported to ACP.
+- Until the runtime lands on `main`, `main` is not deployable. Do not promote a
+  production build of `main`, and do not re-enable domain auto-assignment.
+
+## Credential and client findings
+
+- The production `ACP_GATEWAY_TOKEN` was rotated 2026-10-30 06:52Z. The
+  machine Keychain item `ACP Gateway Production / ACP_GATEWAY_TOKEN`, which the
+  endpoint registry names, still holds the pre-rotation token (fingerprints
+  differ; values were never printed). Repositories that carry the token in
+  `.env.local` authenticate; repositories that rely on the Keychain get 401.
+- Vercel `sensitive` variables (signing keys, GitHub App key, database URLs,
+  Preview token) are write-only and read back empty by design. Empty display is
+  not evidence of a missing value.
+- The client's 2s readiness limit rejected a healthy endpoint answering in
+  1.3-1.6s warm; fixed in bootstrap `f7448b8`. Rejected credentials and a
+  missing gateway URL are now explained (`833a1b1`). See #38.
+- `formal-project-bootstrap` has no ACP policy: a push request returned
+  `DENY / POLICY_NOT_FOUND` (`8b97b0d35ef82656`).
 
 ## Preserved ACP candidates
 
