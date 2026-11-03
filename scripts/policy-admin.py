@@ -124,15 +124,22 @@ def cmd_register(args) -> int:
                          f"production's policies: {bad}. Nothing was changed.")
     print(f"signing key {fingerprint(key)} verifies all {len(states)} production policies")
 
-    merged = list(existing)
+    merged, changed = list(existing), False
     for spec in args.repositories:
         owner, _, name = spec.partition("/")
         if not owner or not name:
             raise SystemExit(f"error: repositories are OWNER/NAME, not {spec!r}")
         policy = rp.build_policy(argparse.Namespace(source=None, owner=owner, name=name, remote=None,
                                                     policy_id=None, board=args.board, actions=None))
+        current = next((e for e in merged if isinstance(e, dict) and rp.same_repository(e, policy)), None)
+        if current is not None and all(current.get(field) == policy.get(field)
+                                       for field in ("status", "repository", "protected_actions")) \
+                and (not args.board or current.get("boards") == policy.get("boards")):
+            print(f"unchanged {current['policy_id']} v{current['version']} for {owner}/{name}")
+            continue
         merged, replaced = rp.merge(merged, policy)
         merged[-1] = rp.sign(merged[-1], key, KEY_ID)
+        changed = True
         print(f"{'replace' if replaced else 'add'} {merged[-1]['policy_id']} v{merged[-1]['version']} "
               f"for {owner}/{name}")
     updated = {**document, "policies": merged} if isinstance(document, dict) else merged
@@ -144,6 +151,9 @@ def cmd_register(args) -> int:
     if bad:
         raise SystemExit(f"error: the new document does not load cleanly: {bad}. Nothing was changed.")
     print(f"the gateway loader accepts all {len(states)} policies")
+    if not changed:
+        print("nothing to change")
+        return 0
     if not args.apply:
         print("dry run: pass --apply to write ACP_POLICY on Vercel and policies/production.json")
         return 0

@@ -62,7 +62,8 @@ class RegisterTests(unittest.TestCase):
                 code = admin.cmd_register(args)
             except SystemExit as exc:
                 return str(exc), fake, None
-            written = (Path(tmp) / "production.json").read_text() if apply else None
+            target = Path(tmp) / "production.json"
+            written = target.read_text() if target.exists() else None
         return code, fake, written, out.getvalue()
 
     def test_dry_run_signs_and_validates_without_writing(self):
@@ -81,6 +82,14 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
         self.assertEqual(sorted(states), ["o-a", "o-b", "snackstudio-erosion-lab"])
         self.assertNotIn("artifact_manifest", fake.patched[-1])
+
+    def test_registering_an_unchanged_repository_again_changes_nothing(self):
+        code, fake, written, _ = self.run_register(existing(), "o/b", apply=True)
+        again, fake2, _, out = self.run_register(fake.patched, "o/b", apply=True)
+        self.assertEqual(again, 0)
+        self.assertIsNone(fake2.patched)
+        self.assertIn("unchanged o-b v1", out)
+        self.assertIn("nothing to change", out)
 
     def test_a_signing_key_that_does_not_verify_production_changes_nothing(self):
         message, fake, _ = self.run_register(existing(), "o/b", apply=True, key="some-other-key")
