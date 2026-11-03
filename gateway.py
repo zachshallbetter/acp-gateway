@@ -17,11 +17,12 @@ Three design rules shape the whole file:
      is allowed -- it never disables enforcement. See authorize().
 """
 from __future__ import annotations
-import base64, hashlib, hmac, http.server, json, os, re, subprocess, sys, tempfile, time
+import base64, hashlib, hmac, http.server, json, logging, os, re, subprocess, sys, tempfile, time
 from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
+import postgres_store
 
 # One page is 100 -- GitHub's maximum. MAX_PAGES bounds a runaway loop; hitting
 # it is reported as truncated rather than passed off as a complete board.
@@ -924,6 +925,8 @@ _TRUST_STATE = {"loaded": False, "repositories": {}}
 
 
 def trust_state():
+    if postgres_store.enabled():
+        return postgres_store.TRUST_STATE
     if not _TRUST_STATE["loaded"]:
         path = os.getenv("ACP_TRUST_STATE_FILE", "").strip()
         if path:
@@ -940,6 +943,9 @@ def trust_state():
 
 def remember_trust(key, **fields):
     """Record positive observations only; absence is never written as evidence."""
+    if postgres_store.enabled():
+        postgres_store.current().remember_trust(key, fields)
+        return
     trust_state().setdefault(key, {}).update(fields)
     path = os.getenv("ACP_TRUST_STATE_FILE", "").strip()
     if path:
@@ -1009,6 +1015,11 @@ _SECURITY = {"loaded": False, "records": {}, "degraded": None}
 
 def security_store():
     """Load once per process. A store that will not parse is not an empty store."""
+    if postgres_store.enabled():
+        _SECURITY["loaded"] = True
+        _SECURITY["degraded"] = None
+        _SECURITY["records"] = postgres_store.SECURITY_STATE
+        return _SECURITY["records"]
     if not _SECURITY["loaded"]:
         _SECURITY["degraded"] = None
         path = security_state_path()
@@ -1046,6 +1057,10 @@ def security_state_path():
 def persist_security():
     """A state change that cannot be written down would vanish on restart, so a
     failed write degrades the deployment instead of being forgotten."""
+    if postgres_store.enabled():
+        postgres_store.current().flush()
+        _SECURITY["degraded"] = None
+        return
     path = security_state_path()
     if not path:
         return
@@ -1073,6 +1088,8 @@ def security_keys(claim, actor_id=None, include_actor=True):
 
 def security_record(keys):
     """The most severe record across the keys -- containment does not average."""
+    if postgres_store.enabled():
+        postgres_store.current().prefetch(keys)
     best = None
     for key in keys:
         entry = security_store().get(key)
@@ -1100,10 +1117,14 @@ def incident_actor_keys(keys):
 
 
 def security_version(keys):
+    if postgres_store.enabled():
+        postgres_store.current().prefetch(keys)
     return max([(security_store().get(key) or {}).get("security_version", 0) for key in keys] or [0])
 
 
 def write_security(keys, now, **fields):
+    if postgres_store.enabled():
+        postgres_store.current().prefetch(keys)
     written = None
     for key in keys:
         entry = security_store().setdefault(key, {"key": key, "opened_at": now, "security_version": 0,
@@ -1236,7 +1257,10 @@ def begin_verify_recovery(keys, now, grant):
     return record
 
 
-def consume_capability(keys, now, jti):
+def consume_capability(keys, now, jti, expires_at=None):
+    if postgres_store.enabled():
+        postgres_store.current().prefetch(keys)
+        postgres_store.current().consume_capability(keys, jti, now, expires_at)
     for key in keys:
         entry = security_store().get(key)
         if entry is None:
@@ -1248,7 +1272,11 @@ def consume_capability(keys, now, jti):
     persist_security()
 
 
-def capability_consumed(keys, jti):
+def capability_consumed(keys, jti, now=None):
+    if postgres_store.enabled():
+        postgres_store.current().prefetch(keys)
+        if postgres_store.current().capability_consumed(keys, jti, time.time() if now is None else now):
+            return True
     return any(jti in ((security_store().get(key) or {}).get("consumed") or []) for key in keys)
 
 
@@ -1326,7 +1354,7 @@ def verify_capability(token, now=None):
         return {"valid": False, "reason": "EXPIRED", "capability": body}
     if security_version(keys) > int(body.get("security_version") or 0):
         return {"valid": False, "reason": "REVOKED", "capability": body}
-    if body.get("single_use") and capability_consumed(keys, body.get("jti")):
+    if body.get("single_use") and capability_consumed(keys, body.get("jti"), now):
         return {"valid": False, "reason": "CONSUMED", "capability": body}
     state = (security_record(keys) or {}).get("authorization_state", "NORMAL")
     wanted = "RECOVERY_AUTHORIZED" if body.get("kind") == "recovery" else "NORMAL"
@@ -1499,6 +1527,15 @@ def hash_chain_enabled():
 
 def production_hardening_error():
     """Return missing controls when an operator explicitly requires production hardening."""
+    if postgres_store.enabled():
+        required = {
+            "ACP_POLICY_SIGNING_KEY": bool(os.getenv("ACP_POLICY_SIGNING_KEY", "").strip()),
+            "ACP_CAPABILITY_SIGNING_KEY": bool(capability_key()),
+            "ACP_DATABASE_URL": postgres_store.database_configured(),
+            "ACP_AUDIT_HASH_CHAIN": hash_chain_enabled(),
+        }
+        missing = [name for name, enabled in required.items() if not enabled]
+        return ", ".join(missing) if missing else None
     required = {
         "ACP_POLICY_SIGNING_KEY": bool(os.getenv("ACP_POLICY_SIGNING_KEY", "").strip()),
         "ACP_CAPABILITY_SIGNING_KEY": bool(capability_key()),
@@ -1511,6 +1548,8 @@ def production_hardening_error():
 
 
 def chain_head():
+    if postgres_store.enabled():
+        return postgres_store.current().audit_head()[1]
     if _CHAIN["head"] is None:
         _CHAIN["head"] = (security_store().get("chain:head") or {}).get("hash") or ""
     return _CHAIN["head"]
@@ -1524,17 +1563,20 @@ def event_hash(record, previous):
 def verify_audit_chain(records):
     """Recompute the chain. Any edited or removed record breaks it from there on."""
     previous = ""
-    for index, record in enumerate(records):
+    length = 0
+    for record in records:
+        index = length
+        length += 1
         if "event_hash" not in record:
             continue
         if record.get("previous_hash", "") != previous:
             return {"valid": False, "broken_at": index, "event_id": record.get("event_id"),
-                    "reason": "PREVIOUS_HASH_MISMATCH", "length": len(records)}
+                    "reason": "PREVIOUS_HASH_MISMATCH", "length": length}
         if event_hash(record, previous) != record["event_hash"]:
             return {"valid": False, "broken_at": index, "event_id": record.get("event_id"),
-                    "reason": "EVENT_HASH_MISMATCH", "length": len(records)}
+                    "reason": "EVENT_HASH_MISMATCH", "length": length}
         previous = record["event_hash"]
-    return {"valid": True, "length": len(records), "head": previous or None}
+    return {"valid": True, "length": length, "head": previous or None}
 
 
 def event_ring_limit():
@@ -1577,32 +1619,43 @@ def emit_event(event_type, now=None, severity=None, **fields):
     record.update({key: value for key, value in fields.items() if value is not None})
     record = redact_record(record)
     if hash_chain_enabled():
-        previous = chain_head()
+        previous = (postgres_store.current().audit_head(lock=True)[1]
+                    if postgres_store.enabled() else chain_head())
         record["previous_hash"] = previous
         record["event_hash"] = event_hash(record, previous)
         _CHAIN["head"] = record["event_hash"]
-        if os.getenv("ACP_SECURITY_STATE_FILE", "").strip() or os.getenv("ACP_INCIDENT_STATE_FILE", "").strip():
+        if postgres_store.enabled():
+            postgres_store.current().append_audit(record)
+        elif os.getenv("ACP_SECURITY_STATE_FILE", "").strip() or os.getenv("ACP_INCIDENT_STATE_FILE", "").strip():
             security_store()["chain:head"] = {"hash": record["event_hash"]}
             persist_security()
+    elif postgres_store.enabled():
+        postgres_store.current().append_audit(record)
     AUDIT.append(record)
     del AUDIT[:-event_ring_limit()]
     line = json.dumps(record, sort_keys=True, separators=(",", ":"))
-    path = os.getenv("ACP_AUDIT_LOG", "").strip()
-    if path:
-        try:
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-        except OSError:
+    path = "" if postgres_store.enabled() else os.getenv("ACP_AUDIT_LOG", "").strip()
+    if not postgres_store.enabled():
+        if path:
+            try:
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+            except OSError:
+                print(line, file=sys.stderr)
+        else:
             print(line, file=sys.stderr)
-    else:
-        print(line, file=sys.stderr)
     if event_type in NOTIFY_EVENTS:
-        notify(record)
+        if postgres_store.enabled():
+            postgres_store.current().after_commit(lambda record=record: notify(record))
+        else:
+            notify(record)
     return record
 
 
 def load_audit_tail():
     """Bring the ring back after a restart, so history stays queryable."""
+    if postgres_store.enabled():
+        return
     path = os.getenv("ACP_AUDIT_LOG", "").strip()
     if not path or AUDIT:
         return
@@ -2308,7 +2361,7 @@ def authorize(request, verifier=None, admin=False, now=None):
                           "operation may proceed until it completes and verifies.",
                           event="RECOVERY_ATTEMPTED")
         problem = recovery_grant_problem(grant, claim, context, now)
-        if problem is None and capability_consumed(trace["keys"], grant.get("issued_jti")):
+        if problem is None and capability_consumed(trace["keys"], grant.get("issued_jti"), now):
             problem = "the recovery authorization has already been used"
         if problem is None and recovery_requires_provider():
             seen = verify({**context, "ref": grant.get("ref")})
@@ -2846,7 +2899,7 @@ def complete_recovery(body, now=None):
     if grant.get("authorization_id") != capability.get("authorization_id"):
         raise TargetError(409, "RECOVERY_STATE_MISMATCH",
                           "The capability does not correspond to the active recovery authorization.")
-    consume_capability(keys, now, capability["jti"])
+    consume_capability(keys, now, capability["jti"], capability.get("exp"))
     if result == "failed":
         locked = force_lock(keys, now, "RECOVERY_EXECUTION_FAILED", event="RECOVERY_REJECTED",
                             authorization_id=grant.get("authorization_id"))
@@ -2986,7 +3039,8 @@ def security_status():
         "recovering_resources": sum(1 for e in resources if e.get("authorization_state")
                                     in ("RECOVERY_AUTHORIZED", "VERIFY_RECOVERY")),
         "notifications": {"configured": bool(os.getenv("ACP_SECURITY_WEBHOOK_URL", "").strip())},
-        "audit": {"hash_chain": hash_chain_enabled(), "ring": len(AUDIT),
+        "audit": {"hash_chain": hash_chain_enabled(),
+                  "ring": postgres_store.current().audit_count() if postgres_store.enabled() else len(AUDIT),
                   "log_configured": bool(os.getenv("ACP_AUDIT_LOG", "").strip())},
         "full_request_text_retained": store_full_request_text(),
         "protected_artifacts": {
@@ -3010,6 +3064,25 @@ def security_period(period):
 def security_summary(period="24h", now=None):
     now = time.time() if now is None else now
     window = now - security_period(period)
+    if postgres_store.enabled():
+        by_event, by_severity, open_count = postgres_store.current().audit_summary(window)
+        def count(*types):
+            return sum(by_event.get(event_type, 0) for event_type in types)
+        decisions = count("AUTHORIZATION_ALLOWED", "AUTHORIZATION_DENIED", "AUTH_REQUIRED", "REVERIFY_REQUIRED")
+        return {"period": period, "generated_at": iso(now),
+                "authorization_requests": decisions,
+                "allowed": count("AUTHORIZATION_ALLOWED"), "denied": count("AUTHORIZATION_DENIED"),
+                "auth_required": count("AUTH_REQUIRED"), "reverify_required": count("REVERIFY_REQUIRED"),
+                "quarantines": count("QUARANTINE_ENTERED"), "locked": count("LOCKED_ENTERED"),
+                "locked_requests_denied": count("LOCKED_REQUEST_DENIED"),
+                "recovery_authorized": count("RECOVERY_AUTHORIZED"),
+                "recovery_verified": count("RECOVERY_VERIFIED"),
+                "recovery_verification_failed": count("RECOVERY_VERIFICATION_FAILED"),
+                "identity_mismatches": count("IDENTITY_MISMATCH"),
+                "policy_tampering": count("LOCAL_POLICY_MODIFIED", "LOCAL_POLICY_REMOVED",
+                                          "MANAGED_POLICY_MISSING", "MANAGED_POLICY_CHANGED", "BOOTSTRAP_CHANGED"),
+                "by_severity": {level: by_severity.get(level, 0) for level in SEVERITIES},
+                "open_incidents": open_count}
     seen = [record for record in AUDIT if float(record.get("timestamp_epoch") or 0) >= window]
     def count(*types):
         return sum(1 for record in seen if record.get("event") in types)
@@ -3047,6 +3120,9 @@ def query_events(filters=None, limit=None, cursor=None, now=None, retain=True):
         offset = max(0, int(cursor or 0))
     except (TypeError, ValueError):
         raise TargetError(400, "INVALID_REQUEST", "`cursor` must be the value from a previous page.")
+    if offset > 10000:
+        raise TargetError(400, "INVALID_REQUEST", "`cursor` exceeds the bounded history window.",
+                          remedy="Use a narrower time or incident filter.")
     if "severity" in filters and filters["severity"] not in SEVERITIES:
         raise TargetError(400, "INVALID_REQUEST", f"`severity` must be one of {', '.join(SEVERITIES)}.")
     since = now - security_period(filters["period"]) if "period" in filters else None
@@ -3066,11 +3142,16 @@ def query_events(filters=None, limit=None, cursor=None, now=None, retain=True):
                 return False
         return True
 
-    found = [record for record in reversed(AUDIT) if matches(record)]
-    page = found[offset:offset + limit]
-    return {"events": page, "count": len(page), "matched": len(found),
+    if postgres_store.enabled():
+        page, matched = postgres_store.current().audit_query(
+            limit=limit, offset=offset, now=now,
+            retention=retention_days() if retain else {}, since=since, filters=filters)
+    else:
+        found = [record for record in reversed(AUDIT) if matches(record)]
+        page, matched = found[offset:offset + limit], len(found)
+    return {"events": page, "count": len(page), "matched": matched,
             "limit": limit, "cursor": offset,
-            "next_cursor": offset + limit if offset + limit < len(found) else None,
+            "next_cursor": offset + limit if offset + limit < matched else None,
             "filters": filters, "retention_days": retention_days()}
 
 
@@ -3541,7 +3622,14 @@ def notice_lookup(owner, name, now=None):
                           "Name the repository: /notice?owner=<owner>&name=<repo>.",
                           remedy="An agent working in a clone can read the owner and name from its "
                                  "own git remote.")
-    record = match_policy(policy_registry(), {"owner": owner, "name": name})
+    registry = policy_registry()
+    if registry["error"]:
+        raise UpstreamError(503, "POLICY_INVALID", "The policy registry is unavailable.",
+                            remedy="Restore a valid signed policy registry; controlled operations remain disabled.")
+    record = match_policy(registry, {"owner": owner, "name": name})
+    if record and record["state"] == "INVALID":
+        raise UpstreamError(503, "POLICY_INVALID", "The matching policy failed signature verification.",
+                            remedy="Restore a valid signed policy; controlled operations remain disabled.")
     if not record or record["state"] != "ACTIVE":
         return {"governed": False, "resource": f"{owner}/{name}".lower(),
                 "checked_at": iso(now),
@@ -3851,7 +3939,7 @@ def integrity_snapshot(body, verifier=None, now=None):
                                    for f in findings}}
     unresolved = bool(mismatched or diff_findings or incomplete or not remote_ok)
     write_security(resource_keys, now, observations=observations,
-                   integrity={"status": status, "unresolved": unresolved,
+                   integrity={"snapshot_id": request_id, "status": status, "unresolved": unresolved,
                               "checkpoint": parsed["checkpoint"], "checked_at": iso(now),
                               "counts": counts, "mismatched": len(mismatched),
                               "material": len(material), "remote_ok": remote_ok,
@@ -4107,7 +4195,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route == "/health":
             self.reply(200, {"status": "ok", "service": "acp-gateway", "app_configured": configured()})
             return
+        if route == "/ready":
+            try:
+                if os.getenv("ACP_REQUIRE_PRODUCTION_CONTROLS", "").strip().lower() in ("1", "true", "yes"):
+                    try:
+                        registry = policy_registry(strict=True)
+                    except ValueError as exc:
+                        raise postgres_store.StorageError("production policy registry is invalid") from exc
+                    if not registry["policies"]:
+                        raise postgres_store.StorageError("production policy registry is empty")
+                    if production_hardening_error():
+                        raise postgres_store.StorageError("required production controls are unavailable")
+                if postgres_store.enabled():
+                    postgres_store.validate_schema()
+                    with postgres_store.transaction() as store:
+                        store.audit_head()
+                elif security_degraded():
+                    raise postgres_store.StorageError("security state is degraded")
+                self.reply(200, {"status": "ready", "storage": "postgres"
+                                 if postgres_store.enabled() else "file"})
+            except postgres_store.StorageError as exc:
+                logging.getLogger("acp_gateway").warning(
+                    "ACP readiness check failed: %s", exc)
+                self.reply(503, {"status": "not_ready", "storage": "unavailable"})
+            return
         if route in ("/notice", "/.well-known/acp"):
+            if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
+                return self._with_database_transaction(self.do_GET)
             # Unauthenticated on purpose: an agent in a copy holds no token, and
             # it is the party that most needs to be told the terms.
             try:
@@ -4124,11 +4238,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(401, {"error": "UNAUTHORIZED", "detail": "Missing or wrong bearer token.",
                              "remedy": "Send Authorization: Bearer <ACP_GATEWAY_TOKEN>."})
             return
+        if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
+            return self._with_database_transaction(self.do_GET)
         self.admin = admin_authorized(self)
         try:
             self.reply(200, self.internal(route, first))
         except GatewayError as exc:
             self.reply(exc.status, exc.payload())
+        except postgres_store.StorageError:
+            raise
         except Exception as exc:
             self.reply(502, {"error": "UPSTREAM_FAILURE", "detail": str(exc)[:240],
                              "remedy": "Check /internal/app-probe; if that mints a token, the failure is board-side."})
@@ -4146,9 +4264,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "policy_signing": bool(os.getenv("ACP_POLICY_SIGNING_KEY")),
                     "admin_credential": bool(os.getenv("ACP_POLICY_ADMIN_TOKEN")),
                     "capability_signing": bool(capability_key()),
-                    "security_state_persisted": bool(os.getenv("ACP_SECURITY_STATE_FILE", "").strip()
-                                                     or os.getenv("ACP_INCIDENT_STATE_FILE", "").strip()),
-                    "audit_log_configured": bool(os.getenv("ACP_AUDIT_LOG", "").strip()),
+                    "storage_backend": "postgres" if postgres_store.enabled() else "file",
+                    "security_state_persisted": postgres_store.enabled() or bool(
+                        os.getenv("ACP_SECURITY_STATE_FILE", "").strip()
+                        or os.getenv("ACP_INCIDENT_STATE_FILE", "").strip()),
+                    "audit_log_configured": postgres_store.enabled()
+                    or bool(os.getenv("ACP_AUDIT_LOG", "").strip()),
                     "audit_hash_chain": hash_chain_enabled(),
                     "security_webhook_configured": bool(os.getenv("ACP_SECURITY_WEBHOOK_URL", "").strip()),
                     "full_request_text_retained": store_full_request_text(),
@@ -4223,7 +4344,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if tail.startswith("incidents/"):
                 return incident_detail(tail[len("incidents/"):])
             if tail == "audit-chain":
-                return verify_audit_chain(list(AUDIT))
+                return verify_audit_chain(postgres_store.current().audit_chain_batches()
+                                          if postgres_store.enabled() else list(AUDIT))
             if tail == "integrity":
                 owner, name = first("owner"), first("name")
                 if not (owner and name):
@@ -4250,6 +4372,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(401, {"error": "UNAUTHORIZED", "detail": "Missing or wrong bearer token.",
                              "remedy": "Send Authorization: Bearer <ACP_GATEWAY_TOKEN>."})
             return
+        if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
+            return self._with_database_transaction(self.do_POST)
         try:
             if route == "/internal/authorize":
                 self.reply(200, authorize(self.json_body(), verifier=github_evidence,
@@ -4285,12 +4409,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise TargetError(404, "NOT_FOUND", f"No route POST {route}.", endpoints=ENDPOINTS)
         except GatewayError as exc:
             self.reply(exc.status, exc.payload())
+        except postgres_store.StorageError:
+            raise
         except Exception as exc:
             self.reply(502, {"error": "UPSTREAM_FAILURE", "detail": str(exc)[:240],
                              "remedy": "Retry. A decision is never inferred from a failure: protected actions "
                                        "remain unauthorized until ACP returns one."})
 
-    def json_body(self, event=False, snapshot=False):
+    def json_body(self, event=False, snapshot=False, maximum=None, reject_duplicate_keys=False):
         """Bounded, typed body reading. The body is never echoed back."""
         media = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if media != "application/json":
@@ -4303,7 +4429,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise TargetError(411, "LENGTH_REQUIRED", "A JSON body needs an integer Content-Length.",
                               remedy="Send Content-Length; chunked bodies are not accepted.")
         length = int(declared)
-        ceiling = snapshot_body_limit() if snapshot else (event_body_limit() if event else MAX_BODY_BYTES)
+        ceiling = (maximum if maximum is not None else
+                   snapshot_body_limit() if snapshot else (event_body_limit() if event else MAX_BODY_BYTES))
         if length > ceiling:
             raise TargetError(413, "REQUEST_TOO_LARGE",
                               f"The body is larger than this endpoint accepts ({length} bytes).",
@@ -4314,21 +4441,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise TargetError(400, "INCOMPLETE_BODY", "The body was shorter than its Content-Length.",
                               remedy="Resend the whole request.")
         try:
+            if reject_duplicate_keys:
+                def unique_object(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("duplicate JSON object key")
+                        result[key] = value
+                    return result
+                return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             raise TargetError(400, "INVALID_JSON", "The request body is not valid JSON.",
                               remedy="Send a JSON object; see the authorize contract in the README.")
 
-    def discard_body(self):
+    def discard_body(self, maximum=MAX_BODY_BYTES):
         """Drain a refused request so the connection stays usable, bounded."""
         declared = (self.headers.get("Content-Length") or "").strip()
         if declared.isdigit():
-            self.rfile.read(min(int(declared), MAX_BODY_BYTES))
+            self.rfile.read(min(int(declared), maximum))
 
     def reply(self, code, body):
+        if getattr(self, "_db_transaction_active", False):
+            self._pending_reply = (code, body)
+            return
+        self._send_reply(code, body)
+
+    def _send_reply(self, code, body):
         payload = scrub(json.dumps(body, separators=(",", ":"), sort_keys=True)).encode()
         self.send_response(code); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+
+    def _with_database_transaction(self, request_handler):
+        self._pending_reply = None
+        self._db_transaction_active = True
+        try:
+            with postgres_store.transaction():
+                request_handler()
+            code, body = self._pending_reply or (500, {"error": "INTERNAL_ERROR"})
+        except postgres_store.StorageError:
+            code, body = 503, {"error": "STATE_STORE_UNAVAILABLE",
+                               "detail": "The shared state transaction could not be completed.",
+                               "remedy": "Retry only after ACP reports ready; no authorization was issued."}
+        finally:
+            self._db_transaction_active = False
+        self._send_reply(code, body)
 
     def log_message(self, *_):
         pass
@@ -4337,6 +4494,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def main():
     if not os.getenv("ACP_GATEWAY_TOKEN"):
         raise SystemExit("ACP_GATEWAY_TOKEN is required")
+    if postgres_store.enabled():
+        if not hash_chain_enabled():
+            raise SystemExit("ACP_AUDIT_HASH_CHAIN=1 is required for PostgreSQL storage")
+        try:
+            postgres_store.validate_schema()
+        except postgres_store.StorageError as exc:
+            raise SystemExit("PostgreSQL storage is unavailable: " + str(exc)) from exc
+        if production_hardening_error():
+            raise SystemExit("PostgreSQL storage requires production controls: " +
+                             production_hardening_error())
     if os.getenv("ACP_REQUIRE_PRODUCTION_CONTROLS", "").strip().lower() in ("1", "true", "yes"):
         missing = production_hardening_error()
         if missing:
@@ -4352,7 +4519,7 @@ def main():
     load_audit_tail()                    # history stays queryable across a restart
     if security_degraded():              # a corrupt containment store must not read as "nothing contained"
         raise SystemExit("ACP_SECURITY_STATE_FILE: " + security_degraded())
-    http.server.ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "8080"))), Handler).serve_forever()
+    http.server.ThreadingHTTPServer((os.getenv("ACP_BIND_HOST", "0.0.0.0"), int(os.getenv("PORT", "8080"))), Handler).serve_forever()
 
 
 if __name__ == "__main__":

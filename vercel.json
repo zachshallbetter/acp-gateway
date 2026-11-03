@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "public",
+  "functions": {
+    "api/index.py": {
+      "excludeFiles": "{.agents/**,docs/**,policies/**,records/**,scripts/**,deploy/**,state_import.py,**/.env*,.board_snapshot*,.python-version,test_*.py,**/test_*.py,**/__pycache__/**,**/*.pyc,github-app/**,.pytest_cache/**}"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/:path*",
+      "destination": "/api?__acp_path=/:path*"
+    }
+  ]
+}
