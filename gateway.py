@@ -3526,18 +3526,33 @@ def version_key(version):
 CLIENT_FILES = (".agents/acp/lib/acp.py", "scripts/acp.py")
 
 
+def releases_shipping(path, digest):
+    """Every release whose file at `path` has exactly this digest."""
+    try:
+        source = Path(os.getenv("ACP_CLIENT_RELEASES_FILE") or CLIENT_RELEASES_FILE)
+        releases = json.loads(source.read_text(encoding="utf-8")).get("releases") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [version for version, files in releases.items() if (files or {}).get(path) == digest]
+
+
 def client_status(version, digest):
-    """Is this client a released one, and the latest? Read-only; it never authorizes anything."""
+    """Is this client a released one, and the latest? Read-only; it never authorizes anything.
+
+    An unchanged file ships in several releases, so the client's own claimed
+    version decides among the releases that ship its digest.
+    """
     versions = release_versions()
     latest = versions[-1] if versions else None
     digest = (digest or "").strip().lower()
-    shipped_in = next((released_client_version(path, digest) for path in CLIENT_FILES
-                       if released_client_version(path, digest)), None)
-    return {"latest": latest, "version": version or None, "known": shipped_in is not None,
-            "matches_release": shipped_in, "current": bool(latest and shipped_in == latest),
-            "deprecated_layout": shipped_in is not None and version_key(shipped_in) < (0, 7, 0),
-            "upgrade": None if not latest or shipped_in == latest else
-            f".agents/bootstrap/bootstrap upgrade --to v{latest}"}
+    shipped = sorted({v for path in CLIENT_FILES for v in releases_shipping(path, digest)}, key=version_key)
+    matched = version if version in shipped else (shipped[-1] if shipped else None)
+    claims_older = version in shipped and version != latest   # same file, but the rest of an older release
+    current = bool(latest and latest in shipped and not claims_older)
+    return {"latest": latest, "version": version or None, "known": bool(shipped), "matches_release": matched,
+            "current": current,
+            "deprecated_layout": matched is not None and version_key(matched) < (0, 7, 0),
+            "upgrade": None if current or not latest else f".agents/bootstrap/bootstrap upgrade --to v{latest}"}
 
 
 def released_client_version(path, digest):

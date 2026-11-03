@@ -704,3 +704,17 @@ def test_contained_project_files_are_never_accepted_as_a_release():
         assert gateway.released_client_version(".agents/project/profile.json", AGENTS) is None
         assert gateway.released_client_version(".agents/records/evidence.jsonl", AGENTS) is None
         assert gateway.released_client_version(".agents/acp/lib/acp.py", AGENTS) == "9.9.9"
+
+
+def test_a_file_unchanged_across_releases_is_current_at_the_latest():
+    same = hashlib.sha256(b"unchanged client\n").hexdigest()
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump({"releases": {"0.7.0": {".agents/acp/lib/acp.py": same}, "0.7.1": {".agents/acp/lib/acp.py": same}}},
+              handle)
+    handle.close()
+    with _patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": handle.name}):
+        latest = gateway.client_status("0.7.1", same)
+        older = gateway.client_status("0.7.0", same)
+    assert latest["current"] is True and latest["upgrade"] is None, latest
+    assert older["known"] is True and older["current"] is False, older
+    assert older["upgrade"] == ".agents/bootstrap/bootstrap upgrade --to v0.7.1"
