@@ -62,11 +62,7 @@ class handler(Handler):
             return True
         except (UnicodeError, ValueError) as exc:
             reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
-            parsed = urlsplit(self.path)
-            query_keys = sorted({key for key, _ in parse_qsl(
-                parsed.query, keep_blank_values=True, max_num_fields=256)})
-            logging.warning("Rejected Vercel rewrite: %s; path=%s; query_keys=%s",
-                            reason, parsed.path, query_keys)
+            logging.warning("Rejected Vercel rewrite: %s", reason)
             self.reply(400, {"error": "INVALID_REWRITE", "detail": "The request route is invalid."})
             return False
 

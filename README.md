@@ -1,11 +1,16 @@
 # acp-gateway
 
-A small, dependency-free gateway with two jobs. It lets agents read a GitHub
+A small Python gateway with two jobs. It lets agents read a GitHub
 Projects (ProjectsV2) board without ever holding a GitHub App private key
 themselves, and it is the **authoritative policy decision service** for the
 repositories it governs: an agent asks ACP whether a protected action is
-authorized, and ACP answers. One Python stdlib file (`gateway.py`), no
-framework, no third-party packages.
+authorized, and ACP answers. The HTTP handler uses Python's standard library;
+the Vercel runtime uses the PostgreSQL dependencies pinned in `requirements.txt`.
+
+Current recovery scope, preserved candidates, ticket dispositions, and release
+gates are recorded in [the reconciliation record](docs/RECONCILIATION.md).
+Local source, GitHub issue completion, and the deployment serving production
+are separate states; none proves the others.
 
 The two halves share a process and a bearer token, and nothing else. Losing
 GitHub takes the read side offline; it does **not** take the policy side
@@ -1233,10 +1238,24 @@ python3 test_gateway_integrity.py
 python3 test_gateway_board_gate.py
 python3 test_register_policy.py
 python3 test_github_app.py
+python3 test_vercel_adapter.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials
 needed.
+
+Use the repository environment with the pinned runtime dependencies installed.
+The PostgreSQL integration checks are separate:
+
+```bash
+ACP_TEST_DATABASE_URL=postgresql://127.0.0.1:5432/acp_runtime_test .venv/bin/python test_postgres_store.py
+```
+
+Create a disposable, empty local database first. This check applies this release's
+migrations, exercises rollback and concurrent capability consumption, reconnects
+to persisted containment and audit state, and temporarily removes schema history
+to prove readiness fails closed. It rejects non-loopback and non-test targets.
+It does not connect to Neon or prove production failover or backup recovery.
 
 ## Using it from an agent
 

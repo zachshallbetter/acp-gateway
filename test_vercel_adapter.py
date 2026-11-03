@@ -76,6 +76,19 @@ class VercelAdapterTests(unittest.TestCase):
         self.assertEqual(response["body"]["error"], "STATE_STORE_UNAVAILABLE")
         self.assertIsNone(response["headers"])
 
+    def test_invalid_route_logging_cannot_prevent_the_json_refusal(self):
+        for path in ("/api?" + "&".join("secret=value" for _ in range(257)),
+                     "http://[invalid/?secret=value"):
+            handler = object.__new__(adapter.handler)
+            handler.path = path
+            response = {}
+            handler.reply = lambda code, body: response.update(code=code, body=body)
+            with self.subTest(path=path), patch.object(adapter.logging, "warning") as warning:
+                self.assertFalse(handler._restore_path())
+                self.assertEqual(response["code"], 400)
+                self.assertEqual(response["body"]["error"], "INVALID_REWRITE")
+                self.assertNotIn("secret", str(warning.call_args))
+
 
 if __name__ == "__main__":
     unittest.main()
