@@ -22,7 +22,8 @@ What it does:
   5. Prints the summary. Nothing is written without --apply.
 
 Setting ACP_POLICY on Railway redeploys the service; that is how the new
-policy is loaded. No secret is ever printed: the signing key is read into
+policy is loaded. The gateway now runs on Vercel: use scripts/policy-admin.py
+there, which reuses this file's policy building, merging and signing. No secret is ever printed: the signing key is read into
 memory and used there.
 """
 from __future__ import annotations
