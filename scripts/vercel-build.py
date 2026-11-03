@@ -42,16 +42,31 @@ def main() -> int:
         print(f"acp build: no database URL in the {target} environment (ACP_DATABASE_URL); refusing to build")
         return 1
 
-    if target == "preview":
+    code, out = runner(dsn, "--check")
+    print(f"acp build: {target} schema before: {out}")
+    report = json.loads(out) if out.startswith("{") else {}
+    status = report.get("status", "unknown")
+    if target == "preview" and status == "pending":
         code, out = runner(dsn)
         print(f"acp build: preview migrate: {out}")
         if code != 0:
             return 1
-    code, out = runner(dsn, "--check")
-    print(f"acp build: {target} schema: {out}")
-    if code == 0:
+        code, out = runner(dsn, "--check")
+        print(f"acp build: preview schema after: {out}")
+        report = json.loads(out) if out.startswith("{") else {}
+        status = report.get("status", "unknown")
+    if status == "current":
         return 0
-    status = json.loads(out).get("status") if out.startswith("{") else "unknown"
+    if status == "conflict":
+        detail = "; ".join(f"{label} {', '.join(report[key])}" for key, label in (
+            ("unknown_versions", "versions this release does not ship:"),
+            ("checksum_mismatch_versions", "versions with different checksums:"))
+            if report.get(key))
+        print(f"acp build: the {target} database was migrated by a different release ({detail or 'history has a gap'}). "
+              + ("Reset the Preview database branch (for example recreate it from an empty parent), then redeploy."
+                 if target == "preview" else
+                 "Do not deploy this release against it; reconcile the schema under an ACP-authorized migration plan."))
+        return 1
     print(f"acp build: {target} database is {status} for this release; "
           + ("apply the pending migrations with an ACP-authorized scripts/migrate-db.py run before deploying"
              if target == "production" else "fix the Preview database before deploying"))

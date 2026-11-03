@@ -57,7 +57,8 @@ class VercelBuildTests(unittest.TestCase):
         self.assertIn('"status": "current"', cp.stdout)
         again = self.build("preview", self.url)
         self.assertEqual(again.returncode, 0)
-        self.assertIn('"applied_versions": []', again.stdout)
+        self.assertIn('"status": "current"', again.stdout)
+        self.assertNotIn("preview migrate", again.stdout, "a current database is not migrated again")
 
     def test_production_build_fails_when_migrations_are_pending_and_writes_nothing(self):
         cp = self.build("production", self.url)
@@ -72,6 +73,19 @@ class VercelBuildTests(unittest.TestCase):
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn('"status": "current"', cp.stdout)
+
+    def test_preview_build_explains_a_database_migrated_by_another_release_and_writes_nothing(self):
+        self.assertEqual(self.build("preview", self.url).returncode, 0)
+        with psycopg.connect(self.url) as connection:
+            connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at) "
+                               "VALUES (3, %s, CURRENT_TIMESTAMP)", ("a" * 64,))
+        cp = self.build("preview", self.url)
+        self.assertEqual(cp.returncode, 1)
+        self.assertIn("migrated by a different release", cp.stdout)
+        self.assertIn("versions this release does not ship: 0003", cp.stdout)
+        self.assertIn("Reset the Preview database branch", cp.stdout)
+        with psycopg.connect(self.url) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 3)
 
     def test_missing_database_url_fails_the_build_and_local_runs_are_skipped(self):
         cp = self.build("production")
