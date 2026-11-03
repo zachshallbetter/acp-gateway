@@ -231,6 +231,54 @@ def test_a_moved_ref_is_reverified_not_allowed():
     assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "STALE_REF_STATE", out
 
 
+def test_an_unpublished_new_sha_is_reverified_not_treated_as_a_rewrite():
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update",
+                                        context={"ref": "refs/heads/main", "old_sha": "abc123",
+                                                 "new_sha": "def456"}),
+                                verifier=verifier(ref_sha="abc123", fast_forward=None,
+                                                  fast_forward_unknown="REVISION_NOT_PUBLISHED"))
+    assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "REVISION_NOT_PUBLISHED", out
+    assert "Push new_sha" in out["detail"]
+
+
+def test_an_uncomparable_update_is_reverified():
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update",
+                                        context={"ref": "refs/heads/main", "old_sha": "abc123",
+                                                 "new_sha": "def456"}),
+                                verifier=verifier(ref_sha="abc123", fast_forward=None))
+    assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "FAST_FORWARD_UNVERIFIED", out
+
+
+def test_a_diverged_update_still_requires_recovery():
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update",
+                                        context={"ref": "refs/heads/main", "old_sha": "abc123",
+                                                 "new_sha": "def456"}),
+                                verifier=verifier(ref_sha="abc123", fast_forward=False))
+    assert out["decision"] == "DENY" and out["reason"] == "RECOVERY_AUTHORIZATION_REQUIRED", out
+
+
+def test_github_evidence_marks_a_missing_revision_unpublished():
+    from urllib.error import HTTPError
+
+    def api(owner, path):
+        if "/compare/" in path:
+            raise HTTPError(path, 404, "Not Found", {}, None)
+        if "/git/ref/" in path:
+            return {"object": {"sha": "abc123"}}
+        return {"owner": {"login": OWNER}, "name": REPO, "default_branch": "main"}
+
+    with env(**{gateway.owner_env_name(OWNER): "token"}), patch.object(gateway, "repo_api", api):
+        found = gateway.github_evidence({"owner": OWNER, "name": REPO},
+                                        {"ref": "refs/heads/main", "old_sha": "abc123", "new_sha": "def456"})
+    assert found["fast_forward"] is None and found["fast_forward_unknown"] == "REVISION_NOT_PUBLISHED", found
+
+
 # ---- 8-9. losing GitHub downgrades trust; it does not remove policy --------
 def test_losing_the_installation_asks_for_reverification():
     fresh()

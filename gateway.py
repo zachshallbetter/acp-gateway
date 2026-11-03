@@ -2643,6 +2643,19 @@ def authorize(request, verifier=None, admin=False, now=None):
         fast_forward = evidence.get("fast_forward")
         if context.get("force") or context.get("non_fast_forward"):
             fast_forward = False
+        elif fast_forward is None and not context.get("recovery_authorization_id"):
+            # Unknown ancestry is not a rewrite: ask the caller to make it checkable instead of
+            # demanding a recovery grant for what is usually an ordinary fast-forward.
+            if evidence.get("fast_forward_unknown") == "REVISION_NOT_PUBLISHED":
+                return finish("REVERIFY_REQUIRED", "REVISION_NOT_PUBLISHED",
+                              "GitHub does not hold new_sha yet, so ACP cannot confirm the update is a "
+                              "fast-forward. Push new_sha to a non-protected ref (for example its pull "
+                              "request branch), then request authorization again.",
+                              expected_ref=context["ref"], expected_revision=context["new_sha"])
+            return finish("REVERIFY_REQUIRED", "FAST_FORWARD_UNVERIFIED",
+                          "ACP could not compare old_sha with new_sha on GitHub, so it cannot confirm "
+                          "the update is a fast-forward. Request authorization again.",
+                          expected_ref=context["ref"], expected_revision=context["new_sha"])
 
     elevated = action in RECOVERY_ACTIONS or (action == "git.protected_ref.update" and fast_forward is not True)
     if elevated:
@@ -4216,6 +4229,11 @@ def github_evidence(claim, context=None, policy=None):
         try:
             compared = repo_api(owner, f"/repos/{owner}/{name}/compare/{context['old_sha']}...{context['new_sha']}")
             found["fast_forward"] = compared.get("status") in ("ahead", "identical")
+        except HTTPError as exc:
+            # 404: GitHub does not hold one of the revisions yet, so ancestry is unknown, not refuted.
+            found["fast_forward"] = None
+            if exc.code == 404:
+                found["fast_forward_unknown"] = "REVISION_NOT_PUBLISHED"
         except Exception:
             found["fast_forward"] = None
     return found
