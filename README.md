@@ -937,6 +937,26 @@ it, and a consumed grant cannot be replayed. ACP records an authorized override
 naming the authorization that produced it rather than rewriting the signed
 policy — fold the change into the next signed policy version.
 
+`scripts/policy-admin.py grant OWNER/NAME --checkout DIR --ref REF` requests
+these grants for every pinned path a commit changes, using the owner's Keychain
+credentials.
+
+### Released bootstrap clients
+
+A client upgrade is not tampering. `client_releases.json` lists the sha256 of
+every machinery file each formal-project-bootstrap release installs: scripts,
+schemas, copied docs and skills. A pinned path whose observed digest matches a
+released version counts as a **MATCH**, and so does a file added under a
+protected tree. Upgrading the client therefore needs no grant. Project-owned
+files are never accepted this way, whatever the release file says: `AGENTS.md`,
+the intent, profile, bindings, `.agents/board.env`, `.agents/rules/`,
+`contracts/` and `records/`. A change to one is an authority change and still
+needs an exact grant. Regenerate the list after each bootstrap release:
+
+```bash
+python3 scripts/client-releases.py --bootstrap ../formal-project-bootstrap --write
+```
+
 ### Operator view
 
 ```

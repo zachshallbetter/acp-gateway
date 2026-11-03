@@ -619,3 +619,63 @@ if __name__ == "__main__":
         fn()
         print("  ok", fn.__name__)
     print(f"{len(fns)} integrity tests passed")
+
+
+# ---- released bootstrap clients (#44) -------------------------------------
+def releases_file(files, version="9.9.9"):
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump({"format": 1, "releases": {version: files}}, handle)
+    handle.close()
+    return handle.name
+
+
+RELEASED_SETTINGS = hashlib.sha256(b'{"released": true}\n').hexdigest()
+
+
+def test_a_pinned_client_file_from_a_released_bootstrap_matches():
+    fresh()
+    with governed_env(ACP_CLIENT_RELEASES_FILE=releases_file({".claude/settings.json": RELEASED_SETTINGS})):
+        out = snapshot(artifacts=intact(**{".claude/settings.json": {"path": ".claude/settings.json",
+                                                                     "state": "present",
+                                                                     "sha256": RELEASED_SETTINGS}}))
+        decision = gateway.authorize(request("git.remote.update"), verifier=verifier())
+    assert out["integrity"]["status"] == "MATCH", out
+    assert out["integrity"]["unresolved"] is False
+    assert decision["decision"] == "ALLOW", decision
+
+
+def test_an_unreleased_client_file_is_still_a_mismatch():
+    fresh()
+    with governed_env(ACP_CLIENT_RELEASES_FILE=releases_file({".claude/settings.json": RELEASED_SETTINGS})):
+        out = snapshot(artifacts=intact(**{".claude/settings.json": {"path": ".claude/settings.json",
+                                                                     "state": "present",
+                                                                     "sha256": "e" * 64}}))
+    assert out["integrity"]["status"] == "MISMATCH", out
+    assert out["integrity"]["unresolved"] is True
+
+
+def test_project_owned_files_are_never_accepted_as_a_release():
+    owned = {"AGENTS.md": AGENTS, "PROJECT_PROFILE.json": AGENTS, "contracts/acp-protected-effects.yaml": AGENTS,
+             ".agents/rules/standards.md": AGENTS, "scripts/acp.py": AGENTS}
+    with _patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": releases_file(owned)}):
+        assert gateway.released_client_version("AGENTS.md", AGENTS) is None
+        assert gateway.released_client_version("PROJECT_PROFILE.json", AGENTS) is None
+        assert gateway.released_client_version("contracts/acp-protected-effects.yaml", AGENTS) is None
+        assert gateway.released_client_version(".agents/rules/standards.md", AGENTS) is None
+        assert gateway.released_client_version("scripts/acp.py", AGENTS) == "9.9.9"
+
+
+def test_a_released_file_added_under_a_protected_tree_is_not_an_addition():
+    fresh()
+    added = hashlib.sha256(b"released helper\n").hexdigest()
+    with governed_env(ACP_CLIENT_RELEASES_FILE=releases_file({".claude/hooks/helper.sh": added})):
+        out = snapshot(artifacts=intact(**{".claude/hooks/helper.sh": {"path": ".claude/hooks/helper.sh",
+                                                                       "state": "present", "sha256": added}}))
+    assert out["integrity"]["status"] == "MATCH", out
+
+
+def test_the_shipped_release_file_lists_the_released_client():
+    data = json.loads((root / "client_releases.json").read_text(encoding="utf-8"))
+    assert "0.6.2" in data["releases"]
+    assert "scripts/acp.py" in data["releases"]["0.6.2"]
+    assert "AGENTS.md" not in data["releases"]["0.6.2"]
