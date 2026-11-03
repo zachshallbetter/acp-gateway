@@ -122,7 +122,7 @@ class GrantTests(unittest.TestCase):
             with patch.object(admin, "keychain", return_value="secret"), \
                     patch.object(admin, "vercel_api", FakeVercel([policy])), \
                     patch.object(admin, "gateway_call", gateway), redirect_stdout(out):
-                args = argparse.Namespace(repository="o/a", checkout=str(repo), authorized_by="owner",
+                args = argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", authorized_by="owner",
                                           reason="upgrade", apply=True)
                 self.assertEqual(admin.cmd_grant(args), 0)
             grants = [body for path, body in calls if path == "/internal/recover"]

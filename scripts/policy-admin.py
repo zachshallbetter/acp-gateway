@@ -2,7 +2,7 @@
 """policy-admin.py -- the owner's policy and baseline changes for the Vercel deployment.
 
     .venv/bin/python scripts/policy-admin.py register OWNER/NAME [OWNER/NAME ...] [--apply]
-    .venv/bin/python scripts/policy-admin.py grant OWNER/NAME --checkout DIR [--apply]
+    .venv/bin/python scripts/policy-admin.py grant OWNER/NAME --checkout DIR [--ref REF] [--apply]
 
 register  puts repositories under an ACP policy. It reads production's ACP_POLICY from
           Vercel, checks that the Keychain signing key reproduces every existing signature,
@@ -11,7 +11,7 @@ register  puts repositories under an ACP policy. It reads production's ACP_POLIC
           only with --apply writes ACP_POLICY on Vercel and policies/production.json here.
           The new policy takes effect on the next production deployment.
 
-grant     authorizes the pinned-artifact changes a checkout's HEAD makes for a governed
+grant     authorizes the pinned-artifact changes a checkout's REF (default HEAD) makes for a governed
           repository whose policy has an artifact manifest. For every protected path whose
           content at HEAD differs from what ACP expects, it asks for a single-use grant from
           the expected digest to the new one (24 hours). ACP advances the baseline when a
@@ -162,9 +162,9 @@ def git(checkout: Path, *args: str) -> subprocess.CompletedProcess:
 def cmd_grant(args) -> int:
     owner, _, name = args.repository.partition("/")
     checkout = Path(args.checkout).expanduser().resolve()
-    head = git(checkout, "rev-parse", "HEAD").stdout.decode().strip()
+    head = git(checkout, "rev-parse", "--verify", f"{args.ref}^{{commit}}").stdout.decode().strip()
     if not head:
-        raise SystemExit(f"error: {checkout} is not a Git checkout")
+        raise SystemExit(f"error: {args.ref} is not a commit in {checkout}")
     bearer, admin = keychain("ACP_GATEWAY_TOKEN"), keychain("ACP_POLICY_ADMIN_TOKEN")
     _, document = production_policy_env()
     policies = document["policies"] if isinstance(document, dict) else document
@@ -214,7 +214,8 @@ def main() -> int:
     register.add_argument("--apply", action="store_true")
     grant = sub.add_parser("grant", help="authorize a checkout's pinned-artifact changes")
     grant.add_argument("repository", metavar="OWNER/NAME")
-    grant.add_argument("--checkout", required=True, help="local checkout whose HEAD is the new state")
+    grant.add_argument("--checkout", required=True, help="local Git checkout holding the new state")
+    grant.add_argument("--ref", default="HEAD", help="commit, branch or tag whose files are the new state")
     grant.add_argument("--authorized-by", default="repository owner")
     grant.add_argument("--reason", default="formal-project-bootstrap client upgrade")
     grant.add_argument("--apply", action="store_true")
