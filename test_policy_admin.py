@@ -127,8 +127,11 @@ class GrantTests(unittest.TestCase):
                     return {"baseline_overrides": {"scripts/acp.py": {"sha256": digest("advanced client\n")}}}
                 return {"artifact_change": {"authorization_id": "artifact_1"}}
 
+            releases = Path(tmp) / "releases.json"
+            releases.write_text(json.dumps({"releases": {"9.9.9": {"AGENTS.md": digest("same\n")}}}))
             out = io.StringIO()
-            with patch.object(admin, "keychain", return_value="secret"), \
+            with patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": str(releases)}), \
+                    patch.object(admin, "keychain", return_value="secret"), \
                     patch.object(admin, "vercel_api", FakeVercel([policy])), \
                     patch.object(admin, "gateway_call", gateway), redirect_stdout(out):
                 args = argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", authorized_by="owner",
@@ -140,6 +143,46 @@ class GrantTests(unittest.TestCase):
             self.assertEqual(grants[0]["expected_old_sha256"], digest("advanced client\n"))
             self.assertEqual(grants[0]["authorized_new_sha256"], digest("new client\n"))
             self.assertNotIn("secret", out.getvalue())
+
+
+class GrantReleaseTests(unittest.TestCase):
+    def test_a_released_client_file_needs_no_grant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "scripts").mkdir()
+            (repo / "scripts/acp.py").write_text("released client\n")
+            (repo / "PROJECT_PROFILE.json").write_text("{}\n")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgSign=false", "commit", "-q", "-m", "x"], check=True)
+            digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
+            releases = Path(tmp) / "releases.json"
+            releases.write_text(json.dumps({"releases": {"0.6.3": {"scripts/acp.py": digest("released client\n")}}}))
+            pin = lambda path, text, kind: {"id": path, "path": path, "kind": kind, "required": True,
+                                            "change_policy": "authorize_and_report", "expected_sha256": digest(text)}
+            policy = signed({"policy_id": "o-a", "version": 1, "status": "active",
+                             "repository": {"owner": "o", "name": "a"},
+                             "artifact_manifest": {"artifact_manifest_version": 1, "artifacts": [
+                                 pin("scripts/acp.py", "old client\n", "client_control"),
+                                 pin("PROJECT_PROFILE.json", "old profile\n", "bootstrap")]}})
+            calls = []
+
+            def gateway(path, bearer, admin_token=None, body=None):
+                calls.append((path, body))
+                return {"baseline_overrides": {}} if body is None else {"artifact_change": {"authorization_id": "a1"}}
+
+            out = io.StringIO()
+            with patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": str(releases)}), \
+                    patch.object(admin, "keychain", return_value="secret"), \
+                    patch.object(admin, "vercel_api", FakeVercel([policy])), \
+                    patch.object(admin, "gateway_call", gateway), redirect_stdout(out):
+                args = argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", authorized_by="owner",
+                                          reason="upgrade", apply=True)
+                self.assertEqual(admin.cmd_grant(args), 0)
+            grants = [body["artifact"] for path, body in calls if path == "/internal/recover"]
+            self.assertEqual(grants, ["PROJECT_PROFILE.json"])
+            self.assertIn("scripts/acp.py: bootstrap 0.6.3 client file, accepted without a grant", out.getvalue())
 
 
 if __name__ == "__main__":

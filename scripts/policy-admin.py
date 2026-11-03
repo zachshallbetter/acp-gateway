@@ -189,15 +189,22 @@ def cmd_grant(args) -> int:
     # What ACP expects now: the signed pin, unless an earlier grant advanced it.
     view = gateway_call(f"/internal/security/integrity?owner={owner}&name={name}", bearer, admin)
     overrides = view.get("baseline_overrides") or {}
-    changes = []
+    gateway = load_register_policy().gateway
+    changes, released = [], []
     for item in pinned:
         path = item["path"]
         expected = (overrides.get(path) or {}).get("sha256") or item.get("expected_sha256")
         shown = git(checkout, "show", f"{head}:{path}")
         new = hashlib.sha256(shown.stdout).hexdigest() if shown.returncode == 0 else None
         if new and new != expected:
-            changes.append((path, expected, new))
-    print(f"{owner}/{name} at {head[:7]}: {len(changes)} pinned artifact(s) change")
+            version = gateway.released_client_version(path, new)
+            if version:
+                released.append((path, version))
+            else:
+                changes.append((path, expected, new))
+    for path, version in released:
+        print(f"  {path}: bootstrap {version} client file, accepted without a grant")
+    print(f"{owner}/{name} at {head[:7]}: {len(changes)} pinned artifact(s) need a grant")
     for path, old, new in changes:
         print(f"  {path}: {(old or 'none')[:12]} -> {new[:12]}")
     if not args.apply:
