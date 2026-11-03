@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Vercel build step: keep each environment's database in step with this release.
+"""Vercel build step: refuse to build a production release its database does not match.
 
-Preview  applies this release's pending migrations to the Preview database, then checks it.
-Production only checks; pending or conflicting migrations fail the build, so a release whose
-schema the production database does not have can never be built (and so never promoted).
-Production migrations stay a separate, ACP-authorized step (scripts/migrate-db.py).
+Production checks the database read-only; pending or conflicting migrations fail the build,
+so a release whose schema the production database does not have can never be built (and so
+never promoted). Production migrations stay a separate, ACP-authorized step
+(scripts/migrate-db.py). A commit without the Vercel runtime refuses to build.
+
+Preview is not a release gate: a Preview build reports its database's schema state and never
+writes to it or fails because of it. Releases are verified on the unpromoted production
+deployment instead.
 
 The database URL is read from the deployment's own environment, exactly as the runtime
 reads it, and is never printed. Outside Vercel this does nothing.
@@ -21,11 +25,24 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNNER = ROOT / "scripts" / "migrate-db.py"
 
 
-def runner(dsn: str, *args: str) -> tuple[int, str]:
+def check(dsn: str) -> tuple[str, dict]:
     env = {**os.environ, "ACP_DATABASE_MIGRATION_URL": dsn, "ACP_STORAGE_BACKEND": "postgres"}
-    cp = subprocess.run([sys.executable, str(RUNNER), *args], cwd=ROOT, env=env,
+    cp = subprocess.run([sys.executable, str(RUNNER), "--check"], cwd=ROOT, env=env,
                         capture_output=True, text=True)
-    return cp.returncode, (cp.stdout.strip() or cp.stderr.strip())
+    out = cp.stdout.strip() or cp.stderr.strip()
+    return out, (json.loads(out) if out.startswith("{") else {})
+
+
+def explain(report: dict) -> str:
+    status = report.get("status", "unknown")
+    if status == "pending":
+        return "pending migrations: " + ", ".join(report.get("pending_versions") or [])
+    if status == "conflict":
+        parts = [f"{label} {', '.join(report[key])}" for key, label in (
+            ("unknown_versions", "versions this release does not ship:"),
+            ("checksum_mismatch_versions", "versions with different checksums:")) if report.get(key)]
+        return "migrated by a different release (" + ("; ".join(parts) or "history has a gap") + ")"
+    return f"schema state {status}"
 
 
 def main() -> int:
@@ -39,37 +56,24 @@ def main() -> int:
     dsn = (os.getenv("ACP_DATABASE_URL", "").strip() or os.getenv("POSTGRES_URL", "").strip()
            or os.getenv("DATABASE_URL", "").strip())
     if not dsn:
-        print(f"acp build: no database URL in the {target} environment (ACP_DATABASE_URL); refusing to build")
+        if target == "preview":
+            print("acp build: preview has no database URL; Preview is not a release gate, continuing")
+            return 0
+        print("acp build: no database URL in the production environment (ACP_DATABASE_URL); refusing to build")
         return 1
 
-    code, out = runner(dsn, "--check")
-    print(f"acp build: {target} schema before: {out}")
-    report = json.loads(out) if out.startswith("{") else {}
-    status = report.get("status", "unknown")
-    if target == "preview" and status == "pending":
-        code, out = runner(dsn)
-        print(f"acp build: preview migrate: {out}")
-        if code != 0:
-            return 1
-        code, out = runner(dsn, "--check")
-        print(f"acp build: preview schema after: {out}")
-        report = json.loads(out) if out.startswith("{") else {}
-        status = report.get("status", "unknown")
-    if status == "current":
+    out, report = check(dsn)
+    print(f"acp build: {target} schema: {out}")
+    if report.get("status") == "current":
         return 0
-    if status == "conflict":
-        detail = "; ".join(f"{label} {', '.join(report[key])}" for key, label in (
-            ("unknown_versions", "versions this release does not ship:"),
-            ("checksum_mismatch_versions", "versions with different checksums:"))
-            if report.get(key))
-        print(f"acp build: the {target} database was migrated by a different release ({detail or 'history has a gap'}). "
-              + ("Reset the Preview database branch (for example recreate it from an empty parent), then redeploy."
-                 if target == "preview" else
-                 "Do not deploy this release against it; reconcile the schema under an ACP-authorized migration plan."))
-        return 1
-    print(f"acp build: {target} database is {status} for this release; "
-          + ("apply the pending migrations with an ACP-authorized scripts/migrate-db.py run before deploying"
-             if target == "production" else "fix the Preview database before deploying"))
+    if target == "preview":
+        print(f"acp build: warning: the Preview database is {explain(report)}; /ready will report not ready. "
+              "Preview is not a release gate, so the build continues and nothing was written.")
+        return 0
+    print(f"acp build: the production database is {explain(report)} for this release. "
+          + ("Apply the pending migrations with an ACP-authorized scripts/migrate-db.py run before deploying."
+             if report.get("status") == "pending" else
+             "Do not deploy this release against it; reconcile the schema under an ACP-authorized migration plan."))
     return 1
 
 

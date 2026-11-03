@@ -43,32 +43,33 @@ It does not authorize a protected effect or replace a signed ACP decision.
 - Until the runtime lands on `main`, `main` is not deployable. Do not promote a
   production build of `main`, and do not re-enable domain auto-assignment.
 
-## Preview environment requirements
+## Preview is not a release gate
 
-PR #40's Preview deployment serves `/health` (200) and refuses `/ready` with
-`database migration history does not match this release`: its database has no
-`schema_migrations`. Preview also reports `app_configured: false`.
+Decided by the owner on 2026-11-03. Preview needed its own keys, policy and a
+clean database just to imitate production, and its database had already been
+migrated to `0007` by the broad candidate's Preview deployments. Releases are
+instead verified on the **unpromoted production deployment**: with
+`autoAssignCustomDomains=false`, a production build of `main` gets its own URL
+with production's real configuration and database while the alias stays on the
+known-good deployment.
 
-Provisioned 2026-11-03 at the owner's direction:
+`scripts/vercel-build.py` runs as Vercel's `buildCommand` with the deployment's
+own database URL, never printed:
 
-- Shared with production (target widened, values never read): `ACP_GITHUB_APP_ID`,
-  `ACP_GITHUB_PRIVATE_KEY` (the owner chose to reuse the production GitHub App),
-  `ACP_PROJECT_ALLOWLIST`, `ACP_AUDIT_HASH_CHAIN`, `ACP_REQUIRE_PRODUCTION_CONTROLS`.
-- Preview-only and distinct from production: `ACP_POLICY_SIGNING_KEY`,
-  `ACP_CAPABILITY_SIGNING_KEY`, `ACP_POLICY_SIGNING_KEY_ID`
-  (`acp-preview-policy-hmac-sha256`) and `ACP_POLICY`, production's 14 policies
-  re-signed under the Preview key and accepted as ACTIVE by the gateway loader.
-  A Preview decision therefore never verifies against production's keys.
-
-The database follows the build (`scripts/vercel-build.py`, run as Vercel's
-`buildCommand` with the deployment's own `ACP_DATABASE_URL`, never printed):
-
-- **Preview** builds apply this release's pending migrations, then check.
-- **Production** builds only check. Pending or conflicting migrations fail the
-  build, so a release the production database does not match cannot be built
-  or promoted. Production migrations remain a separate ACP-authorized
-  `scripts/migrate-db.py` run.
+- **Production** builds check the database read-only. Pending or conflicting
+  migrations fail the build, so a release the production database does not
+  match cannot be built or promoted. Production migrations remain a separate
+  ACP-authorized `scripts/migrate-db.py` run.
+- **Preview** builds report the schema state as a warning and never write or
+  fail because of it.
 - A commit without `api/index.py` and `vercel.json` refuses to build.
+
+Preview still holds the variables provisioned on 2026-11-03 (production's
+GitHub App and flags by widened target; Preview-only signing keys and a policy
+re-signed under `acp-preview-policy-hmac-sha256`). They are unused by the
+release process and can be removed. Preview's `ACP_DATABASE_URL` points at a
+database migrated to `0007` by `feat/acp-shared-state-failover`; keep it for
+that candidate.
 
 `scripts/migrate-db.py --check` is read-only and remains the way to inspect any
 database by hand (exit 0 current, 3 pending, 1 conflict).
@@ -125,11 +126,12 @@ was changed during this reconciliation. No new duplicate epic is needed.
 1. Prepare one focused runtime candidate from `63b631e` plus PR #35's changes.
    Preserve the mainline gate fix; include only migrations 0001–0002. This is
    local branch `fix/issue-30-runtime-reconciliation`, not a deployed release.
-2. Verify the candidate against an isolated database and the actual Preview
-   environment. Require exact migration checksums, audit initialization,
+2. Verify the candidate against an isolated database (done locally) and then
+   on the unpromoted production deployment of `main`. Require exact migration
+   checksums (enforced by the production build), audit initialization,
    structured storage refusals, route preservation, gate fields, and exact
-   migration scope in decisions/capabilities. Never infer Preview correctness
-   from Production's health response or from a successful build.
+   migration scope in decisions/capabilities. Never infer correctness from the
+   live alias's health response or from a successful build.
 3. Obtain exact authorization for the final source/ref and each protected
    release effect. Deploy to the existing project, verify routes and contracts,
    then promote only the verified artifact. Preserve the known-good deployment

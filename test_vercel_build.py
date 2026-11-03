@@ -26,6 +26,7 @@ if (not target.get("dbname", "").endswith("_test")
 
 ROOT = Path(__file__).resolve().parent
 SCRIPT = ROOT / "scripts" / "vercel-build.py"
+MIGRATE = ROOT / "scripts" / "migrate-db.py"
 
 
 class VercelBuildTests(unittest.TestCase):
@@ -39,9 +40,16 @@ class VercelBuildTests(unittest.TestCase):
         with psycopg.connect(DSN, autocommit=True) as connection:
             connection.execute(f'DROP DATABASE IF EXISTS "{self.dbname}" WITH (FORCE)')
 
+    def clean_env(self):
+        return {k: v for k, v in os.environ.items()
+                if not k.startswith("ACP_") and k not in ("VERCEL", "VERCEL_ENV", "POSTGRES_URL", "DATABASE_URL")}
+
+    def migrate(self):
+        env = {**self.clean_env(), "ACP_DATABASE_MIGRATION_URL": self.url}
+        subprocess.run([sys.executable, str(MIGRATE)], cwd=ROOT, env=env, check=True, capture_output=True)
+
     def build(self, vercel_env, url=None):
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith("ACP_") and k not in ("VERCEL", "VERCEL_ENV", "POSTGRES_URL", "DATABASE_URL")}
+        env = self.clean_env()
         if vercel_env:
             env.update(VERCEL="1", VERCEL_ENV=vercel_env)
         if url:
@@ -50,44 +58,46 @@ class VercelBuildTests(unittest.TestCase):
         self.assertNotIn(self.url, cp.stdout + cp.stderr, "the database URL is never printed")
         return cp
 
-    def test_preview_build_migrates_an_empty_database(self):
-        cp = self.build("preview", self.url)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn('"applied_versions": ["0001", "0002"]', cp.stdout)
-        self.assertIn('"status": "current"', cp.stdout)
-        again = self.build("preview", self.url)
-        self.assertEqual(again.returncode, 0)
-        self.assertIn('"status": "current"', again.stdout)
-        self.assertNotIn("preview migrate", again.stdout, "a current database is not migrated again")
+    def schema_rows(self):
+        with psycopg.connect(self.url) as connection:
+            if connection.execute("SELECT to_regclass('public.schema_migrations')").fetchone()[0] is None:
+                return None
+            return connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
 
     def test_production_build_fails_when_migrations_are_pending_and_writes_nothing(self):
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 1)
-        self.assertIn("production database is pending", cp.stdout)
+        self.assertIn("pending migrations: 0001, 0002", cp.stdout)
         self.assertIn("ACP-authorized", cp.stdout)
-        with psycopg.connect(self.url) as connection:
-            self.assertIsNone(connection.execute("SELECT to_regclass('public.schema_migrations')").fetchone()[0])
+        self.assertIsNone(self.schema_rows())
 
     def test_production_build_passes_on_a_current_database(self):
-        self.assertEqual(self.build("preview", self.url).returncode, 0)
+        self.migrate()
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn('"status": "current"', cp.stdout)
 
-    def test_preview_build_explains_a_database_migrated_by_another_release_and_writes_nothing(self):
-        self.assertEqual(self.build("preview", self.url).returncode, 0)
+    def test_production_build_refuses_a_database_migrated_by_another_release(self):
+        self.migrate()
         with psycopg.connect(self.url) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at) "
                                "VALUES (3, %s, CURRENT_TIMESTAMP)", ("a" * 64,))
-        cp = self.build("preview", self.url)
+        cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 1)
-        self.assertIn("migrated by a different release", cp.stdout)
         self.assertIn("versions this release does not ship: 0003", cp.stdout)
-        self.assertIn("Reset the Preview database branch", cp.stdout)
-        with psycopg.connect(self.url) as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 3)
+        self.assertEqual(self.schema_rows(), 3)
 
-    def test_missing_database_url_fails_the_build_and_local_runs_are_skipped(self):
+    def test_preview_build_warns_and_never_writes(self):
+        cp = self.build("preview", self.url)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("warning: the Preview database is pending migrations: 0001, 0002", cp.stdout)
+        self.assertIn("nothing was written", cp.stdout)
+        self.assertIsNone(self.schema_rows())
+        no_url = self.build("preview")
+        self.assertEqual(no_url.returncode, 0)
+        self.assertIn("Preview is not a release gate", no_url.stdout)
+
+    def test_missing_production_url_fails_and_local_runs_are_skipped(self):
         cp = self.build("production")
         self.assertEqual(cp.returncode, 1)
         self.assertIn("no database URL", cp.stdout)
