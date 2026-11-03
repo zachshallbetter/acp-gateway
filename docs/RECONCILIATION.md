@@ -43,6 +43,32 @@ It does not authorize a protected effect or replace a signed ACP decision.
 - Until the runtime lands on `main`, `main` is not deployable. Do not promote a
   production build of `main`, and do not re-enable domain auto-assignment.
 
+## Preview environment requirements
+
+PR #40's Preview deployment serves `/health` (200) and refuses `/ready` with
+`database migration history does not match this release`: its database has no
+`schema_migrations`. Preview also reports `app_configured: false`.
+
+Preview currently defines only `ACP_DATABASE_URL`, `ACP_GATEWAY_TOKEN`,
+`ACP_CONSOLE_BASE_URL` and `ACP_CONSOLE_ENCRYPTION_KEY`. To verify gates there it
+also needs Preview-scoped values for `ACP_POLICY`, `ACP_POLICY_SIGNING_KEY`,
+`ACP_CAPABILITY_SIGNING_KEY`, `ACP_POLICY_ADMIN_TOKEN`, `ACP_GITHUB_APP_ID`,
+`ACP_GITHUB_PRIVATE_KEY` and `ACP_AUDIT_HASH_CHAIN`. Signing keys and admin
+tokens must be distinct from production's; a Preview that shares production
+signing keys can mint decisions production accepts.
+
+Initialize the Preview database with the Preview connection string, never
+production's:
+
+```
+ACP_DATABASE_MIGRATION_URL=<preview url> .venv/bin/python scripts/migrate-db.py --check   # expect pending 0001, 0002
+ACP_DATABASE_MIGRATION_URL=<preview url> .venv/bin/python scripts/migrate-db.py           # applies both, one transaction
+ACP_DATABASE_MIGRATION_URL=<preview url> .venv/bin/python scripts/migrate-db.py --check   # expect current
+```
+
+`--check` is read-only and is also the safe way to confirm production's
+history (exit 0 current, 3 pending, 1 conflict).
+
 ## Credential and client findings
 
 - The production `ACP_GATEWAY_TOKEN` was rotated 2026-10-30 06:52Z. The

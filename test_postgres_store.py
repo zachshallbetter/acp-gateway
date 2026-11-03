@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from urllib.error import HTTPError
+import uuid
 from urllib.request import urlopen
 
 import psycopg
@@ -94,6 +95,7 @@ class PostgresStoreTests(unittest.TestCase):
 
     def test_concurrent_capability_consumption_commits_once(self):
         keys = ["resource:synthetic/replay", "actor:synthetic-actor"]
+        jti = f"synthetic-concurrent-capability-{uuid.uuid4().hex}"
         barrier = threading.Barrier(2)
         now = time.time()
 
@@ -101,7 +103,7 @@ class PostgresStoreTests(unittest.TestCase):
             try:
                 with postgres_store.transaction() as store:
                     barrier.wait(timeout=5)
-                    store.consume_capability(keys, "synthetic-concurrent-capability", now, now + 60)
+                    store.consume_capability(keys, jti, now, now + 60)
                 return "committed"
             except postgres_store.StorageError:
                 return "refused"
@@ -110,7 +112,7 @@ class PostgresStoreTests(unittest.TestCase):
             results = list(executor.map(lambda _: consume(), range(2)))
         self.assertEqual(sorted(results), ["committed", "refused"])
         with postgres_store.transaction() as store:
-            self.assertTrue(store.capability_consumed(keys, "synthetic-concurrent-capability", now))
+            self.assertTrue(store.capability_consumed(keys, jti, now))
 
     def test_readiness_refuses_missing_schema_without_losing_liveness(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
