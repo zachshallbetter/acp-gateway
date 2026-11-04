@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!--HEAD-->
+</head>
+<body class="home">
+<!--HEADER-->
+<main id="main">
+<div class="wrap">
+  <header class="hero">
+    <div>
+      <div class="eyebrow">acp-gateway · formal-project-bootstrap 0.7.3</div>
+      <h1>Agent Control Plane</h1>
+      <dl class="def">
+        <dt><span class="pos">noun</span><span class="abbr">ACP</span></dt>
+        <dd class="sense">An authorization service for AI agents. Before an agent does something it can’t take back, such as pushing to a protected branch, deploying or migrating a database, it asks ACP. ACP checks the facts for itself and answers for that one action, at that one commit, for about a minute. Anything it can’t verify is refused.</dd>
+        <dd class="not"><span>It isn’t</span><b>a code review</b><b>a permission an agent keeps</b><b>rules an agent can read or rewrite</b></dd>
+      </dl>
+      <div class="actions">
+        <a class="btn" href="#see">See it work</a>
+        <a class="btn ghost" href="install.html">Install it</a>
+      </div>
+    </div>
+    <div class="facts" aria-label="ACP at a glance">
+      <div class="fact"><span data-i="KeyRound" data-size="26"></span><b>0</b><span>GitHub keys held by any agent</span></div>
+      <div class="fact"><span data-i="Fingerprint" data-size="26"></span><b>1</b><span>exact action per approval</span></div>
+      <div class="fact"><span data-i="Hourglass" data-size="26"></span><b>60 s</b><span>before an approval expires</span></div>
+      <div class="fact"><span data-i="FileSignature" data-size="26"></span><b>16</b><span>repository policies registered</span></div>
+    </div>
+  </header>
+
+<div class="see" id="see" aria-labelledby="see-h">
+    <h2 class="see-h" id="see-h">See it work: four scenarios</h2>
+    <div class="tabs" role="tablist" aria-label="Scenarios" id="tabs"></div>
+    <div class="mapgrid">
+      <div class="mapview">
+        <svg class="map" viewBox="0 0 940 420" role="img" aria-labelledby="map-title map-desc">
+          <title id="map-title">How an agent, the ACP client, the gateway, its signed policy, GitHub, the audit log and the owner connect</title>
+          <desc id="map-desc">An agent asks the ACP client, which asks the gateway for one exact action. The gateway loads the signed policy, reads GitHub itself to verify, answers, and records the decision in the audit log. Only an allowed push reaches main or production. The owner can grant exceptions and approve recovery.</desc>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--rule)"/></marker>
+            <marker id="ah-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker>
+            <marker id="ah-cut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--deny)"/></marker>
+          </defs>
+
+          <path class="edge" data-e="ask" d="M170 208 L214 208"/>
+          <path class="edge" data-e="auth" d="M380 196 L434 196"/>
+          <path class="edge" data-e="decision" d="M440 222 L386 222"/>
+          <path class="edge" data-e="policy" d="M535 84 L535 144"/>
+          <path class="edge" data-e="verify" d="M630 170 C 668 170, 664 51, 694 51"/>
+          <path class="edge" data-e="push" d="M300 170 L300 118 L668 118 L668 209 L694 209"/>
+          <path class="edge" data-e="record" d="M535 266 L535 332"/>
+          <path class="edge" data-e="owner" d="M700 369 C 662 369, 668 250, 636 250"/>
+
+          <text class="el" data-l="auth" x="407" y="187" text-anchor="middle">asks</text>
+          <text class="el" data-l="decision" x="413" y="240" text-anchor="middle">answer</text>
+          <text class="el" data-l="policy" x="545" y="138">loads</text>
+          <text class="el" data-l="verify" x="676" y="108">verifies</text>
+          <text class="el" data-l="push" x="312" y="110">exact push</text>
+          <text class="el" data-l="record" x="545" y="306">records</text>
+          <text class="el" data-l="owner" x="676" y="318">grants · recovers</text>
+
+          <g class="node" data-n="agent"><rect x="20" y="170" width="150" height="76" rx="8"/><text class="nt" x="36" y="202" id="agent-t">Any agent</text><text class="ns" x="36" y="224">any model or tool</text><g class="ic" data-i="Bot" transform="translate(146 182) scale(0.9)"></g></g>
+          <g class="node" data-n="client"><rect x="220" y="170" width="160" height="76" rx="8"/><text class="nt" x="236" y="202">ACP client</text><text class="ns" x="236" y="224">.agents/acp</text><g class="ic" data-i="Terminal" transform="translate(354 182) scale(0.9)"></g></g>
+          <g class="node gw" data-n="gateway"><rect x="440" y="150" width="190" height="116" rx="10"/><text class="nt big" x="458" y="190">ACP gateway</text><text class="ns" x="458" y="214">decides · contains</text><text class="ns" x="458" y="232">verifies · records</text><text class="off" x="458" y="254">offline</text><g class="ic" data-i="ShieldCheck" transform="translate(600 162) scale(1)"></g></g>
+          <g class="node" data-n="policy"><rect x="440" y="20" width="190" height="62" rx="8"/><text class="nt" x="456" y="46">Signed policy</text><text class="ns" x="456" y="66">server-side, never sent</text><g class="ic" data-i="FileSignature" transform="translate(604 32) scale(0.9)"></g></g>
+          <g class="node" data-n="audit"><rect x="440" y="338" width="190" height="62" rx="8"/><text class="nt" x="456" y="364">Audit log</text><text class="ns" x="456" y="384">append-only, hash-chained</text><g class="ic" data-i="ScrollText" transform="translate(604 350) scale(0.9)"></g></g>
+          <g class="node" data-n="github"><rect x="700" y="20" width="220" height="62" rx="8"/><text class="nt" x="716" y="46">GitHub, read by ACP</text><text class="ns" x="716" y="66">the evidence it checks</text><g class="ic" data-i="ScanSearch" transform="translate(894 32) scale(0.9)"></g></g>
+          <g class="node" data-n="boundary"><rect x="700" y="178" width="220" height="62" rx="8"/><text class="nt" x="716" y="204">main · production</text><text class="ns" x="716" y="224">what’s protected</text><g class="ic" data-i="Lock" transform="translate(894 190) scale(0.9)"></g></g>
+          <g class="node" data-n="owner"><rect x="700" y="338" width="220" height="62" rx="8"/><text class="nt" x="716" y="364">The owner</text><text class="ns" x="716" y="384">grants · recovery</text><g class="ic" data-i="UserRound" transform="translate(894 350) scale(0.9)"></g></g>
+        </svg>
+        <p class="hint">Swipe sideways to see the whole map.</p>
+      </div>
+      <div class="panel" id="scenario-panel" role="tabpanel" aria-labelledby="tab-0">
+        <div class="pl"><div class="stepno" id="stepno"></div><p class="cap" id="cap" aria-live="polite"></p></div>
+        <div class="pr"><div id="verdict"></div>
+        <div class="stepnav">
+          <div class="dots" id="dots"></div>
+          <div class="navbtns">
+            <button class="close" type="button" id="prev">Back</button>
+            <button class="btn" type="button" id="next">Next</button>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <details class="transcript" id="transcript" open>
+      <summary>Read all four scenarios as text</summary>
+      <div id="transcript-body"></div>
+    </details>
+  </div>
+</div>
+
+<section id="undo">
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">The idea underneath</div>
+      <h2>ACP stands at the last undo</h2>
+      <p>In <a href="https://judgmentmachines.com/books/the-last-undo/read" target="_blank" rel="noopener"><i>The Last Undo</i></a> from Judgment Machines, the last undo is the final point where an action can still be reversed by you alone, cheaply and completely. After it, a fix is remediation. ACP makes its decision at exactly that point.</p>
+    </div>
+
+    <div class="undo-line" aria-label="Where ACP decides">
+      <div class="zone rev">
+        <div class="eyebrow"><span data-i="Undo2" data-size="16"></span>Still reversible</div>
+        <ul><li>Commit on a branch</li><li>Run the project’s own checks</li><li>Publish to a temporary <code>acp/&lt;sha&gt;</code> branch</li></ul>
+      </div>
+      <div class="gate">
+        <span data-i="ShieldCheck" data-size="28"></span>
+        <div><b>The last undo</b><br><span>ACP decides here, for this one action</span></div>
+      </div>
+      <div class="zone com">
+        <div class="eyebrow"><span data-i="Lock" data-size="16"></span>Committed</div>
+        <ul><li><code>main</code> moves to the new commit</li><li>Production deploys</li><li>A fix now is remediation, not an undo</li></ul>
+      </div>
+    </div>
+    <div class="three">
+      <div><span data-i="Hand" data-size="26"></span><p><b>Unilaterally</b><span>No one else has to cooperate to take it back.</span></p></div>
+      <div><span data-i="Coins" data-size="26"></span><p><b>Cheaply</b><span>Taking it back costs nothing material.</span></p></div>
+      <div><span data-i="Waypoints" data-size="26"></span><p><b>Completely</b><span>Nothing has reached anyone downstream yet.</span></p></div>
+    </div>
+
+    <div class="establish">
+      <div class="fieldcard" aria-label="The Establish side of the field card, filled in for an ACP push">
+        <div class="fc-top"><span>Last undo · Establish</span><span>before crossing commitment</span></div>
+        <div class="fc-presets" role="group" aria-label="Examples" id="fc-presets"></div>
+        <div class="commit" id="fc-commit"></div>
+        <table class="props"><caption class="sr-only" id="fc-caption">Required properties and their state</caption><thead class="sr-only"><tr><th scope="col">No.</th><th scope="col">Required property</th><th scope="col">State</th></tr></thead><tbody id="fc-props"></tbody></table>
+        <div class="fc-rule"><span>Unresolved ≠ satisfied</span><span>Who has authority if a property is gray?</span></div>
+        <div class="verdicts" id="fc-verdicts"><span data-v="pass">Pass</span><span data-v="fail">Fail</span><span data-v="escalate">Escalate</span></div>
+      </div>
+      <div class="outcome">
+        <div class="result" aria-live="polite"><div id="fc-chip"></div><p id="fc-text"></p></div>
+        <p class="src-line">Every required property is either established as satisfied, established as violated, or still gray. A property that leaves gray in the wrong direction is the system working: the answer is no. The field card’s questions come from the book; the ACP readings beside them are this page’s.</p>
+        <details class="transcript" id="fc-transcript" open>
+          <summary>Read all four examples as text</summary>
+          <div id="fc-transcript-body"></div>
+        </details>
+        <p class="src-line"><a href="https://judgmentmachines.com/assets/last-undo-field-card-v1.0.0.pdf" target="_blank" rel="noopener">The field card (PDF)</a> · <a href="https://judgmentmachines.com/books/the-last-undo/read" target="_blank" rel="noopener">Read the introduction</a></p>
+      </div>
+    </div>
+
+    <div class="mapping">
+      <div class="twrap">
+        <table>
+          <thead><tr><th>On the field card</th><th>How ACP represents it</th></tr></thead>
+          <tbody>
+            <tr><td>What are you about to make consequential?</td><td>One protected action: an action name, a ref, and the old and new commit. Nothing broader is ever approved.</td></tr>
+            <tr><td>Can it still be undone unilaterally, cheaply, completely?</td><td>ACP is asked immediately before the push. Branch work and the temporary branch stay reversible; moving <code>main</code> and deploying don’t.</td></tr>
+            <tr><td>Required properties</td><td>What the signed policy requires, checked against ACP’s own reads of GitHub and the control files the client reports.</td></tr>
+            <tr><td>Satisfied · Violated · Gray</td><td>Verified evidence · a mismatch · state that’s only self-reported or can’t be verified.</td></tr>
+            <tr><td>Unresolved ≠ satisfied</td><td>Self-reported state never authorizes, more reporting never promotes it, and no answer from ACP counts as a refusal.</td></tr>
+            <tr><td>Who has authority if a property is gray?</td><td>For a fact, nobody: ACP refuses until it can verify. For a judgment, the owner, through an exact, expiring, signed grant. Never an agent.</td></tr>
+            <tr><td>Pass · Fail · Escalate</td><td>ALLOW (A0) · DENY or QUARANTINE (A1, A4) · held until verified (A3), or the owner’s one-time recovery authorization (A6).</td></tr>
+            <tr><td>Record evidence and authority before the act</td><td>Every decision gets a request id in the hash-chained audit log before anything is pushed. <code>acp record</code> copies it into the project’s evidence ledger.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Parts</div>
+      <h2>Three pieces carry the name</h2>
+      <p>Two work together today. The third is an earlier, separate tool with its own decisions, and no document yet joins it to the other two.</p>
+    </div>
+    <div class="parts">
+      <div class="part">
+        <div class="eyebrow">Decides</div>
+        <h3><span data-i="ShieldCheck" data-size="22"></span>acp-gateway</h3>
+        <p>The policy decision service. It holds signed policies, reads GitHub for itself as evidence, returns one of eight decisions, and keeps containment and audit state on the server.</p>
+        <div class="meta">Production on Vercel · one endpoint · no license file yet</div>
+        <a class="ref" href="docs/gateway.html">Read the specification</a>
+      </div>
+      <div class="part">
+        <div class="eyebrow">Asks</div>
+        <h3><span data-i="Terminal" data-size="22"></span>The ACP client</h3>
+        <p>Ships in every bootstrapped project at <code>.agents/acp/</code>. One command sets it up, checks status and pushes with one exact approval per step. It fails closed when no valid decision comes back.</p>
+        <div class="meta">formal-project-bootstrap 0.7.3 · MIT · 7 projects</div>
+        <a class="ref" href="install.html">Install it</a>
+      </div>
+      <div class="part">
+        <div class="eyebrow">Admits work</div>
+        <h3><span data-i="ClipboardCheck" data-size="22"></span>agent-control-plane</h3>
+        <p>A provider-neutral admission and qualification tool: issue packet, claim, evidence, qualification, human approval. Its decisions run from INVALID to QUALIFIED.</p>
+        <div class="meta">MVP 0.1.0 · Apache-2.0 · not connected to the gateway</div>
+        <a class="ref" href="docs/acpr.html">Read its overview</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="next-h">
+  <div class="wrap">
+    <h2 class="sr-only" id="next-h">Keep reading</h2>
+    <div class="next-pages">
+      <a class="next-page" href="install.html"><span data-i="Download" data-size="26"></span><h3>Install</h3><p>Requirements, the setup for a new or existing project, daily use, upgrades and removal.</p></a>
+      <a class="next-page" href="coverage.html"><span data-i="Layers" data-size="26"></span><h3>Coverage</h3><p>All thirteen capabilities, the decision codes, the protocols behind them and what’s still open.</p></a>
+      <a class="next-page" href="docs.html"><span data-i="BookOpen" data-size="26"></span><h3>Docs</h3><p>Every source document, readable here: the gateway spec, the client guide, protocols and research.</p></a>
+    </div>
+  </div>
+</section>
+</main>
+<!--FOOTER-->
+<script src="site.js"></script>
+<script>
+// Scenarios on the map. Each step lights the nodes and edges involved; `cut` marks a path ACP refused.
+const SCENARIOS = [
+  { name: "A routine push", steps: [
+    { n: ["agent", "client"], e: ["ask"], t: "An agent finishes a change and runs acp push. The project’s own checks run first." },
+    { n: ["client", "gateway", "policy"], e: ["auth", "policy"], t: "The client asks for one exact action: move main from cbb9483 to 6ed302e." },
+    { n: ["gateway", "github"], e: ["verify"], t: "ACP reads GitHub itself. The commit is published, it’s a fast-forward, and the control files match the policy." },
+    { n: ["gateway", "client", "boundary", "audit"], e: ["decision", "push", "record"], v: ["A0", "ALLOW", "allow"], receipt: true,
+      t: "Allowed for that ref and that commit, for about a minute. The push lands and the decision is recorded." }
+  ] },
+  { name: "A file changed while no one watched", steps: [
+    { n: ["agent", "client"], e: ["ask"], t: "An agent starts a session. Before anything else, the client reports the control files it sees." },
+    { n: ["client", "gateway", "policy"], e: ["auth", "policy"], t: "ACP compares them with the signed manifest. AGENTS.md changed, and nobody approved the change." },
+    { n: ["gateway", "client", "audit"], e: ["decision", "record"], cut: ["push"], v: ["A4", "QUARANTINE", "deny"],
+      t: "The repository is contained. Every protected action that asks ACP is refused, whichever agent or tool asks." },
+    { n: ["owner", "gateway", "github"], e: ["owner", "verify"], v: ["A6", "RECOVERY_AUTHORIZED", "allow"],
+      t: "Only the owner can approve one exact way back. ACP checks the result itself before trust returns." }
+  ] },
+  { name: "Asking another agent", steps: [
+    { n: ["agent", "client", "gateway"], e: ["ask", "auth", "decision"], cut: ["push"], v: ["A1", "DENY", "deny"], t: "An agent asks to force-push main and is refused." },
+    { n: ["agent", "client", "gateway"], e: ["auth"], other: true, t: "It hands the job to a second agent, a script or CI." },
+    { n: ["gateway", "client", "audit"], e: ["decision", "record"], cut: ["push"], other: true, v: ["A1", "DENY", "deny"],
+      t: "Same request, same answer. The repeat is recorded as delegation after a denial." },
+    { n: ["boundary"], e: [], cut: ["push"], other: true, t: "main never moves. The refusal follows the action, not whoever asks for it." }
+  ] },
+  { name: "The gateway goes down", steps: [
+    { n: ["agent", "client", "gateway"], e: ["auth"], down: true, t: "On 2026-11-03 a bad redeploy took the production gateway offline." },
+    { n: ["client"], e: [], down: true, cut: ["push"], v: ["A1", "GATEWAY_UNAVAILABLE", "deny"],
+      t: "With no valid decision, every client refused pushes, merges and deploys on its own." },
+    { n: ["agent", "client"], e: ["ask"], down: true, t: "Local work carried on: edits, tests and commits on isolated branches." },
+    { n: ["owner", "gateway", "policy"], e: ["owner", "policy"], t: "The gateway was rolled back and decisions resumed. Every governed repository had failed closed in the meantime." }
+  ] }
+];
+
+let scenario = 0, step = 0;
+const map = document.querySelector(".map");
+
+function showStep() {
+  const sc = SCENARIOS[scenario], s = sc.steps[step];
+  map.querySelectorAll(".node").forEach(g => {
+    g.classList.toggle("on", s.n.includes(g.dataset.n));
+    g.classList.toggle("down", g.dataset.n === "gateway" && !!s.down);
+  });
+  map.querySelectorAll(".edge").forEach(p => {
+    p.classList.toggle("on", s.e.includes(p.dataset.e));
+    p.classList.toggle("cut", (s.cut || []).includes(p.dataset.e));
+  });
+  map.querySelectorAll(".el").forEach(l => {
+    l.classList.toggle("on", s.e.includes(l.dataset.l));
+    l.classList.toggle("cut", (s.cut || []).includes(l.dataset.l));
+  });
+  document.getElementById("agent-t").textContent = s.other ? "Another agent" : "Any agent";
+  $("#stepno").textContent = `${sc.name} · step ${step + 1} of ${sc.steps.length}`;
+  $("#cap").textContent = s.t;
+  $("#verdict").innerHTML = (s.v ? `<span class="verdict" style="--tone: var(--${s.v[2]})"><span>${s.v[0]}</span><span>${s.v[1]}</span></span>` : "") +
+    (s.receipt ? `<div class="receipt"><dl><dt>action</dt><dd>git.protected_ref.update</dd><dt>revision</dt><dd>cbb9483 → 6ed302e</dd><dt>reason</dt><dd>VERIFIED_AND_PERMITTED</dd><dt>request</dt><dd>1e7fabb26a06997f</dd><dt>deploy</dt><dd>ALLOW · a7625cfef8abc472</dd></dl></div>` : "");
+  $("#dots").innerHTML = sc.steps.map((_, i) => `<button type="button" aria-label="Step ${i + 1}" ${i === step ? 'aria-current="step"' : ""} data-step="${i}"></button>`).join("");
+  $("#prev").disabled = step === 0;
+  $("#next").textContent = step === sc.steps.length - 1 ? (scenario < SCENARIOS.length - 1 ? "Next scenario" : "Start over") : "Next";
+  document.querySelectorAll(".tab").forEach((t, i) => { t.setAttribute("aria-selected", String(i === scenario)); t.tabIndex = i === scenario ? 0 : -1; });
+  $("#scenario-panel").setAttribute("aria-labelledby", "tab-" + scenario);
+  // When the map is wider than the screen, bring the step's nodes into view.
+  const view = document.querySelector(".mapview");
+  if (view.scrollWidth > view.clientWidth + 4) {
+    const lit = [...map.querySelectorAll(".node.on rect")].map(r => r.getBoundingClientRect());
+    if (lit.length) {
+      const left = Math.min(...lit.map(r => r.left)), right = Math.max(...lit.map(r => r.right));
+      const box = view.getBoundingClientRect();
+      const target = view.scrollLeft + (left + right) / 2 - (box.left + box.width / 2);
+      try { view.scrollTo({ left: target, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); } catch (e) { view.scrollLeft = target; }
+    }
+  }
+}
+
+$("#tabs").innerHTML = SCENARIOS.map((sc, i) => `<button class="tab" type="button" role="tab" id="tab-${i}" aria-controls="scenario-panel" data-scenario="${i}">${esc(sc.name)}</button>`).join("");
+function pickScenario(i, focus) { scenario = (i + SCENARIOS.length) % SCENARIOS.length; step = 0; showStep(); if (focus) $("#tab-" + scenario).focus(); }
+$("#tabs").addEventListener("click", e => { const b = e.target.closest("[data-scenario]"); if (b) pickScenario(+b.dataset.scenario); });
+// Arrow keys move between tabs, Home and End jump to the ends.
+$("#tabs").addEventListener("keydown", e => {
+  const k = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+  if (k) { e.preventDefault(); pickScenario(scenario + k, true); }
+  else if (e.key === "Home") { e.preventDefault(); pickScenario(0, true); }
+  else if (e.key === "End") { e.preventDefault(); pickScenario(SCENARIOS.length - 1, true); }
+});
+$("#dots").addEventListener("click", e => { const b = e.target.closest("[data-step]"); if (b) { step = +b.dataset.step; showStep(); } });
+$("#prev").addEventListener("click", () => { if (step > 0) { step--; showStep(); } });
+$("#next").addEventListener("click", () => {
+  if (step < SCENARIOS[scenario].steps.length - 1) step++;
+  else { scenario = (scenario + 1) % SCENARIOS.length; step = 0; }
+  showStep();
+});
+showStep();
+
+// The same scenarios as text: for screen readers, for reading without the map, and for pages without script.
+const VTEXT = v => v ? ` <b class="vt" style="--tone: var(--${v[2]})">${v[0]} ${v[1]}</b>` : "";
+$("#transcript-body").innerHTML = SCENARIOS.map(sc => `<section><h3>${esc(sc.name)}</h3><ol>${sc.steps.map(s => `<li>${esc(s.t)}${VTEXT(s.v)}</li>`).join("")}</ol></section>`).join("");
+if (!PRERENDER) $("#transcript").open = false;
+
+// The Establish side of the field card, with four worked examples.
+const PRESETS = [
+  { name: "A routine push", commit: "Fast-forward main to 6ed302e, then deploy", verdict: "pass", chip: ["A0", "ALLOW", "allow"],
+    text: "Every required property is established as satisfied. ACP allows exactly this push, for about a minute, and records the decision first.",
+    props: [["The repository is the one the policy names", "sat"], ["The commit is published and is a fast-forward", "sat"], ["Control files match the signed manifest", "sat"], ["The policy allows this action on this ref", "sat"], ["Nothing about this repository is contained", "sat"]] },
+  { name: "A control file changed", commit: "Fast-forward main to 6ed302e, then deploy", verdict: "fail", chip: ["A4", "QUARANTINE", "deny"],
+    text: "One property is established as violated. Resolving it isn’t approving it: the answer is no, and the repository stays contained until the owner recovers it.",
+    props: [["The repository is the one the policy names", "sat"], ["The commit is published and is a fast-forward", "sat"], ["Control files match the signed manifest", "vio"], ["The policy allows this action on this ref", "sat"], ["Nothing about this repository is contained", "sat"]] },
+  { name: "GitHub can’t be read", commit: "Fast-forward main to 6ed302e, then deploy", verdict: "escalate", chip: ["A3", "REVERIFY_REQUIRED", "contain"],
+    text: "Three facts are gray, and no one can decide a fact into existence. ACP holds the push until it can verify again, and the gap goes to the operator as a blocker.",
+    props: [["The repository is the one the policy names", "gray"], ["The commit is published and is a fast-forward", "gray"], ["Control files match the signed manifest", "gray"], ["The policy allows this action on this ref", "sat"], ["Nothing about this repository is contained", "sat"]] },
+  { name: "A history rewrite", commit: "Rewrite main from bad0001 back to good002", verdict: "escalate", chip: ["A6", "RECOVERY_AUTHORIZED", "allow"],
+    text: "Whether to rewrite history is a judgment, so it goes to the owner. Their grant names this ref and these two commits, works once, and expires.",
+    props: [["The repository is the one the policy names", "sat"], ["main is still at bad0001", "sat"], ["Control files match the signed manifest", "sat"], ["The owner has authorized this exact rewrite", "gray"], ["Nothing else is waiting on this ref", "sat"]] }
+];
+const STATE = { sat: "Satisfied", vio: "Violated", gray: "Gray" };
+const TONE = { pass: "allow", fail: "deny", escalate: "contain" };
+function showPreset(i) {
+  const p = PRESETS[i];
+  $("#fc-presets").querySelectorAll("button").forEach((b, k) => b.setAttribute("aria-pressed", String(k === i)));
+  $("#fc-commit").textContent = p.commit;
+  $("#fc-props").innerHTML = p.props.map(([t, s], k) => `<tr><td>0${k + 1}</td><th scope="row">${esc(t)}</th><td><span class="st ${s}">${STATE[s]}</span></td></tr>`).join("");
+  $("#fc-verdicts").querySelectorAll("span").forEach(s => { s.classList.toggle("on", s.dataset.v === p.verdict); s.style.setProperty("--tone", `var(--${TONE[s.dataset.v]})`); });
+  $("#fc-chip").innerHTML = `<span class="verdict" style="--tone: var(--${p.chip[2]})"><span>${p.chip[0]}</span><span>${p.chip[1]}</span></span>`;
+  $("#fc-text").textContent = p.text;
+}
+$("#fc-presets").innerHTML = PRESETS.map((p, i) => `<button type="button" data-preset="${i}" aria-pressed="false">${esc(p.name)}</button>`).join("");
+$("#fc-presets").addEventListener("click", e => { const b = e.target.closest("[data-preset]"); if (b) showPreset(+b.dataset.preset); });
+showPreset(0);
+$("#fc-transcript-body").innerHTML = PRESETS.map(p => `<section><h3>${esc(p.name)}</h3><p class="fc-c">${esc(p.commit)}</p><ul>${p.props.map(([t, st]) => `<li>${esc(t)}: <b class="st ${st}">${STATE[st]}</b></li>`).join("")}</ul><p><b class="vt" style="--tone: var(--${p.chip[2]})">${p.verdict.toUpperCase()} · ${p.chip[0]} ${p.chip[1]}</b> ${esc(p.text)}</p></section>`).join("");
+if (!PRERENDER) $("#fc-transcript").open = false;
+paintIcons();
+</script>
+</body>
+</html>

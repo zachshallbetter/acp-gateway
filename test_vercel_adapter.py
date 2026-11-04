@@ -22,6 +22,7 @@ class VercelAdapterTests(unittest.TestCase):
         self.assertIn("**/.env*", excluded)
         self.assertIn(".agents/**", excluded)
         self.assertIn("scripts/**", excluded)
+        self.assertIn("site/**", excluded)
 
     def test_adapter_selects_shared_database_even_in_vercel_dev(self):
         self.assertTrue(gateway.postgres_store.enabled())

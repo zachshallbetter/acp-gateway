@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><title>axe</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.8.4/axe.min.js"></script></head><body><pre id="out">running</pre>
+<script>
+const scheme = new URLSearchParams(location.search).get("scheme") || "light";
+const pages = (new URLSearchParams(location.search).get("pages") || "index.html").split(",");
+(async () => {
+  const out = {};
+  try {
+  for (const p of pages) {
+    const f = document.createElement("iframe");
+    f.style.cssText = "width:1280px;height:900px;border:0";
+    f.src = "/" + p; document.body.appendChild(f);
+    await new Promise(r => f.onload = r);
+    if (scheme === "dark") f.contentDocument.documentElement.setAttribute("data-theme", "dark");
+    await new Promise((ok, no) => { const sc = f.contentDocument.createElement("script"); sc.src = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.8.4/axe.min.js"; sc.onload = ok; sc.onerror = no; f.contentDocument.head.appendChild(sc); });
+    await new Promise(r => setTimeout(r, 400));
+    const r = await f.contentWindow.axe.run(f.contentDocument, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "best-practice"] } });
+    out[p] = r.violations.map(v => `${v.id} (${v.impact}) x${v.nodes.length}: ${v.nodes.slice(0, 3).map(n => n.target.join(" ")).join(" | ")}`);
+    f.remove();
+  }
+  } catch (e) { out.error = String(e); }
+  document.getElementById("out").textContent = JSON.stringify(out, null, 1);
+})();
+</script></body></html>

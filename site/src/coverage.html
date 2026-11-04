@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!--HEAD-->
+</head>
+<body class="coverage">
+<!--HEADER-->
+<main id="main">
+<!--CRUMBS-->
+<div class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">Coverage</div>
+    <h1>What ACP does, and what covers it</h1>
+    <p>Thirteen capabilities, grouped by when they act in a change. Each names where it’s specified and built, what it’s grounded in, and what’s still missing.</p>
+  </div>
+</div>
+
+<section id="capabilities" style="border-top:0;padding-top:0">
+  <div class="wrap">
+    <h2 class="sr-only">Thirteen capabilities, by stage</h2>
+    <div class="filters" role="group" aria-label="Filter capabilities" style="margin-top:0">
+      <button class="chip" type="button" data-filter="all" aria-pressed="true">All 13</button>
+      <button class="chip" type="button" data-filter="covered" aria-pressed="false">Covered · 8</button>
+      <button class="chip" type="button" data-filter="partial" aria-pressed="false">Partial · 5</button>
+    </div>
+    <p class="sr-only" id="cap-count" aria-live="polite"></p>
+    <div id="stages"></div>
+  </div>
+</section>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Decisions</div>
+      <h2>Eight answers</h2>
+      <p>Every decision carries a stable reason code. Only A0 and A6 permit anything, and each permits exactly one described action.</p>
+    </div>
+    <div class="dgrid" id="dcodes"></div>
+    <div class="flow">
+      <div>
+        <h3>Trust only goes down on its own</h3>
+        <p>Nothing a caller does moves a resource back toward normal. Only an administrator’s single approved transition, followed by ACP’s own verification, does.</p>
+        <a class="ref" href="docs/gateway.html#containment-lockout-and-recovery">Read containment and recovery</a>
+      </div>
+      <ol class="steps" aria-label="Containment and recovery states">
+        <li style="--tone: var(--allow)"><span class="dot"></span><span class="s">NORMAL</span></li>
+        <li style="--tone: var(--contain)"><span class="dot"></span><span class="s">A3</span><span class="d">verification lost</span></li>
+        <li style="--tone: var(--deny)"><span class="dot"></span><span class="s">A4</span><span class="d">trust violation</span></li>
+        <li style="--tone: var(--lock)"><span class="dot"></span><span class="s">A5</span><span class="d">repeated circumvention</span></li>
+        <li style="--tone: var(--allow)"><span class="dot"></span><span class="s">A6</span><span class="d">one transition approved</span></li>
+        <li style="--tone: var(--lock)"><span class="dot"></span><span class="s">A7</span><span class="d">ACP verifies it</span></li>
+        <li style="--tone: var(--allow)"><span class="dot"></span><span class="s">NORMAL</span><span class="d">fresh security version</span></li>
+      </ol>
+    </div>
+  </div>
+</section>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Protocols</div>
+      <h2>The formal protocols behind it</h2>
+      <p>Of the eighteen protocols in the register, six carry real weight for ACP and two offer only analogies. The gateway doesn’t cite them, so this is a mapping, not a dependency.</p>
+    </div>
+    <div class="twrap">
+      <table>
+        <thead><tr><th>Protocol</th><th>Status</th><th>What it gives ACP</th><th>Covers</th></tr></thead>
+        <tbody id="ptable"></tbody>
+      </table>
+    </div>
+    <div class="notes">
+      <p><b>Not bearing on ACP.</b> Foundations of Computational Interaction (the theory ICP builds on), the Semantic Expression, Surface and Publication systems, the Authored Prose Protocol, the Narrative Evidence Method, the Recipient Contract and Engagement Dependency protocols, the Research Discipline Protocol and the Digital Presence Protocol. The register notes that no entry has been reviewed outside its author.</p>
+      <p><b>The operating frame.</b> <i>The Last Undo</i> asks that before a consequential action you establish authority, evidence, permission, consequence and reversibility, and leave a receipt. The manuscript is a private draft, so it isn’t included; its public principle is the External State Protocol’s <button class="ref" type="button" data-open="esp" data-anchor="last-undo">Last Undo section</button>.</p>
+    </div>
+  </div>
+</section>
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Open</div>
+      <h2>What nothing covers yet</h2>
+      <p>Where no specification, protocol or tool settles the question, with the issue that tracks it.</p>
+    </div>
+    <div class="gaps" id="gaps"></div>
+  </div>
+</section>
+</main>
+<!--FOOTER-->
+<script src="site.js"></script>
+<script>
+const CAPS = [
+  { id: "C1", name: "Board read authority", state: "covered",
+    does: "Agents read a GitHub Projects board through the gateway, which holds the only copy of the GitHub App key and mints a short-lived token per request. Under containment the read is refused before any token is minted.",
+    built: [["gateway", "gating-the-board-read", "Gating the board read"], ["gateway", "what-it-does", "What it does"], ["gateway-github-app", "", "The GitHub App and its read-only permissions"]],
+    grounded: [["icp", "45-projection-reveals-mutation-changes", "ICP §4.5", "reading is structurally separate from writing"]] },
+  { id: "C2", name: "Decisions for protected actions", state: "covered",
+    does: "Before a push, protected-ref update, production deploy or database migration, the agent asks for a decision. An ALLOW permits only that exact action, ref and SHA pair, through a signed capability that lives about a minute.",
+    built: [["gateway", "policy-authority", "Policy authority"], ["gateway", "the-response", "The response and its codes"], ["gateway", "capabilities-and-revocation", "Capabilities and revocation"], ["protected-effects", "", "Which operations need which action"], ["authorize-skill", "", "The agent's procedure"]],
+    grounded: [["icp", "63-mandatory-execution-boundary", "ICP §6.3", "no persistent change outside a registered contract"], ["icp", "104-verification-challenge", "ICP §10.4", "a check bound to its input, expiring and single-use"], ["esp", "last-undo", "ESP: Last Undo", "expose the last reversible state before committing"], ["commitment-assurance", "the-commitment-clock-and-evidence-admissibility", "Distance from Gray", "assurance judged at a named commitment"]] },
+  { id: "C3", name: "Repository trust and independent verification", state: "covered",
+    does: "What the agent says about the repository is evidence, not authority. ACP reads GitHub itself (identity, the ref, whether the commit is published and a fast-forward) and refuses protected actions on anything it couldn't verify.",
+    built: [["gateway", "repository-trust", "Repository trust"], ["gateway", "which-actions-require-independent-verification", "Which actions need independent verification"], ["gateway", "reported-vs-verified-identity", "Reported vs verified identity"]],
+    grounded: [["icp", "43-evidence-is-not-decision", "ICP §4.3", "an outside source supplies evidence, not canonical state"], ["eqp", "8-evidence-validity", "EQP §8", "evidence is checked for identity binding and tampering"]] },
+  { id: "C4", name: "Containment, lockout and recovery", state: "covered",
+    does: "A trust failure freezes protected work. Repeated circumvention locks the resource; only an administrator can approve one exact recovery transition, used once, and ACP's own verification decides when trust returns.",
+    built: [["gateway", "containment-lockout-and-recovery", "Containment, lockout and recovery"], ["gateway", "a6--one-exact-transition-once", "A6: one exact transition, once"], ["gateway", "a7--a-successful-push-is-not-a-restored-trust", "A7: a push is not restored trust"]],
+    grounded: [["icp", "49-recovery-is-executable", "ICP §4.9", "a blocked outcome names an executable recovery (partial)"]],
+    missing: "No protocol specifies quarantine, lockout or a one-time recovery transition. The gateway specification is the only source." },
+  { id: "C5", name: "Protected artifacts and workspace integrity", state: "covered",
+    does: "The signed policy pins the project's control files. At each checkpoint the client reports what it sees, and ACP decides what it means. Released client files are accepted; any other change needs an exact, single-use grant.",
+    built: [["gateway", "protected-artifacts-and-workspace-integrity", "Protected artifacts and workspace integrity"], ["gateway", "moving-the-baseline", "Moving the baseline"], ["gateway", "released-bootstrap-clients", "Released bootstrap clients"]],
+    grounded: [["eqp", "2-candidate", "EQP §2", "candidate identity: digest, baseline, manifest, dirty state"]] },
+  { id: "C6", name: "Audit and evidence", state: "covered",
+    does: "Every decision and event is written to an append-only, hash-chained log with redaction. Reports from agents are observations only; they never authorize, and severity is assigned by the server.",
+    built: [["gateway", "telemetry-events-and-reporting", "Telemetry, events and reporting"], ["gateway", "audit-storage-and-the-hash-chain", "Audit storage and the hash chain"], ["gateway", "redaction", "Redaction"], ["client", "reporting-is-not-authorization", "Reporting is not authorization"]],
+    grounded: [["icp", "105-change-receipt", "ICP §10.5", "a change receipt with an integrity digest"], ["eqp", "15-qualification-attestation", "EQP §15", "append-only attestations"], ["fpb-authority-model", "instrument-stratification", "Authority model", "a record never authorizes the effect it describes"]],
+    missing: "The gateway's audit log and the admission tool's evidence ledger are two separate records, and no document reconciles them." },
+  { id: "C7", name: "Explanations and the error contract", state: "partial",
+    does: "Every refusal carries a stable code, a detail and a remedy. The client turns each failure into a status line with its fix, and synthesizes a DENY with a named reason when it can't get a valid decision.",
+    built: [["gateway", "error-contract", "Error contract"], ["gateway", "what-the-gate-does", "Board refusal with responsible role and next step"], ["client", "decisions-and-the-required-disposition", "Decisions and the required disposition"]],
+    grounded: [["icp", "103-problem-envelope", "ICP §10.3", "problem details that say whether anything changed"], ["hcml-authority", "3-machine-role", "HCML", "tell inability, permission, evidence and rejection apart"]],
+    missing: `Only the board refusal names a responsible role and next step. The full contract (decision, evidence checked, unmet conditions, role, next action for every outcome) is still being specified in ${ISSUE(11)}.` },
+  { id: "C8", name: "Policy authority", state: "partial",
+    does: "Policies live on the server, are signed, and name the repositories and files they govern. Agents get decisions, never the rules, and the agent's token can't change the policy that binds it.",
+    built: [["gateway", "policy-configuration-and-signing", "Policy configuration and signing"], ["gateway", "scope", "Scope"], ["gateway", "governing-the-repository-not-just-wiring-it", "Governing the repository"]],
+    grounded: [["icp", "18-governance", "ICP §18", "authority order and an owner-approved change process"], ["eqp", "5-qualification-profile", "EQP §5", "profiles adapt the core but can't weaken it"]],
+    missing: `Reviewed policy proposals, a baseline policies can't weaken, and signed activation are open (${ISSUE(13)}, ${ISSUE(29)}). A policy change still needs a redeploy (${ISSUE(47)}).` },
+  { id: "C9", name: "Work admission and qualification", state: "partial",
+    does: "Before work starts, an issue packet declares scope, exclusions, dependencies, acceptance and evidence. Work is admitted, claimed, qualified on evidence and promoted only with human acknowledgement.",
+    built: [["acpr-operating-model", "", "Admission tool: operating model"], ["fpb-work-graph", "ready-predicate", "Bootstrap: the Ready predicate"]],
+    grounded: [["iepe", "issue-readiness", "IEPE", "issue readiness, worker packet, promotion kept separate"], ["eqp", "16-promotion-boundary", "EQP §16", "QUALIFIED does not mean deploy"]],
+    missing: "Only the separate admission tool implements this, with its own decision names. The gateway does no admission, and nothing joins the two." },
+  { id: "C10", name: "Client setup, status and upgrades", state: "covered",
+    does: "One command sets ACP up, one checks every condition with its fix, one pushes, one upgrades from a signed release, and one removes it. The gateway tells a client whether it's current.",
+    built: [["client", "quick-start", "Quick start"], ["gateway", "released-bootstrap-clients", "Released bootstrap clients"], ["gateway", "onboarding-a-new-project", "Onboarding a new project"]],
+    grounded: [["iepe", "authority-boundaries-and-implicit-defaults", "IEPE", "local setup needs only local authority"]] },
+  { id: "C11", name: "Human authority, exceptions and deviations", state: "partial",
+    does: "People own the decisions agents can't make. A deviation is recorded, bounded and closable; a local opt-out covers only local checks; a remote exception needs a signed grant with an expiry and a use count.",
+    built: [["client", "owner-override-for-local-experimentation", "Owner overrides"], ["fpb-authority-model", "human-deviation", "Human deviation"]],
+    grounded: [["eqp", "14-exceptions", "EQP §14", "an exception never rewrites evidence to PASS"], ["hcml-authority", "2-human-role", "HCML", "grant, deny, narrow or revoke authority"], ["pdp", "", "PDP", "the human owns the weights, the stakes and the exit"], ["esp", "authority", "ESP", "no consequential decision becomes ownerless"]],
+    missing: `Shared, signed exceptions aren't deployed on the live gateway yet, and issue-bound exceptions are open in ${ISSUE(14)}.` },
+  { id: "C12", name: "Multi-agent coordination", state: "covered",
+    does: "Every agent gets the same answer for the same request. Delegating a refused action to another agent changes nothing, and repeated attempts from a new client are recorded. Workers own disjoint scopes and claims.",
+    built: [["gateway", "cross-agent-enforcement", "Cross-agent enforcement"], ["gateway", "alternate-agents", "Alternate agents"], ["fpb-multi-agent-coordination", "", "Multi-agent coordination"]],
+    grounded: [["fpb-work-graph", "claim-semantics", "Claim semantics", "read, claim, reread, then act"], ["icp", "126-concurrency-checks", "ICP §12.6", "no silent overwrite under concurrency"]] },
+  { id: "C13", name: "Availability and failing closed", state: "partial",
+    does: "If ACP can't be reached or can't verify, protected actions are refused and local work continues. Losing GitHub makes ACP stricter, never looser. The client probes each endpoint's readiness before routing anything.",
+    built: [["client", "fail-closed-rule", "Fail-closed rule"], ["client", "binding-in-the-project", "Endpoint sets and failover rules"], ["fpb-work-graph", "local-work-while-acp-or-the-board-is-unavailable", "Local work while ACP is unavailable"], ["acpr-rate-limits", "degraded-operation", "Degraded operation"]],
+    grounded: [["icp", "26-security-model", "ICP §26", "authority fails closed"], ["iepe", "condition-classification-taxonomy", "IEPE", "a blocker is fingerprinted and parked, not retried"]],
+    missing: `Production is a single endpoint. Failover to a second instance is designed but unproven (${ISSUE(30)}–${ISSUE(33)}).` }
+];
+
+const DECISIONS = [
+  ["A0", "ALLOW", "allow", "Proceed with exactly the authorized action, once, within the capability's lifetime."],
+  ["A1", "DENY", "deny", "Don't proceed. Record the blocker and move on to other Ready work."],
+  ["A2", "AUTH_REQUIRED", "contain", "Complete the named authentication flow, then retry once."],
+  ["A3", "REVERIFY_REQUIRED", "contain", "ACP could verify this repository before and can't now. Don't proceed."],
+  ["A4", "QUARANTINE", "deny", "Containment. Don't proceed and don't attempt repair."],
+  ["A5", "LOCKED", "lock", "Controlled operations suspended until authenticated administrative recovery."],
+  ["A6", "RECOVERY_AUTHORIZED", "allow", "One exact recovery transition is authorized, once. Nothing else is."],
+  ["A7", "VERIFY_RECOVERY", "lock", "A recovery ran and isn't proven yet. Protected work stays refused."]
+];
+
+const PROTOCOLS = [
+  ["icp", "Interaction Contract Protocol", "Normative Candidate", "The fullest match: a mandatory execution boundary, single-use input-bound verification, problem envelopes that say whether anything changed, change receipts, typed recovery, and fail-closed authority.", "C1 C2 C3 C6 C7 C8 C12 C13"],
+  ["iepe", "Intent and Evidence Project Engine", "Normative Candidate", "Ticket-bound work, claims, condition types, parked blockers that aren't retried, and promotion kept separate from evaluation.", "C9 C10 C12 C13"],
+  ["eqp", "Evidence Qualification Protocol", "Normative Candidate", "Candidate identity, evidence validity, exceptions that never become PASS, and the rule that QUALIFIED doesn't mean deploy.", "C3 C5 C6 C9 C11"],
+  ["hcml-authority", "Human–Computer Mutual Legibility", "Research corpus", "Humans grant, narrow and revoke authority; the machine tells inability, permission, evidence and rejection apart.", "C7 C11 C12"],
+  ["esp", "External State Protocol", "Normative Candidate", "The Last Undo step before a commitment, authority classes that don't imply each other, receipts for consequential actions.", "C2 C6 C11"],
+  ["pdp", "Polymorphic Decision Protocol", "Normative Candidate", "For consequential human choices about policy and exceptions: machines supply evidence, the human owns weights, stakes and exit.", "C11"],
+  ["", "Priming Toolkit", "Normative Candidate", "Agent-side only: halt reports with a resume pointer, untrusted client values, typed errors. Not in this library.", "C7 C13"],
+  ["", "Research Publication Protocol", "Normative Candidate", "Analogies from research deposit: checksum trees and an agent that may not deposit on its own. Not in this library.", "C5 C11"]
+];
+
+const GAPS = [
+  ["Containment has no protocol", "Quarantine, lockout and one-time recovery exist only in the gateway specification."],
+  ["Signed policies and capabilities", "No protocol specifies them. ICP's single-use challenge is the closest; IEPE says its digest is not a signature."],
+  ["One explanation contract", `Decision, evidence checked, unmet conditions, responsible role and next action for every outcome: ${ISSUE(11)}.`],
+  ["Policy proposals and activation", `Reviewed proposals, a non-weakenable baseline, and activation without a redeploy: ${ISSUE(13)}, ${ISSUE(29)}, ${ISSUE(47)}.`],
+  ["Admission joined to decisions", "The admission tool and the gateway use different decision vocabularies, and no document connects them."],
+  ["Failover", `Designed in the client, unproven in production, which is one endpoint: ${ISSUE(30)}–${ISSUE(33)}.`],
+  ["Exceptions on the live gateway", `Shared signed grants aren't deployed; issue-bound exceptions are open: ${ISSUE(14)}.`],
+  ["Release-list and security review", `The client release list is updated by hand (${ISSUE(45)}), and no one outside the author has reviewed the signing paths (${ISSUE(48)}).`]
+];
+
+const CAP_ICONS = { C1: "Eye", C2: "ShieldCheck", C3: "Fingerprint", C4: "Siren", C5: "FileSignature", C6: "ScrollText", C7: "MessageSquareWarning", C8: "Scale", C9: "ClipboardCheck", C10: "Package", C11: "Gavel", C12: "Users", C13: "CloudOff" };
+const STAGES = [
+  ["Before the work", "Decide whether work may start and who owns it, and read the board without holding GitHub keys.", ["C9", "C12", "C1"]],
+  ["At the boundary", "Verify the repository independently, compare control files, and decide the exact action against a signed policy.", ["C2", "C3", "C5", "C8"]],
+  ["After the decision", "Keep a tamper-evident record and explain every answer in terms someone can act on.", ["C6", "C7"]],
+  ["When it goes wrong", "Contain, recover one exact transition, keep a human in charge, refuse when the service can’t answer, and keep clients current.", ["C4", "C11", "C13", "C10"]]
+];
+
+const byId = Object.fromEntries(CAPS.map(c => [c.id, c]));
+
+function card(c) {
+  return `
+    <article class="card" id="${c.id.toLowerCase()}">
+      <div class="card-top"><span class="code">${c.id}</span><span class="pill ${c.state}">${c.state === "covered" ? "Covered" : "Partial"}</span></div>
+      <h4>${icon(CAP_ICONS[c.id], 20)}${esc(c.name)}</h4>
+      <p class="does">${esc(c.does)}</p>
+      <div class="src">
+        <div><div class="k">Specified in</div><ul>${c.built.map(([d, a, l]) => `<li>${ref(d, a, l)}</li>`).join("")}</ul></div>
+        <div><div class="k">Grounded in</div><ul>${c.grounded.map(([d, a, l, w]) => `<li>${ref(d, a, l)}<span class="why">${esc(w)}</span></li>`).join("")}</ul></div>
+      </div>
+      ${c.missing ? `<p class="missing"><b>Missing.</b> ${c.missing}</p>` : ""}
+    </article>`;
+}
+
+function renderStages(filter) {
+  $("#stages").innerHTML = STAGES.map(([title, text, ids]) => {
+    const caps = ids.map(id => byId[id]).filter(c => filter === "all" || c.state === filter);
+    if (!caps.length) return "";
+    return `<div class="stage"><div class="stage-head"><h3>${title}</h3><p>${esc(text)}</p></div><div class="cards n${caps.length % 2 ? (caps.length === 1 ? 1 : 3) : 2}">${caps.map(card).join("")}</div></div>`;
+  }).join("");
+}
+document.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("[data-filter]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  renderStages(b.dataset.filter);
+  const n = document.querySelectorAll("#stages .card").length;
+  $("#cap-count").textContent = `Showing ${n} of 13 capabilities.`;
+}));
+renderStages("all");
+
+$("#dcodes").innerHTML = DECISIONS.map(([code, name, tone, text]) =>
+  `<div class="dcode" style="--tone: var(--${tone})"><div><span class="c">${code}</span><span class="n">${name}</span></div><p>${esc(text)}</p></div>`).join("");
+
+$("#ptable").innerHTML = PROTOCOLS.map(([doc, name, status, gives, covers]) => `
+  <tr><td>${doc ? ref(doc, "", name) : esc(name)}</td><td>${esc(status)}</td><td>${esc(gives)}</td><td>${covers.split(" ").join(" · ")}</td></tr>`).join("");
+
+$("#gaps").innerHTML = GAPS.map(([t, p]) => `<div class="gap"><h3>${esc(t)}</h3><p>${p}</p></div>`).join("");
+
+paintIcons();
+</script>
+</body>
+</html>

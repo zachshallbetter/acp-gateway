@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!--HEAD-->
+</head>
+<body class="install">
+<!--HEADER-->
+<main id="main">
+<!--CRUMBS-->
+<div class="wrap">
+  <div class="page-head">
+    <div class="eyebrow">Install</div>
+    <h1>Install ACP in a project</h1>
+    <p>ACP arrives with formal-project-bootstrap. You install the bootstrap into a project, connect your machine to a gateway, and the repository’s owner puts it under a policy once.</p>
+  </div>
+</div>
+
+<section style="border-top:0;padding-top:0">
+  <div class="wrap">
+    <div class="req">
+      <div><span data-i="Terminal" data-size="26"></span><b>Python 3.11+ and Git</b><span>The client and bootstrap use the standard library only. Nothing to pip install.</span></div>
+      <div><span data-i="KeyRound" data-size="26"></span><b>A gateway token</b><span>From whoever runs your ACP gateway. It lives in the macOS Keychain, or <code>ACP_GATEWAY_TOKEN</code> in CI and on Linux.</span></div>
+      <div><span data-i="Github" data-size="26"></span><b>A GitHub repository</b><span>ACP reads it through a read-only GitHub App installed on the repository’s owner.</span></div>
+      <div><span data-i="FileSignature" data-size="26"></span><b>A registered policy</b><span>Until the gateway holds a policy naming the repository, protected actions are refused.</span></div>
+    </div>
+    <p class="note"><span data-i="Info" data-size="18"></span><span>Today one gateway and one GitHub App serve their owner’s repositories. Running your own gateway is the <a href="https://github.com/zachshallbetter/acp-gateway/milestone/1" target="_blank" rel="noopener">beta milestone</a>.</span></p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Set up</div>
+      <h2>Five steps, once per project</h2>
+    </div>
+    <ol class="isteps">
+      <li class="istep"><div>
+        <h3 id="step-get"><span data-i="Download" data-size="22"></span>Get the bootstrap<span class="who">anywhere on your machine</span></h3>
+        <p>Clone the public repository at the latest signed release. You’ll run its installer against your project.</p>
+<pre class="cmd"><code>git clone https://github.com/zachshallbetter/formal-project-bootstrap.git
+cd formal-project-bootstrap
+git checkout v0.7.3</code></pre>
+      </div></li>
+
+      <li class="istep"><div>
+        <h3 id="step-install"><span data-i="FolderTree" data-size="22"></span>Install it into your project<span class="who">from the bootstrap folder</span></h3>
+        <p>Pick the case that fits. All three leave only <code>AGENTS.md</code> at the project root; everything else goes under <code>.agents/</code>.</p>
+        <h4>A new project</h4>
+<pre class="cmd"><code>python3 .agents/bootstrap/scripts/init-project.py \
+  --name "My Project" --id my-project --mode new --output ../my-project</code></pre>
+        <h4>An existing project</h4>
+        <p>Inspect first; the inventory changes nothing. <code>--mode existing</code> never overwrites your files and stages any conflict for you to reconcile.</p>
+<pre class="cmd"><code>python3 .agents/bootstrap/scripts/reconcile-project.py --project ../my-project --pretty
+python3 .agents/bootstrap/scripts/init-project.py \
+  --name "My Project" --id my-project --mode existing --output ../my-project</code></pre>
+        <h4>A project on an older bootstrap</h4>
+        <p>Run this release’s upgrader from inside the project. It moves older layouts into <code>.agents/</code>, verifies the release signature, and commits exactly the upgrade.</p>
+<pre class="cmd"><code>cd ../my-project
+python3 ../formal-project-bootstrap/.agents/bootstrap/bootstrap upgrade --commit</code></pre>
+      </div></li>
+
+      <li class="istep"><div>
+        <h3 id="step-connect"><span data-i="Laptop" data-size="22"></span>Connect this machine<span class="who">in the project, once per machine</span></h3>
+        <p>Tell the client which gateway to use, store the token, and let it fill in the project’s settings.</p>
+<pre class="cmd"><code>.agents/acp/acp endpoints configure --set-name production \
+  --endpoint vercel https://acp-gateway.vercel.app ACP_GATEWAY_TOKEN
+.agents/acp/acp login
+.agents/acp/acp init</code></pre>
+        <ul class="does-list">
+          <li><span data-i="Check" data-size="16"></span><span><code>login</code> asks for the token with a hidden prompt and keeps it in the Keychain. It never appears in a file or on screen.</span></li>
+          <li><span data-i="Check" data-size="16"></span><span><code>init</code> reads the repository from <code>origin</code>, finds the project board, and declares automatic deploys when it sees <code>vercel.json</code>, <code>.vercel/</code> or <code>netlify.toml</code>.</span></li>
+          <li><span data-i="Check" data-size="16"></span><span>It’s safe to run again, and it makes sure <code>.gitignore</code> keeps <code>.agents/</code> tracked.</span></li>
+        </ul>
+      </div></li>
+
+      <li class="istep"><div>
+        <h3 id="step-policy"><span data-i="Gavel" data-size="22"></span>Put the repository under a policy<span class="who">repository owner, once</span></h3>
+        <p>Governing a repository is the owner’s decision, made on the gateway with the owner’s own signing key. Install the ACP GitHub App on the account that owns the repository, then register it from the acp-gateway checkout.</p>
+<pre class="cmd"><code>python3 scripts/policy-admin.py register OWNER/NAME          <span class="c"># dry run: shows the policy</span>
+python3 scripts/policy-admin.py register OWNER/NAME --apply</code></pre>
+        <p class="note"><span data-i="TriangleAlert" data-size="18"></span><span>The gateway loads a new policy on its next production deployment. Activating one without a redeploy is tracked in <a href="https://github.com/zachshallbetter/acp-gateway/issues/47" target="_blank" rel="noopener">acp-gateway#47</a>.</span></p>
+      </div></li>
+
+      <li class="istep"><div>
+        <h3 id="step-check"><span data-i="ListChecks" data-size="22"></span>Check everything<span class="who">in the project</span></h3>
+        <p>One line per check, each with its fix: Python, layout, profile, compiled context, endpoints, token, client version, policy, the GitHub App, pinned files and the board.</p>
+<pre class="cmd"><code>.agents/acp/acp status
+<span class="c"># ACP is ready.</span></code></pre>
+      </div></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Every day</div>
+      <h2>Use, upgrade, remove</h2>
+    </div>
+    <ol class="isteps" style="counter-reset: s 5">
+      <li class="istep"><div>
+        <h3 id="push"><span data-i="Rocket" data-size="22"></span>Push through ACP</h3>
+        <p>Runs your pre-push hook first, then asks for one exact approval per step: the temporary branch, the protected ref, and the deploy when <code>main</code> deploys automatically.</p>
+<pre class="cmd"><code>.agents/acp/acp push --to main --dry-run   <span class="c"># show each approval it would ask for</span>
+.agents/acp/acp push --to main</code></pre>
+        <p>Decisions are logged on this machine in a git-ignored file. Copy the ones you want into the project’s evidence ledger with your next commit:</p>
+<pre class="cmd"><code>.agents/acp/acp record          <span class="c"># list this machine's decisions</span>
+.agents/acp/acp record --all</code></pre>
+      </div></li>
+      <li class="istep"><div>
+        <h3 id="upgrade"><span data-i="ArrowUpCircle" data-size="22"></span>Upgrade</h3>
+        <p><code>acp status</code> tells you when a newer release exists. The upgrade fetches the signed tag, checks every file against the release manifest, keeps your own files, and commits only the upgrade.</p>
+<pre class="cmd"><code>.agents/bootstrap/bootstrap upgrade            <span class="c"># dry run</span>
+.agents/bootstrap/bootstrap upgrade --commit
+.agents/acp/acp push</code></pre>
+        <p>If someone edited the client by hand, <code>.agents/bootstrap/bootstrap repair</code> restores the released files and keeps a copy of the edits.</p>
+      </div></li>
+      <li class="istep"><div>
+        <h3 id="remove"><span data-i="Trash2" data-size="22"></span>Remove</h3>
+        <p>Both are dry runs unless you add <code>--apply</code>. Your intent, profile and records stay, and everything removed is backed up.</p>
+<pre class="cmd"><code>.agents/acp/acp uninstall --apply                <span class="c"># just ACP</span>
+.agents/bootstrap/bootstrap uninstall --apply    <span class="c"># the whole bootstrap</span></code></pre>
+        <p class="note"><span data-i="Info" data-size="18"></span><span>The gateway keeps enforcing its policy until the owner runs <code>policy-admin.py unregister OWNER/NAME</code>. <code>acp uninstall</code> reminds you.</span></p>
+      </div></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Where it lives</div>
+      <h2>Everything stays under .agents/</h2>
+      <p>Machinery is replaced on upgrade. Your files are never overwritten.</p>
+    </div>
+<pre class="tree"><span class="own">AGENTS.md</span>                  <span class="d">the one bootstrap file at the root</span>
+<span class="k">.agents/</span>
+  <span class="k">acp/</span>                     <span class="d">the ACP client: acp, lib/, schemas/, README.md</span>
+  <span class="k">bootstrap/</span>               <span class="d">bootstrap machinery: bootstrap, scripts/, docs/, templates/</span>
+  <span class="own">project/</span>                 <span class="d">yours: intent, profile.json, bindings, contracts/, rules/</span>
+  <span class="own">records/</span>                 <span class="d">yours: evidence, negative results, deviations</span>
+    <span class="own">local/</span>                 <span class="d">this machine's decision log (git-ignored)</span>
+  <span class="k">skills/</span>                  <span class="d">agent skills the bootstrap ships</span>
+  <span class="k">context-lock.json</span>        <span class="d">compiled context, checked on every commit</span>
+  <span class="own">board.env</span>                <span class="d">which board and repository this project uses</span>
+
+<span class="k">~/Library/Application Support/formal-project-bootstrap/acp-endpoints.json</span>
+                           <span class="d">which gateways this machine talks to</span>
+<span class="k">Keychain · ACP Gateway Production</span>
+                           <span class="d">the token, one item per endpoint</span></pre>
+    <div class="legend"><span class="m">Machinery, replaced on upgrade</span><span class="o">Yours, never overwritten</span></div>
+    <div class="actions"><a class="btn ghost" href="docs/client.html#quick-start">Read the full client guide</a><a class="btn ghost" href="https://github.com/zachshallbetter/formal-project-bootstrap/releases/tag/v0.7.3" target="_blank" rel="noopener">Release notes for 0.7.3</a></div>
+  </div>
+</section>
+</main>
+<!--FOOTER-->
+<script src="site.js"></script>
+</body>
+</html>

@@ -4,7 +4,7 @@
   "buildCommand": "python3 -m pip install --quiet --disable-pip-version-check --target .build-deps -r requirements.txt && PYTHONPATH=.build-deps python3 scripts/vercel-build.py",
   "functions": {
     "api/index.py": {
-      "excludeFiles": "{.agents/**,docs/**,policies/**,records/**,scripts/**,deploy/**,.build-deps/**,state_import.py,**/.env*,.board_snapshot*,.python-version,test_*.py,**/test_*.py,**/__pycache__/**,**/*.pyc,github-app/**,.pytest_cache/**}"
+      "excludeFiles": "{.agents/**,docs/**,policies/**,records/**,scripts/**,deploy/**,.build-deps/**,state_import.py,**/.env*,.board_snapshot*,.python-version,test_*.py,**/test_*.py,**/__pycache__/**,**/*.pyc,github-app/**,.pytest_cache/**,site/**}"
     }
   },
   "rewrites": [
