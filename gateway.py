@@ -4264,6 +4264,9 @@ def actor_identity(owner, actor_id):
     return value
 
 
+NEW_REF_SHA = "0" * 40  # the old_sha git reports for a ref that does not exist yet
+
+
 def github_evidence(claim, context=None, policy=None):
     """Independently confirm a repository claim, read-only and best effort.
 
@@ -4318,13 +4321,34 @@ def github_evidence(claim, context=None, policy=None):
             found["error"] = f"could not read {notice_path}: {str(exc)[:120]}"
     found["identity"] = actor_identity(owner, context.get("_actor_id"))
     ref = context.get("ref") or ""
+    ref_absent = False
     if ref.startswith("refs/"):
         try:
             head = repo_api(owner, f"/repos/{owner}/{name}/git/ref/{ref[len('refs/'):]}")
             found["ref"] = {"name": ref, "sha": ((head.get("object") or {}).get("sha") or "")}
+        except HTTPError as exc:
+            found["ref"] = None
+            ref_absent = exc.code == 404
         except Exception:
             found["ref"] = None
-    if context.get("old_sha") and context.get("new_sha"):
+    if context.get("old_sha") == NEW_REF_SHA and context.get("new_sha"):
+        # Creating a ref replaces no history, so it counts as a fast-forward only when the ref does not
+        # exist yet and new_sha is already on the default branch; anything else stays elevated.
+        if ref_absent and found["repository"]["default_branch"]:
+            try:
+                compared = repo_api(owner, f"/repos/{owner}/{name}/compare/"
+                                           f"{found['repository']['default_branch']}...{context['new_sha']}")
+                found["fast_forward"] = compared.get("status") in ("behind", "identical")
+                found["ref_created"] = True
+            except HTTPError as exc:
+                found["fast_forward"] = None
+                if exc.code == 404:
+                    found["fast_forward_unknown"] = "REVISION_NOT_PUBLISHED"
+            except Exception:
+                found["fast_forward"] = None
+        else:
+            found["fast_forward"] = None
+    elif context.get("old_sha") and context.get("new_sha"):
         try:
             compared = repo_api(owner, f"/repos/{owner}/{name}/compare/{context['old_sha']}...{context['new_sha']}")
             found["fast_forward"] = compared.get("status") in ("ahead", "identical")

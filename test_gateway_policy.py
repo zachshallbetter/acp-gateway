@@ -279,6 +279,88 @@ def test_github_evidence_marks_a_missing_revision_unpublished():
     assert found["fast_forward"] is None and found["fast_forward_unknown"] == "REVISION_NOT_PUBLISHED", found
 
 
+def creation_api(ref_exists=False, status="behind", compare_code=None):
+    """GitHub for a new ref: the ref lookup and the default-branch comparison."""
+    from urllib.error import HTTPError
+    calls = []
+
+    def api(owner, path):
+        calls.append(path)
+        if "/git/ref/" in path:
+            if ref_exists:
+                return {"object": {"sha": "abc123"}}
+            raise HTTPError(path, 404, "Not Found", {}, None)
+        if "/compare/" in path:
+            if compare_code:
+                raise HTTPError(path, compare_code, "error", {}, None)
+            return {"status": status}
+        return {"owner": {"login": OWNER}, "name": REPO, "default_branch": "main"}
+    return api, calls
+
+
+def creation_evidence(api):
+    with env(**{gateway.owner_env_name(OWNER): "token"}), patch.object(gateway, "repo_api", api):
+        return gateway.github_evidence({"owner": OWNER, "name": REPO},
+                                       {"ref": "refs/tags/v1.0.0", "old_sha": gateway.NEW_REF_SHA,
+                                        "new_sha": "def456"})
+
+
+def test_a_new_ref_on_the_default_branch_counts_as_a_fast_forward():
+    api, calls = creation_api(status="behind")
+    found = creation_evidence(api)
+    assert found["fast_forward"] is True and found["ref_created"] is True, found
+    assert any(path.endswith("/compare/main...def456") for path in calls), calls
+    api, _ = creation_api(status="identical")
+    assert creation_evidence(api)["fast_forward"] is True
+
+
+def test_a_new_ref_off_the_default_branch_is_not_a_fast_forward():
+    for status in ("ahead", "diverged"):
+        api, _ = creation_api(status=status)
+        assert creation_evidence(api)["fast_forward"] is False, status
+
+
+def test_a_new_ref_that_already_exists_or_cannot_be_read_is_not_assumed_new():
+    api, calls = creation_api(ref_exists=True)
+    found = creation_evidence(api)
+    assert found["ref"]["sha"] == "abc123" and found["fast_forward"] is None, found
+    assert not any("/compare/" in path for path in calls), calls
+    from urllib.error import HTTPError
+
+    def unreadable(owner, path):
+        if "/git/ref/" in path:
+            raise HTTPError(path, 500, "error", {}, None)
+        return {"owner": {"login": OWNER}, "name": REPO, "default_branch": "main"}
+    assert creation_evidence(unreadable)["fast_forward"] is None
+
+
+def test_a_new_ref_with_an_unpublished_sha_is_reported_unpublished():
+    api, _ = creation_api(compare_code=404)
+    found = creation_evidence(api)
+    assert found["fast_forward"] is None and found["fast_forward_unknown"] == "REVISION_NOT_PUBLISHED", found
+
+
+def test_creating_a_tag_on_the_default_branch_is_allowed_and_others_need_recovery():
+    zero = gateway.NEW_REF_SHA
+    context = {"ref": "refs/tags/v1.0.0", "old_sha": zero, "new_sha": "def456"}
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update", context=dict(context)),
+                                verifier=verifier(fast_forward=True, ref_created=True))
+    assert out["decision"] == "ALLOW" and out["reason"] == "VERIFIED_AND_PERMITTED", out
+    assert out["authorized_action"] == {"action": "git.protected_ref.update", **context}
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update", context=dict(context)),
+                                verifier=verifier(fast_forward=False))
+    assert out["decision"] == "DENY" and out["reason"] == "RECOVERY_AUTHORIZATION_REQUIRED", out
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update", context=dict(context)),
+                                verifier=verifier(ref_sha="abc123", fast_forward=None))
+    assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "STALE_REF_STATE", out
+
+
 # ---- 8-9. losing GitHub downgrades trust; it does not remove policy --------
 def test_losing_the_installation_asks_for_reverification():
     fresh()
