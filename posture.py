@@ -34,7 +34,7 @@ def findings(snapshot, ledger_rows=None, day=None):
         git = config.get("git") if isinstance(config.get("git"), dict) else {}
         branch_rules = git.get("deploymentEnabled")
         ignore = project.get("ignore_command") or config.get("ignoreCommand")
-        if project["create_deployments"] == "enabled" and not ignore and not isinstance(branch_rules, (dict, bool)):
+        if not ignore and not isinstance(branch_rules, (dict, bool)):
             out.append(_finding(
                 "high", "VERCEL_DEPLOYS_EVERY_PUSH", repo, f"vercel:{name}",
                 "Every push to every branch starts a Vercel build (no Ignored Build Step, no branch rules).",

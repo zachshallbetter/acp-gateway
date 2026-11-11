@@ -178,7 +178,8 @@ def test_vercel_would_build_rules():
     assert providers.vercel_would_build(project, {"git": {"deploymentEnabled": {"feature*": False}}},
                                         CLAIM, "feature-x", "push")[0] is False
     assert providers.vercel_would_build(project, {"git": {"deploymentEnabled": False}}, CLAIM, "main", "push")[0] is False
-    assert providers.vercel_would_build({**project, "create_deployments": "disabled"}, None, CLAIM, "x", "push")[0] is False
+    # GitHub Deployment records off does not stop builds
+    assert providers.vercel_would_build({**project, "create_deployments": "disabled"}, None, CLAIM, "x", "push")[0] is True
     assert providers.vercel_would_build(project, None, {"owner": "Other", "name": "Repo"}, "x", "push")[0] is False
     assert providers.vercel_would_build({**project, "create_deployments": "disabled"}, None, CLAIM, "x", "cli_deploy")[0]
 

@@ -156,6 +156,9 @@ def vercel_project(project_id, now=None, fetch=_fetch):
                                                    optional=True) or "main"}
             else:
                 repo = {"owner": None, "name": None, "production_branch": None}
+        # createDeployments says whether Vercel writes GitHub Deployment records, not whether it
+        # builds: a project with it disabled still builds every push. It is reported, never used
+        # to decide that a push would not build.
         git = _need("vercel", raw, "gitProviderOptions", dict, "project", optional=True) or {}
         create = _need("vercel", git, "createDeployments", str, "project.gitProviderOptions",
                        optional=True) or "enabled"
@@ -228,8 +231,6 @@ def vercel_would_build(project, config, claim, branch, trigger):
     if (repo.get("owner") or "").lower() != (claim.get("owner") or "").lower() or \
             (repo.get("name") or "").lower() != (claim.get("name") or "").lower():
         return False, "the Vercel project is not connected to this repository"
-    if project["create_deployments"] == "disabled":
-        return False, "git deployments are disabled on the Vercel project"
     if not vercel_branch_enabled(config, branch):
         return False, "vercel.json git.deploymentEnabled turns this branch off"
     if project.get("ignore_command") or (config or {}).get("ignoreCommand"):
