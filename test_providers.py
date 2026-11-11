@@ -369,7 +369,7 @@ def test_last_build_machine_overrides_a_reassuring_setting():
     machine = snapshot["vercel"][0]["last_build_machine"]
     assert machine["selection"] == "elastic" and machine["cores"] == 4 and machine["deployment"] == "dpl_1"
     found = [f for f in posture.findings(snapshot, [], DAY) if f["code"] == "VERCEL_LARGE_OR_ELASTIC_MACHINE"]
-    assert found and "last build ran on 4 cores, elastic" in found[0]["problem"]
+    assert found and "last build (2027-01-15) ran on 4 cores, elastic" in found[0]["problem"]
     calm = {**VERCEL_DEPLOYMENT_DETAIL, "resourceConfig": {"buildMachine": {
         "cores": 2, "machineSelectionType": "fixed", "purchaseType": "basic", "selectionSource": "project-setting"}}}
     with creds():

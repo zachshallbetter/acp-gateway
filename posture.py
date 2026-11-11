@@ -46,15 +46,16 @@ def findings(snapshot, ledger_rows=None, day=None):
             project.get("build_machine_type") in ("turbo", "enhanced", "14cpu-28gb")
         large_actual = last.get("selection") == "elastic" or (last.get("cores") or 0) > 4
         if large_setting or large_actual:
-            ran = (f" The last build ran on {last.get('cores')} cores, {last.get('selection')} selection "
-                   f"({last.get('selection_source')})." if last else "")
+            ran = (f" The last build ({last.get('built_on')}) ran on {last.get('cores')} cores, "
+                   f"{last.get('selection')} selection ({last.get('selection_source')})." if last else "")
             out.append(_finding(
                 "high", "VERCEL_LARGE_OR_ELASTIC_MACHINE", repo, f"vercel:{name}",
                 f"The project is set to a {project.get('build_machine_type') or 'default'} machine with "
                 f"{project.get('build_machine_selection') or 'default'} selection.{ran} Elastic or large machines "
                 "scale cost with every build.",
                 "Vercel dashboard: Project Settings > Build and Deployment > Build Machine: choose Standard (or "
-                "Basic) and fixed selection; check Team Settings for an elastic default.", owner_only=True))
+                "Basic) and fixed selection; check Team Settings for an elastic default. If the setting changed "
+                "after that build, the next build's record confirms it.", owner_only=True))
         elif not last:
             out.append(_finding(
                 "low", "VERCEL_MACHINE_UNVERIFIED", repo, f"vercel:{name}",

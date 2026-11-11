@@ -219,6 +219,7 @@ def vercel_last_build_machine(project_id, now=None, fetch=_fetch, team_id=None):
     if not rows:
         return None
     uid = _need("vercel", rows[0], "uid", str, "deployments[]")
+    created = _need("vercel", rows[0], "created", (int, float), "deployments[]")
     detail = fetch("vercel", _vercel_url("/v13/deployments/" + quote(uid, safe=""), team_id),
                    os.getenv("ACP_VERCEL_TOKEN", "").strip())
     resource = _need("vercel", detail, "resourceConfig", dict, "deployment", optional=True) or {}
@@ -228,7 +229,7 @@ def vercel_last_build_machine(project_id, now=None, fetch=_fetch, team_id=None):
     selection = _need("vercel", machine, "machineSelectionType", str, "buildMachine", optional=True)
     if selection is not None and selection not in ("elastic", "fixed"):
         raise ProviderError("vercel", "DIVERGED", "buildMachine.machineSelectionType is unknown")
-    return {"deployment": uid,
+    return {"deployment": uid, "built_on": _day(created / 1000),
             "cores": _need("vercel", machine, "cores", int, "buildMachine", optional=True),
             "memory_mb": _need("vercel", machine, "memory", int, "buildMachine", optional=True),
             "purchase_type": _need("vercel", machine, "purchaseType", str, "buildMachine", optional=True),
