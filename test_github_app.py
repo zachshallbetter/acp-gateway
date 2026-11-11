@@ -52,8 +52,8 @@ def test_the_icon_meets_githubs_logo_rules():
 
 
 def test_drift_names_what_is_missing_and_what_is_excess():
-    live = {"issues": "read", "metadata": "read", "organization_projects": "read",
-            "repository_hooks": "read", "repository_projects": "write"}
+    live = {"issues": "read", "metadata": "read", "organization_projects": "read", "actions": "read",
+            "checks": "read", "repository_hooks": "read", "repository_projects": "write"}
     drift = gateway.permission_drift(live, "Organization")
     assert drift == {"permissions_missing": ["contents", "pull_requests"],
                      "permissions_excess": ["repository_hooks", "repository_projects"]}, drift
@@ -75,7 +75,8 @@ def test_a_broader_grant_than_read_is_excess_even_when_read_is_needed():
 def test_each_installation_reports_its_drift():
     entry = gateway.installation_entry({"id": 1, "account": {"login": "acme", "type": "Organization"},
                                         "permissions": {"metadata": "read"}})
-    assert entry["permissions_missing"] == ["contents", "issues", "organization_projects", "pull_requests"]
+    assert entry["permissions_missing"] == ["actions", "checks", "contents", "issues", "organization_projects",
+                                           "pull_requests"]
     assert entry["permissions_excess"] == []
 
 

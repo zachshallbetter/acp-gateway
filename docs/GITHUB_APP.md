@@ -34,6 +34,13 @@ Every permission is **read**. The gateway never writes to GitHub: board writes
 | `issues` | read | issue items on a board (title, state, labels, assignees) | `PROJECT_QUERY` |
 | `pull_requests` | read | pull-request items and their review state on a board | `PROJECT_QUERY` |
 | `organization_projects` | read | ProjectsV2 boards owned by an organization | `project_context()`, `project_list()` |
+| `actions` | read | workflow runs per day for a governed repository — posture evidence that a build budget is being spent | `providers.github_runs_per_day()` |
+| `checks` | read | check runs on a branch head, by app — what one push sets off | `providers.github_check_runs()` |
+
+Workflow files themselves are read with `contents`. Organization Actions spend
+(`/organizations/{org}/settings/billing/usage`) needs the organization's
+`administration` (read) permission, which is deliberately not requested; the posture
+report lists that spend as unreadable and names the dashboard budget to set instead.
 
 Calls that need no permission: `GET /app`, `GET /app/installations` and
 `POST /app/installations/{id}/access_tokens` use the App's own JWT; `GET /user/{id}`

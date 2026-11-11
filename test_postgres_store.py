@@ -114,6 +114,98 @@ class PostgresStoreTests(unittest.TestCase):
         with postgres_store.transaction() as store:
             self.assertTrue(store.capability_consumed(keys, jti, now))
 
+    def _ledger_row(self, key, sha, now, request_id=None):
+        return {"record_key": key, "request_id": request_id or uuid.uuid4().hex, "action": "hosted_build",
+                "provider": "vercel", "resource_owner": "synthetic", "resource_name": "metered",
+                "ref": "refs/heads/feature", "sha": sha, "caller_kind": "lane", "caller_id": "lane-a",
+                "reason": "synthetic budget test", "reason_code": "WITHIN_BUDGET", "counted": True,
+                "budget_day": time.strftime("%Y-%m-%d", time.gmtime(now)), "grant_id": None,
+                "evidence_digest": None, "created_at": now}
+
+    def test_metered_record_is_written_once_and_counted(self):
+        now = time.time()
+        key = uuid.uuid4().hex + uuid.uuid4().hex
+        day = time.strftime("%Y-%m-%d", time.gmtime(now))
+        with postgres_store.transaction() as store:
+            before = store.ledger_count(day, ["hosted_build"], owner="Synthetic", name="Metered")
+            store.ledger_insert(self._ledger_row(key, "d" * 40, now))
+        with self.assertRaises(postgres_store.StorageError):
+            with postgres_store.transaction() as store:
+                store.ledger_insert(self._ledger_row(key, "d" * 40, now))
+        with postgres_store.transaction() as store:
+            self.assertEqual(store.ledger_get(key)["reason_code"], "WITHIN_BUDGET")
+            self.assertEqual(store.ledger_count(day, ["hosted_build"], owner="Synthetic", name="Metered"),
+                             before + 1)
+
+    def test_ledger_constraints_refuse_inconsistent_rows(self):
+        now = time.time()
+        for change in ({"reason_code": "NO_HOSTED_BUILD"}, {"sha": "not-a-sha"}, {"reason": "short"},
+                       {"resource_name": None}, {"grant_id": "g-0000000000000000"}):
+            with self.subTest(change=change):
+                row = {**self._ledger_row(uuid.uuid4().hex + uuid.uuid4().hex, "e" * 40, now), **change}
+                with self.assertRaises(postgres_store.StorageError):
+                    with postgres_store.transaction() as store:
+                        store.ledger_insert(row)
+
+    def test_last_budget_slot_is_taken_once_under_concurrency(self):
+        import metering
+        now = time.time()
+        day = time.strftime("%Y-%m-%d", time.gmtime(now))
+        owner = f"race-{uuid.uuid4().hex[:8]}"
+        barrier = threading.Barrier(2)
+
+        def take(index):
+            try:
+                with postgres_store.transaction() as store:
+                    used = store.ledger_count(day, ["hosted_build"], owner=owner, name="repo")
+                    barrier.wait(timeout=5)
+                    if used >= 1:
+                        return "over"
+                    row = self._ledger_row(metering.record_key("race", owner, index), str(index) * 40, now)
+                    store.ledger_insert({**row, "resource_owner": owner, "resource_name": "repo"})
+                return "committed"
+            except postgres_store.StorageError:
+                return "refused"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = sorted(executor.map(take, range(2)))
+        self.assertEqual(results.count("committed"), 1, results)
+        with postgres_store.transaction() as store:
+            self.assertEqual(store.ledger_count(day, ["hosted_build"], owner=owner, name="repo"), 1)
+
+    def test_grant_uses_and_lease_release(self):
+        now = time.time()
+        grant_id = "g-" + uuid.uuid4().hex[:16]
+        with postgres_store.transaction() as store:
+            store.grant_issue({"grant_id": grant_id, "action": "production_merge", "resource_owner": "synthetic",
+                               "resource_name": "granted", "uses_total": 1, "uses_left": 1, "issued_at": now,
+                               "expires_at": now + 600, "issued_by": "owner", "reason": "synthetic release"})
+        with postgres_store.transaction() as store:
+            self.assertEqual(store.grant_take("production_merge", "Synthetic", "Granted", now), grant_id)
+        with postgres_store.transaction() as store:
+            self.assertIsNone(store.grant_take("production_merge", "synthetic", "granted", now))
+        lease = uuid.uuid4().hex + uuid.uuid4().hex
+        session = "session-" + uuid.uuid4().hex[:8]
+        with postgres_store.transaction() as store:
+            store.lease_open({"lease_key": lease, "session_id": session, "model": "claude-opus-5-5",
+                              "reason": "synthetic heavy work", "opened_at": now, "expires_at": now + 7200})
+            self.assertEqual(store.leases_open(session, now), 1)
+        with postgres_store.transaction() as store:
+            self.assertTrue(store.lease_release(lease, now + 1))
+            self.assertFalse(store.lease_release(lease, now + 2))
+            self.assertEqual(store.leases_open(session, now + 3), 0)
+
+    def test_provider_snapshot_latest_wins(self):
+        now = time.time()
+        subject = "synthetic/" + uuid.uuid4().hex[:8]
+        with postgres_store.transaction() as store:
+            store.snapshot_put("vercel", subject, "1" * 64, {"vercel": [{"name": "old"}]}, now - 60)
+            store.snapshot_put("vercel", subject, "2" * 64, {"vercel": [{"name": "new"}]}, now)
+        with postgres_store.transaction() as store:
+            body, fetched = store.snapshot_latest("vercel", subject)
+            self.assertEqual(body["vercel"][0]["name"], "new")
+            self.assertAlmostEqual(fetched, now, delta=1)
+
     def test_readiness_refuses_missing_schema_without_losing_liveness(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -139,7 +231,7 @@ class PostgresStoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual([version for version, *_ in migration_files()], [1, 2])
+        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3])
         postgres_store.validate_schema()
 
 

@@ -824,6 +824,104 @@ class PostgresStore:
             raise StorageError("capability was consumed concurrently")
 
 
+    # ---------------------------------------------------------- metered actions
+
+    _LEDGER_COLUMNS = ("record_key", "request_id", "action", "provider", "resource_owner", "resource_name",
+                       "ref", "sha", "caller_kind", "caller_id", "reason", "reason_code", "counted",
+                       "budget_day", "grant_id", "evidence_digest", "created_at")
+
+    def ledger_get(self, key):
+        row = self.connection.execute(
+            "SELECT " + ", ".join(self._LEDGER_COLUMNS) + " FROM spend_ledger WHERE record_key=%s", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {**row, "budget_day": row["budget_day"].isoformat(), "created_at": _epoch(row["created_at"])}
+
+    def ledger_insert(self, row):
+        values = [row[column] for column in self._LEDGER_COLUMNS]
+        values[self._LEDGER_COLUMNS.index("created_at")] = _timestamp(row["created_at"])
+        cursor = self.connection.execute(
+            "INSERT INTO spend_ledger (" + ", ".join(self._LEDGER_COLUMNS) + ") VALUES ("
+            + ", ".join(["%s"] * len(values)) + ") ON CONFLICT (record_key) DO NOTHING", values)
+        if cursor.rowcount != 1:
+            raise StorageError("metered action was recorded concurrently")
+
+    def ledger_count(self, day, actions, owner=None, name=None, provider=None, distinct_sha=False):
+        clauses, parameters = ["counted", "budget_day = %s", "action = ANY(%s)"], [day, list(actions)]
+        for column, value in (("resource_owner", owner), ("resource_name", name), ("provider", provider)):
+            if value is not None:
+                clauses.append(f"{column} = %s")
+                parameters.append(value.lower() if column != "provider" else value)
+        measure = "count(DISTINCT sha)" if distinct_sha else "count(*)"
+        return self.connection.execute(
+            f"SELECT {measure} AS count FROM spend_ledger WHERE " + " AND ".join(clauses), parameters
+        ).fetchone()["count"]
+
+    def ledger_day(self, day):
+        rows = self.connection.execute(
+            "SELECT " + ", ".join(self._LEDGER_COLUMNS) + " FROM spend_ledger WHERE budget_day = %s "
+            "ORDER BY created_at, record_key LIMIT %s", (day, MAX_STATE_ROWS)).fetchall()
+        return [{**row, "budget_day": row["budget_day"].isoformat(), "created_at": _epoch(row["created_at"])}
+                for row in rows]
+
+    def grant_issue(self, row):
+        self.connection.execute(
+            "INSERT INTO budget_grants (grant_id, action, resource_owner, resource_name, uses_total, uses_left, "
+            "issued_at, expires_at, issued_by, reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (row["grant_id"], row["action"], row["resource_owner"], row["resource_name"], row["uses_total"],
+             row["uses_left"], _timestamp(row["issued_at"]), _timestamp(row["expires_at"]), row["issued_by"],
+             row["reason"]))
+
+    def grant_take(self, action, owner, name, now):
+        row = self.connection.execute(
+            "UPDATE budget_grants SET uses_left = uses_left - 1 WHERE grant_id = ("
+            "SELECT grant_id FROM budget_grants WHERE action=%s AND uses_left > 0 AND expires_at > %s "
+            "AND (resource_owner IS NULL OR (resource_owner=%s AND resource_name=%s)) "
+            "ORDER BY grant_id LIMIT 1 FOR UPDATE) RETURNING grant_id",
+            (action, _timestamp(now), (owner or "").lower(), (name or "").lower())).fetchone()
+        return row["grant_id"] if row else None
+
+    def lease_get(self, key):
+        row = self.connection.execute(
+            "SELECT lease_key, session_id, model, opened_at, expires_at, released_at FROM subagent_leases "
+            "WHERE lease_key=%s", (key,)).fetchone()
+        if row is None:
+            return None
+        return {**row, "opened_at": _epoch(row["opened_at"]), "expires_at": _epoch(row["expires_at"]),
+                "released_at": _epoch(row["released_at"])}
+
+    def lease_open(self, row):
+        self.connection.execute(
+            "INSERT INTO subagent_leases (lease_key, session_id, model, reason, opened_at, expires_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (row["lease_key"], row["session_id"], row["model"], row["reason"], _timestamp(row["opened_at"]),
+             _timestamp(row["expires_at"])))
+
+    def leases_open(self, session_id, now):
+        return self.connection.execute(
+            "SELECT count(*) AS count FROM subagent_leases WHERE session_id=%s AND released_at IS NULL "
+            "AND expires_at > %s", (session_id, _timestamp(now))).fetchone()["count"]
+
+    def lease_release(self, key, now):
+        cursor = self.connection.execute(
+            "UPDATE subagent_leases SET released_at=%s WHERE lease_key=%s AND released_at IS NULL",
+            (_timestamp(now), key))
+        return cursor.rowcount == 1
+
+    def snapshot_put(self, provider, subject, digest, body, fetched_at, schema_version=1):
+        self.connection.execute(
+            "INSERT INTO provider_snapshots (provider, subject, digest, schema_version, fetched_at, body) "
+            "VALUES (%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT (provider, subject, digest) "
+            "DO UPDATE SET fetched_at = EXCLUDED.fetched_at",
+            (provider, subject, digest, schema_version, _timestamp(fetched_at), _json(body)))
+
+    def snapshot_latest(self, provider, subject):
+        row = self.connection.execute(
+            "SELECT body, fetched_at FROM provider_snapshots WHERE provider=%s AND subject=%s "
+            "ORDER BY fetched_at DESC, digest LIMIT 1", (provider, subject)).fetchone()
+        return (row["body"], _epoch(row["fetched_at"])) if row else (None, None)
+
     def _save_audit_chain_head(self, record):
         raise StorageError("audit-chain head is written atomically with its event")
 

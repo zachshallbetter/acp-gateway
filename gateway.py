@@ -23,7 +23,10 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
+import metering
 import postgres_store
+import posture
+import providers
 
 # One page is 100 -- GitHub's maximum. MAX_PAGES bounds a runaway loop; hitting
 # it is reported as truncated rather than passed off as a complete board.
@@ -64,8 +67,85 @@ def configured():
 
 
 def authorized(handler):
-    expected = os.getenv("ACP_GATEWAY_TOKEN", "")
-    return bool(expected) and hmac.compare_digest(handler.headers.get("Authorization", ""), "Bearer " + expected)
+    """A request ACP will answer at all: the shared bearer or a registered caller's own token."""
+    return caller_for(handler) is not None
+
+
+CALLER_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,63}\Z")
+REPO_PATTERN_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?:\*|[A-Za-z0-9._-]{1,100})\Z")
+_CALLERS = {"key": None, "value": None}
+
+
+def callers_registry():
+    """Per-caller credentials from ACP_CALLERS, verified, or why there are none.
+
+    `{"callers_id": ..., "version": n, "callers": [{"caller_id", "kind": "lane"|"coordinator",
+    "repos": ["owner/*" | "owner/name"], "token_sha256"}], "signature": ...}`, signed like a
+    policy, so holding the shared bearer is not enough to add a coordinator. Only token hashes
+    live here; each caller keeps its own token. Unset means every caller is the shared bearer.
+    """
+    raw = os.getenv("ACP_CALLERS", "").strip()
+    key = hashlib.sha256((raw + "\0" + os.getenv("ACP_POLICY_SIGNING_KEY", "")).encode()).hexdigest()
+    if _CALLERS["key"] == key:
+        return _CALLERS["value"]
+    value = {"callers": [], "error": None, "configured": bool(raw)}
+    if raw:
+        try:
+            doc = json.loads(raw)
+            if not isinstance(doc, dict) or not isinstance(doc.get("callers"), list) or \
+                    set(doc) - {"callers_id", "version", "callers", "signature", "signing_key_id"}:
+                raise ValueError("ACP_CALLERS must be {callers_id, version, callers: [...], signature}")
+            expected = policy_signature(policy_digest(doc))
+            if not expected or not hmac.compare_digest(expected, str(doc.get("signature") or "")):
+                raise ValueError("ACP_CALLERS signature does not verify")
+            seen = set()
+            for entry in doc["callers"]:
+                if not isinstance(entry, dict) or set(entry) != {"caller_id", "kind", "repos", "token_sha256"}:
+                    raise ValueError("each caller is exactly {caller_id, kind, repos, token_sha256}")
+                if not CALLER_ID_RE.match(str(entry["caller_id"])) or entry["caller_id"] in seen:
+                    raise ValueError("caller_id must be a unique short lowercase identifier")
+                if entry["kind"] not in ("lane", "coordinator"):
+                    raise ValueError("caller kind must be lane or coordinator; the owner uses the admin credential")
+                if not isinstance(entry["repos"], list) or not entry["repos"] or \
+                        not all(isinstance(r, str) and REPO_PATTERN_RE.match(r) for r in entry["repos"]):
+                    raise ValueError("caller repos must be a non-empty list of owner/name or owner/*")
+                if not HEX64.match(str(entry["token_sha256"])):
+                    raise ValueError("token_sha256 must be 64 lowercase hex characters")
+                seen.add(entry["caller_id"])
+                value["callers"].append(dict(entry))
+        except (ValueError, TypeError) as exc:
+            value = {"callers": [], "error": str(exc)[:200], "configured": True}
+    _CALLERS.update(key=key, value=value)
+    return value
+
+
+def caller_for(handler):
+    """Who is calling: the owner, a registered lane or coordinator, the shared bearer, or nobody."""
+    header = handler.headers.get("Authorization", "")
+    shared = os.getenv("ACP_GATEWAY_TOKEN", "")
+    caller = None
+    if shared and hmac.compare_digest(header, "Bearer " + shared):
+        caller = {"kind": "shared", "id": "shared", "repos": None}
+    elif header.startswith("Bearer ") and len(header) > 7:
+        presented = hashlib.sha256(header[7:].encode()).hexdigest()
+        for entry in callers_registry()["callers"]:
+            if hmac.compare_digest(presented, entry["token_sha256"]):
+                caller = {"kind": entry["kind"], "id": entry["caller_id"], "repos": list(entry["repos"])}
+                break
+    if caller is not None and admin_authorized(handler):
+        caller = {"kind": "owner", "id": "owner", "repos": None}
+    return caller
+
+
+def caller_covers(caller, owner, name):
+    if caller.get("repos") is None:
+        return True
+    owner, name = (owner or "").lower(), (name or "").lower()
+    for pattern in caller["repos"]:
+        p_owner, _, p_name = pattern.lower().partition("/")
+        if p_owner == owner and p_name in ("*", name):
+            return True
+    return False
 
 
 def admin_authorized(handler):
@@ -153,6 +233,8 @@ APP_PERMISSIONS = {
     "issues": "read",                 # issue items on a board
     "pull_requests": "read",          # pull-request items on a board
     "organization_projects": "read",  # ProjectsV2 on an organization
+    "actions": "read",                # workflow runs per day: posture evidence for metered builds
+    "checks": "read",                 # check runs on a branch head: what each push sets off
 }
 _LEVEL = {"none": 0, "read": 1, "write": 2, "admin": 3}
 
@@ -806,6 +888,7 @@ def validated_policy(raw):
         declared.append({"owner": _text(board.get("owner"), "boards[].owner", required=True),
                          "number": number})
     manifest = validated_manifest(raw.get("artifact_manifest"), policy_id)
+    metered = metering.validated_metered(raw.get("metered"), policy_id)
     normalised = {"policy_id": policy_id, "version": version, "status": status, "repository": repo,
                   "protected_actions": sorted(set(actions)), "recovery_authorizations": recovery}
     if declared:
@@ -818,6 +901,9 @@ def validated_policy(raw):
         normalised["artifact_manifest"] = manifest
     if registered_notice:
         normalised["notice"] = registered_notice
+    if metered:
+        # Budgets and provider projects for metered actions, signed with the rest of the policy.
+        normalised["metered"] = metered
     for extra in ("signature", "signing_key_id"):
         if raw.get(extra) is not None:
             normalised[extra] = _text(raw.get(extra), extra)
@@ -881,6 +967,44 @@ def policy_registry(strict=False):
                 raise ValueError(f"{record['policy']['policy_id']}: {record['error']}")
     _REGISTRY.update(key=key, value=registry)
     return registry
+
+
+_BUDGETS = {"key": None, "value": None}
+
+
+def budget_policy():
+    """The signed deployment-wide limits for metered actions (ACP_BUDGET_POLICY), or why there are none.
+
+    `{"budget_policy_id", "version", "limits": {...}, "signature"}`, signed like a policy. Limits it
+    leaves out take metering.DEFAULT_LIMITS. Missing or unverified means no paid build is authorized.
+    """
+    raw = os.getenv("ACP_BUDGET_POLICY", "").strip()
+    key = hashlib.sha256((raw + "\0" + os.getenv("ACP_POLICY_SIGNING_KEY", "")).encode()).hexdigest()
+    if _BUDGETS["key"] == key:
+        return _BUDGETS["value"]
+    value = {"limits": None, "error": "ACP_BUDGET_POLICY is not set", "budget_policy_id": None,
+             "version": None, "digest": None}
+    if raw:
+        try:
+            doc = json.loads(raw)
+            if not isinstance(doc, dict) or \
+                    set(doc) - {"budget_policy_id", "version", "limits", "signature", "signing_key_id"}:
+                raise ValueError("ACP_BUDGET_POLICY must be {budget_policy_id, version, limits, signature}")
+            if not POLICY_ID_RE.match(str(doc.get("budget_policy_id") or "")):
+                raise ValueError("budget_policy_id must be a plain identifier")
+            version = doc.get("version")
+            if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+                raise ValueError("version must be a positive integer")
+            digest = policy_digest(doc)
+            expected = policy_signature(digest)
+            if not expected or not hmac.compare_digest(expected, str(doc.get("signature") or "")):
+                raise ValueError("ACP_BUDGET_POLICY signature does not verify")
+            value = {"limits": metering.validated_limits(doc.get("limits") or {}), "error": None,
+                     "budget_policy_id": doc["budget_policy_id"], "version": version, "digest": digest}
+        except (ValueError, TypeError) as exc:
+            value = {**value, "error": str(exc)[:200]}
+    _BUDGETS.update(key=key, value=value)
+    return value
 
 
 def _policy_record(policy, raw=None):
@@ -1463,6 +1587,57 @@ DECISION_EVENTS = {"ALLOW": "AUTHORIZATION_ALLOWED", "DENY": "AUTHORIZATION_DENI
                    "RECOVERY_AUTHORIZED": "RECOVERY_ATTEMPTED",
                    "VERIFY_RECOVERY": "AUTHORIZATION_DENIED"}
 
+# The next step for each refusal, so a caller is never left with only a stop.
+REMEDIES = {
+    "POLICY_MODIFICATION_FORBIDDEN": "Policy changes are the owner's: they run scripts/policy-admin.py with the "
+                                     "administrative credential. Tell your coordinator what should change.",
+    "CREDENTIAL_MODIFICATION_FORBIDDEN": "Credential changes are the owner's. Tell your coordinator which "
+                                         "credential and why.",
+    "SECURITY_STATE_UNAVAILABLE": "Retry in a minute. If it persists, GET /ready shows the failing store; "
+                                  "tell your coordinator.",
+    "RECOVERY_IN_PROGRESS": "Wait for the recovery to finish; GET /notice?owner=&name= shows the state.",
+    "RECOVERY_PRECONDITION_FAILED": "Return the ref to the state the recovery authorization names, then retry.",
+    "ACTION_NOT_RECOGNIZED": "Use an action ACP classifies: repository.read, source.inspect, local.analysis or "
+                             "local.test for local work; hosted_build, production_merge, manual_ci, "
+                             "local_heavy_build or heavy_subagent for metered work; or one the policy lists.",
+    "RECOVERY_AUTHORIZATION_REQUIRED": "Do not rewrite. Make the update a fast-forward of the current ref "
+                                       "(fetch, rebase, push). A real rewrite needs an owner recovery "
+                                       "authorization naming this exact ref.",
+    "POLICY_INVALID": "The owner re-signs the policy (scripts/policy-admin.py); GET /internal/policy names the "
+                      "invalid one. Keep working locally or on a branch meanwhile.",
+    "POLICY_NOT_FOUND": "Keep the work local or on a branch. The owner registers the repository with "
+                        "python3 scripts/policy-admin.py register OWNER/NAME --apply.",
+    "POLICY_INACTIVE": "Keep the work local or on a branch until the owner reactivates the policy.",
+    "REPOSITORY_MISMATCH": "Run from a clone of the governed repository itself, not a fork or a rename.",
+    "REMOTE_MISMATCH": "Point origin at the repository's canonical remote (git remote set-url origin <url>) "
+                       "and ask again.",
+    "NOTICE_MISMATCH": "Restore the registered NOTICE (git checkout origin/HEAD -- NOTICE) and ask again.",
+    "IDENTITY_MISMATCH": "Report the GitHub identity this session really acts as, or leave "
+                         "reported_github_login out.",
+    "PROTECTED_ACTION_REQUIRES_VERIFICATION": "The owner installs the ACP GitHub App on this repository's "
+                                              "account so ACP can verify it; then ask again.",
+    "MISSING_REF_CONTEXT": "Send context.ref, context.old_sha (git rev-parse origin/<branch>) and "
+                           "context.new_sha (git rev-parse HEAD).",
+    "PROTECTED_ARTIFACT_STATE_MISMATCH": "Restore the files in integrity.findings, POST "
+                                         "/internal/integrity/snapshot, then ask again.",
+    "GITHUB_INSTALLATION_REMOVED": "The owner reinstalls the ACP GitHub App on this repository's account.",
+    "GITHUB_PERMISSION_MISSING": "The owner gives the ACP GitHub App read access to this repository.",
+    "SOURCE_UNVERIFIED": "Retry in a minute; GitHub could not be reached to verify the repository.",
+    "STALE_REVISION": "Check out the revision you are asking about, or ask about HEAD, and retry.",
+    "STALE_REF_STATE": "Fetch, rebase onto the current ref, and ask again with the new old_sha.",
+    "REVISION_NOT_PUBLISHED": "Push new_sha to a non-protected branch (its pull request branch) first, then ask again.",
+    "FAST_FORWARD_UNVERIFIED": "Ask again; if it repeats, push new_sha to its pull request branch so GitHub can compare it.",
+    "GITHUB_AUTH_REQUIRED": "Complete the GitHub authentication described in auth, then ask again.",
+    "REPOSITORY_NOT_GOVERNED": "Paid builds are authorized only for governed repositories. Keep the work local, "
+                               "or the owner registers the repository with python3 scripts/policy-admin.py "
+                               "register OWNER/NAME --apply.",
+    "METERED_ACTION_NOT_ENABLED": "The owner adds this action to the repository policy's protected_actions "
+                                  "(scripts/policy-admin.py). Until then keep the work local.",
+    "CALLER_NOT_PERMITTED": "Use the credential issued for this repository, or ask your coordinator to make the request.",
+}
+CONTAINMENT_REMEDY = ("Stop controlled operations on this resource. Local work can continue. The owner reviews "
+                      "incident_id and runs recovery; nothing will be repaired automatically.")
+
 NOTIFY_EVENTS = frozenset({"BOARD_READ_REFUSED", "NOTICE_REMOVED", "CONTROL_ARTIFACT_REMOVED", "BOOTSTRAP_MISSING",
                            "QUARANTINE_ENTERED", "LOCKED_ENTERED", "RECOVERY_AUTHORIZED",
                            "RECOVERY_VERIFICATION_FAILED", "RECOVERY_VERIFIED",
@@ -1918,6 +2093,8 @@ CONTEXT_FIELDS = {"ref", "old_sha", "new_sha", "force", "non_fast_forward",
 # The only fields that are not strings. Everywhere else a list or a boolean is a
 # shape error, caught here rather than as a type error deep in the evaluation.
 NON_STRING_FIELDS = {"context.force", "context.non_fast_forward", "context.signals"} | NON_STRING_ENVELOPE
+CONTEXT_FIELDS = CONTEXT_FIELDS | metering.CONTEXT_FIELDS
+FIELD_LIMITS.update(metering.CONTEXT_LIMITS)
 
 
 def _strict_object(value, allowed, label, nested=()):
@@ -2032,6 +2209,12 @@ def parse_authorization_request(body):
         if flag in context and not isinstance(context[flag], bool):
             raise TargetError(400, "INVALID_REQUEST", f"context.{flag} must be true or false.",
                               remedy="Send a JSON boolean.", field=f"context.{flag}")
+    if action in metering.METERED_ACTIONS:
+        try:
+            metering.validate_context(action, context, body.get("session_id") or principal.get("session_id")
+                                      or principal.get("agent_session_id"))
+        except metering.MeteringError as exc:
+            raise TargetError(400, "INVALID_REQUEST", str(exc), remedy=exc.remedy, field=exc.field)
     signals = context.get("signals", [])
     if not isinstance(signals, list) or len(signals) > 32 or \
             not all(isinstance(s, str) and 0 < len(s) <= 64 for s in signals):
@@ -2179,7 +2362,24 @@ def recovery_authorized(policy, claim, action, context, now):
 
 # ------------------------------------------------------------------- decision
 
-def authorize(request, verifier=None, admin=False, now=None):
+DEFAULT_LEDGER = object()
+
+
+def store_ledger():
+    """The shared budget ledger, or None where storage is per-process (file backend)."""
+    return postgres_store.current() if postgres_store.enabled() else None
+
+
+def provider_evidence(action, policy, claim, context):
+    """Live provider evidence for a metered action. Never raises: failure is unavailable evidence."""
+    try:
+        return providers.build_evidence(action, policy, claim, context, token_for=lambda owner: owner_token(owner)[0])
+    except Exception as exc:                                 # an unexpected failure is unavailable, never permission
+        return {"available": False, "kind": "UNAVAILABLE", "provider": "providers", "detail": type(exc).__name__}
+
+
+def authorize(request, verifier=None, admin=False, now=None, caller=None, provider_evidence=None,
+              ledger=DEFAULT_LEDGER):
     """Evaluate one authorization request and return the decision.
 
     The caller receives a decision, not the policy: the rules stay here, so an
@@ -2196,6 +2396,11 @@ def authorize(request, verifier=None, admin=False, now=None):
              "resource_id": (f"{claim.get('owner')}/{claim.get('name')}".lower()
                              if claim.get("owner") and claim.get("name") else None)}
     telemetry = parsed.get("telemetry") or {}
+    if caller is None:
+        caller = {"kind": "owner", "id": "owner", "repos": None} if admin else \
+            {"kind": "shared", "id": "shared", "repos": None}
+    if ledger is DEFAULT_LEDGER:
+        ledger = store_ledger()
     record = None
     try:
         registry = policy_registry()
@@ -2218,6 +2423,12 @@ def authorize(request, verifier=None, admin=False, now=None):
                 "verification": trace["verification"]}
         if detail:
             body["detail"] = detail
+        remedy = extra.pop("remedy", None) or REMEDIES.get(reason) or \
+            (CONTAINMENT_REMEDY if decision in ("QUARANTINE", "LOCKED") else None)
+        if remedy and decision != "ALLOW":
+            body["remedy"] = remedy
+        if trace["class"] == "metered":
+            body["caller_kind"] = caller["kind"]
         event = extra.pop("event", None) or DECISION_EVENTS.get(decision, "AUTHORIZATION_DENIED")
         body.update(extra)
         if decision != "ALLOW":
@@ -2279,10 +2490,36 @@ def authorize(request, verifier=None, admin=False, now=None):
         return finish("ALLOW", "ADMINISTRATIVELY_AUTHORIZED",
                       "Authorized by an administrative credential, not by repository verification.")
 
+    def metered_finish(outcome):
+        extra = dict(outcome.extra)
+        if outcome.decision == "ALLOW" and action in metering.REPO_ACTIONS:
+            scope_of = {"ref": context.get("ref"), "new_sha": context.get("new_sha"),
+                        "trigger": context.get("trigger"), "workflow": context.get("workflow"),
+                        "run_id": context.get("run_id")}
+            body, token = build_capability("operation", parsed, claim, policy, action, scope_of, now, trace["keys"])
+            extra.update(capability=body, capability_token=token,
+                         authorized_action={"action": action, **{k: v for k, v in scope_of.items() if v}})
+        elif outcome.decision == "ALLOW":
+            extra["authorized_action"] = {"action": action}
+        return finish(outcome.decision, outcome.reason, outcome.detail, remedy=outcome.remedy, **extra)
+
+    # 1b. Heavy local work: recorded against a budget with its reason, never blocked outright.
+    if action in metering.LOCAL_ACTIONS:
+        trace["class"] = "metered"
+        trace["trust"] = "SELF_REPORTED" if claim.get("owner") and claim.get("name") else "UNVERIFIED"
+        return metered_finish(metering.evaluate_local(action, claim, context, caller, budget_policy()["limits"],
+                                                      ledger, now, trace["request_id"], parsed["session_id"]))
+
     # 2. Outside this deployment's scope ACP has no standing to refuse anything.
     scope = policy_scope()
     claim_owner = (claim.get("owner") or owner_from_remote(claim.get("remote_url"))).lower()
     if record is None and scope is not None and claim_owner and claim_owner not in scope:
+        if action in metering.REPO_ACTIONS:
+            # Out of scope means ACP declines to refuse ordinary work -- not that it pays for builds.
+            trace["class"] = "metered"
+            return finish("DENY", "REPOSITORY_NOT_GOVERNED",
+                          "This repository is outside the owners this ACP deployment governs, so ACP cannot "
+                          "authorize a paid build or a production merge for it.")
         return finish("ALLOW", "OUT_OF_POLICY_SCOPE",
                       "This repository is outside the owners this ACP deployment governs.",
                       policy_effect="NOT_GOVERNED")
@@ -2306,7 +2543,9 @@ def authorize(request, verifier=None, admin=False, now=None):
                           "different client. Recorded, not judged: agent identity carries no authority.")
 
     protected_actions = set(policy.get("protected_actions") or DEFAULT_PROTECTED_ACTIONS)
-    if action in protected_actions or action == RECOVERY_OPERATION:
+    if action in metering.REPO_ACTIONS:
+        trace["class"] = "metered"
+    elif action in protected_actions or action == RECOVERY_OPERATION:
         trace["class"] = "protected"
     elif action in LOCAL_ACTIONS:
         trace["class"] = "local"
@@ -2506,6 +2745,14 @@ def authorize(request, verifier=None, admin=False, now=None):
         return finish("DENY", "POLICY_INVALID", f"The governing policy did not verify: {record['error']}.")
     if record["state"] != "ACTIVE":
         return finish("DENY", "POLICY_INACTIVE", "The governing policy is not active.")
+    if trace["class"] == "metered":
+        if action not in protected_actions:
+            return finish("DENY", "METERED_ACTION_NOT_ENABLED",
+                          f"The policy governing this repository does not list {action}, so ACP does not "
+                          "meter it here and cannot authorize it.")
+        if not caller_covers(caller, policy["repository"]["owner"], policy["repository"]["name"]):
+            return finish("DENY", "CALLER_NOT_PERMITTED",
+                          "This caller's credential is not issued for this repository.")
 
     signals = sorted(set(context.get("signals") or []) & MATERIAL_SIGNALS)
     canonical = policy["repository"].get("canonical_remote")
@@ -2677,6 +2924,20 @@ def authorize(request, verifier=None, admin=False, now=None):
                       authorizing_principal=grant.get("principal"),
                       capability=body, capability_token=token,
                       authorized_action={"action": action, **scope_of})
+
+    if trace["class"] == "metered":
+        if provider_evidence is None:
+            seen = {"available": False, "kind": "UNAVAILABLE", "provider": "providers",
+                    "detail": "this deployment has no provider evidence source"}
+        else:
+            try:
+                seen = provider_evidence(action, policy, claim, context) or {}
+            except Exception as exc:                         # unavailable evidence, never permission
+                seen = {"available": False, "kind": "UNAVAILABLE", "provider": "providers",
+                        "detail": type(exc).__name__}
+        return metered_finish(metering.evaluate_repo(action, policy, claim, context, caller,
+                                                     budget_policy()["limits"], seen, ledger, now,
+                                                     trace["request_id"]))
 
     if action == "database.migrate":
         scope_of = {name: context[name] for name in
@@ -4364,6 +4625,146 @@ def github_evidence(claim, context=None, policy=None):
 
 # ---------------------------------------------------------------------- server
 
+# ------------------------------------------------------------ metering routes
+
+_POSTURE = {}                 # file backend only; PostgreSQL keeps snapshots in provider_snapshots
+POSTURE_REFRESH_SECONDS = 600
+GRANT_FIELDS = {"action", "owner", "name", "uses", "expires_minutes", "reason", "request_id"}
+
+
+def budget_view(now=None):
+    """Today's counted use against every limit, for agents planning a batch and for the owner."""
+    now = time.time() if now is None else now
+    ledger, budget = store_ledger(), budget_policy()
+    day = metering.budget_day(now)
+    view = {"day": day, "budget_policy_id": budget["budget_policy_id"], "version": budget["version"],
+            "error": budget["error"], "limits": budget["limits"], "ledger": ledger is not None}
+    if ledger is not None:
+        rows = [r for r in ledger.ledger_day(day) if r["counted"]]
+        per_action = {}
+        for row in rows:
+            entry = per_action.setdefault(row["action"], {"total": 0, "by_provider": {}, "by_repository": {}})
+            entry["total"] += 1
+            entry["by_provider"][row["provider"]] = entry["by_provider"].get(row["provider"], 0) + 1
+            if row["resource_owner"]:
+                slug = f"{row['resource_owner']}/{row['resource_name']}"
+                entry["by_repository"][slug] = entry["by_repository"].get(slug, 0) + 1
+        view["used"] = per_action
+    return view
+
+
+def issue_grant(body, now=None):
+    """An owner grant past a budget or for production: one action, optional repository, bounded uses and time."""
+    now = time.time() if now is None else now
+    if not isinstance(body, dict) or set(body) - GRANT_FIELDS:
+        raise TargetError(400, "INVALID_REQUEST", "A grant is {action, owner?, name?, uses, expires_minutes, reason, "
+                          "request_id}.", remedy="Send only those fields.")
+    action = body.get("action")
+    if action not in metering.METERED_ACTIONS:
+        raise TargetError(400, "INVALID_REQUEST", "action must be a metered action.",
+                          remedy="One of: " + ", ".join(metering.METERED_ACTIONS))
+    owner, name = body.get("owner"), body.get("name")
+    if bool(owner) != bool(name) or (owner and not REPO_PATTERN_RE.match(f"{owner}/{name}")):
+        raise TargetError(400, "INVALID_REQUEST", "owner and name come together, as a real repository.",
+                          remedy="Omit both for a deployment-wide grant.")
+    uses, minutes = body.get("uses"), body.get("expires_minutes")
+    if not isinstance(uses, int) or isinstance(uses, bool) or not 1 <= uses <= 50:
+        raise TargetError(400, "INVALID_REQUEST", "uses must be 1..50.", field="uses")
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or not 5 <= minutes <= 1440:
+        raise TargetError(400, "INVALID_REQUEST", "expires_minutes must be 5..1440.", field="expires_minutes")
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not 8 <= len(reason.strip()) <= 512:
+        raise TargetError(400, "INVALID_REQUEST", "reason must be 8..512 characters.", field="reason")
+    request_id = body.get("request_id")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{8,64}", request_id):
+        raise TargetError(400, "INVALID_REQUEST", "request_id must be 8..64 characters of [A-Za-z0-9._-].",
+                          remedy="It makes a retried grant request issue one grant, not two.", field="request_id")
+    ledger = store_ledger()
+    if ledger is None:
+        raise TargetError(503, "BUDGET_LEDGER_UNAVAILABLE", "Grants need the shared PostgreSQL ledger.",
+                          remedy="Send the grant to the ACP endpoint that runs on PostgreSQL.")
+    grant_id = "g-" + metering.record_key("grant", action, (owner or "").lower(), (name or "").lower(),
+                                          request_id)[:16]
+    ledger.grant_issue({"grant_id": grant_id, "action": action,
+                        "resource_owner": (owner or "").lower() or None, "resource_name": (name or "").lower() or None,
+                        "uses_total": uses, "uses_left": uses, "issued_at": now, "expires_at": now + minutes * 60,
+                        "issued_by": "owner", "reason": reason.strip()})
+    emit_event("BUDGET_GRANT_ISSUED", now=now, action=action,
+               resource_id=f"{owner}/{name}".lower() if owner else None,
+               detail=f"{uses} use(s) for {minutes} minutes: {reason.strip()}")
+    return {"grant_id": grant_id, "action": action, "repository": f"{owner}/{name}" if owner else None,
+            "uses": uses, "expires_at": iso(now + minutes * 60)}
+
+
+def release_lease(body, now=None):
+    now = time.time() if now is None else now
+    if not isinstance(body, dict) or sorted(body) != ["lease_id"] or not HEX64.match(str(body["lease_id"])):
+        raise TargetError(400, "INVALID_REQUEST", "Send {\"lease_id\": \"<64 hex>\"} from the heavy_subagent ALLOW.",
+                          remedy="The hook sends it when the subagent stops.")
+    ledger = store_ledger()
+    if ledger is None:
+        raise TargetError(503, "BUDGET_LEDGER_UNAVAILABLE", "Leases live in the shared PostgreSQL ledger.")
+    return {"released": ledger.lease_release(body["lease_id"], now)}
+
+
+def _governed_policies():
+    registry = policy_registry()
+    return [record["policy"] for record in registry["policies"].values() if record["state"] == "ACTIVE"]
+
+
+def refresh_posture(now=None):
+    """Read every governed repository's providers once, read-only, and keep the snapshots."""
+    now = time.time() if now is None else now
+    ledger = store_ledger()
+    refreshed, skipped = [], []
+    for policy in _governed_policies():
+        slug = f"{policy['repository']['owner']}/{policy['repository']['name']}".lower()
+        latest = ledger.snapshot_latest("github_actions", slug)[1] if ledger is not None \
+            else (_POSTURE.get(slug) or {}).get("at")
+        if latest and now - latest < POSTURE_REFRESH_SECONDS:
+            skipped.append(slug)
+            continue
+        snapshot = providers.posture_snapshot(policy, lambda owner: owner_token(owner)[0], now)
+        if ledger is not None:
+            for provider in ("vercel", "railway", "github_actions"):
+                part = {"schema_version": snapshot["schema_version"], "repository": snapshot["repository"],
+                        "fetched_at": snapshot["fetched_at"], provider: snapshot[provider],
+                        "errors": [e for e in snapshot["errors"] if e["provider"] == provider]}
+                ledger.snapshot_put(provider, slug, providers.digest(part), part, now)
+        else:
+            _POSTURE[slug] = {"at": now, "snapshot": snapshot}
+        refreshed.append(slug)
+    return {"refreshed": refreshed, "skipped_recent": skipped,
+            "remedy": "Snapshots refresh at most every 10 minutes per repository." if skipped else None}
+
+
+def posture_view(now=None):
+    now = time.time() if now is None else now
+    ledger = store_ledger()
+    day = metering.budget_day(now)
+    snapshots = []
+    for policy in _governed_policies():
+        slug = f"{policy['repository']['owner']}/{policy['repository']['name']}".lower()
+        if ledger is not None:
+            merged = {"repository": slug, "vercel": [], "railway": None, "github_actions": None, "errors": []}
+            for provider in ("vercel", "railway", "github_actions"):
+                body = ledger.snapshot_latest(provider, slug)[0]
+                if body:
+                    merged[provider] = body.get(provider)
+                    merged["fetched_at"] = body.get("fetched_at")
+                    merged["errors"].extend(body.get("errors") or [])
+            if merged.get("fetched_at"):
+                snapshots.append(merged)
+        elif slug in _POSTURE:
+            snapshots.append(_POSTURE[slug]["snapshot"])
+    rows = ledger.ledger_day(day) if ledger is not None else []
+    budget = budget_policy()
+    body = posture.report(snapshots, rows, day, {k: budget[k] for k in ("budget_policy_id", "version", "error")})
+    if not snapshots:
+        body["remedy"] = "No snapshots yet: POST /internal/posture/refresh (owner or coordinator credential)."
+    return body
+
+
 ENDPOINTS = {
     "GET /health": "liveness; unauthenticated",
     "GET /notice?owner=&name=": "is this resource governed, and are controlled operations permitted; "
@@ -4390,6 +4791,11 @@ ENDPOINTS = {
     "GET /internal/security/incidents": "incidents, newest first (admin)",
     "GET /internal/security/incidents/<id>": "one incident with its full timeline (admin)",
     "GET /internal/security/audit-chain": "verify the tamper-evident audit chain (admin)",
+    "GET /internal/budget": "today's metered use against every limit",
+    "POST /internal/budget/grant": "issue an owner grant past a budget or for production (administrative credential)",
+    "POST /internal/subagent/release": "release a heavy_subagent lease when the subagent stops",
+    "GET /internal/posture": "every governed repository's build behaviour and risky settings, ranked, with fixes",
+    "POST /internal/posture/refresh": "re-read providers read-only (owner or coordinator credential)",
 }
 
 
@@ -4506,6 +4912,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return project_context(first("owner"), first("project"))
         if route == "/internal/client-status":
             return client_status(first("version"), first("sha256"))
+        if route == "/internal/budget":
+            return budget_view()
+        if route == "/internal/posture":
+            return posture_view()
         if route == "/internal/policy":
             registry = policy_registry()
             if registry["error"]:
@@ -4562,7 +4972,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise TargetError(404, "NOT_FOUND", f"No route {route}.", endpoints=ENDPOINTS)
         if route in ("/internal/authorize", "/internal/recover", "/internal/recovery/complete",
                      "/internal/verify-capability", "/internal/report",
-                     "/internal/integrity/snapshot"):
+                     "/internal/integrity/snapshot", "/internal/subagent/release", "/internal/budget/grant",
+                     "/internal/posture/refresh"):
             raise TargetError(405, "METHOD_NOT_ALLOWED", f"{route} is a POST.",
                               remedy="POST /internal/authorize with Content-Type: application/json and a body of "
                                      "{\"action\": ..., \"repository_claim\": {...}, \"context\": {...}}.")
@@ -4584,7 +4995,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if route == "/internal/authorize":
                 self.reply(200, authorize(self.json_body(), verifier=github_evidence,
-                                          admin=admin_authorized(self)))
+                                          admin=admin_authorized(self), caller=caller_for(self),
+                                          provider_evidence=provider_evidence))
+                return
+            if route == "/internal/subagent/release":
+                self.reply(200, release_lease(self.json_body()))
+                return
+            if route == "/internal/budget/grant":
+                if not admin_authorized(self):
+                    raise TargetError(403, "ADMIN_REQUIRED", "Grants need the administrative credential.",
+                                      remedy="The owner runs scripts/policy-admin.py grant ... --apply.")
+                self.reply(200, issue_grant(self.json_body()))
+                return
+            if route == "/internal/posture/refresh":
+                if (caller_for(self) or {}).get("kind") not in ("owner", "coordinator"):
+                    raise TargetError(403, "COORDINATOR_REQUIRED",
+                                      "Refreshing provider evidence needs the owner's or a coordinator's credential.",
+                                      remedy="Read GET /internal/posture instead, or ask your coordinator to refresh.")
+                self.discard_body()
+                self.reply(200, refresh_posture())
                 return
             if route == "/internal/report":
                 self.reply(200, report_event(self.json_body(event=True)))

@@ -10,6 +10,8 @@
   "default_permissions": {
     "metadata": "read",
     "contents": "read",
+    "actions": "read",
+    "checks": "read",
     "issues": "read",
     "pull_requests": "read",
     "organization_projects": "read"

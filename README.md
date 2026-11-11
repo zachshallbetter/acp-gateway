@@ -214,8 +214,11 @@ action and signed capability. The fields are bounded to 256, 256, 128,
 }
 ```
 
-Read `decision` and `reason`; `detail` is for a human. An `ALLOW` carries
-`authorized_action` and permits **only** that exact action, ref and SHA pair.
+Read `decision` and `reason`; `detail` is for a human. Every refusal also
+carries `remedy`: the next step the caller can take itself (fetch and rebase,
+bound a workflow, use a light model, point origin at the canonical remote), or
+the one owner action that unblocks it. An `ALLOW` carries `authorized_action`
+and permits **only** that exact action, ref and SHA pair.
 
 | `decision` | `code` | Meaning |
 |---|---|---|
@@ -242,7 +245,12 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `RECOVERY_AUTHORIZATION_REQUIRED`, `RECOVERY_AUTHORIZED`,
 `CIRCUMVENTION_SUSPECTED`, `POLICY_MODIFICATION_FORBIDDEN`,
 `CREDENTIAL_MODIFICATION_FORBIDDEN`, `ADMINISTRATIVELY_AUTHORIZED`,
-`VERIFIED_AND_PERMITTED`.
+`VERIFIED_AND_PERMITTED`. Metered actions add `WITHIN_BUDGET`, `GRANT_APPLIED`,
+`NO_HOSTED_BUILD`, `BUDGET_EXCEEDED`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
+`SUBAGENT_LIMIT_REACHED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
+`CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
+`PROVIDER_RESPONSE_DIVERGED`, `BUDGET_LEDGER_UNAVAILABLE` and
+`BUDGET_POLICY_UNAVAILABLE`.
 
 ### Repository trust
 
@@ -277,6 +285,75 @@ change ACP itself and are authorized only by the separate
 `ACP_POLICY_ADMIN_TOKEN` (sent as `X-ACP-Admin-Authorization: Bearer …`) — the
 gateway bearer every agent holds does not double as permission to rewrite the
 policy that binds it.
+
+### Metered actions: what costs money or reaches production
+
+Five actions are decided against budgets instead of the owner's approval:
+
+| Action | Covers | Who may ask |
+|---|---|---|
+| `hosted_build` | a push, `vercel deploy` or `railway up` that starts a Vercel build, Railway deploy or GitHub Actions run | any caller; a production branch needs a coordinator |
+| `production_merge` | a merge or promote that deploys production | coordinator or owner |
+| `manual_ci` | `workflow_dispatch` or a rerun | coordinator or owner |
+| `local_heavy_build` | a heavy build outside the `reg` build register | any caller, with a reason |
+| `heavy_subagent` | an opus or fable subagent | any caller, with a reason; 6 at once per session |
+
+A repository opts in by listing the first three in its policy's
+`protected_actions` and naming its providers in `metered`
+(`scripts/policy-admin.py meter`). For each request ACP:
+
+1. verifies the repository through GitHub, as for any protected action;
+2. reads provider evidence: which connected Vercel projects, Railway services
+   and workflows this exact commit would build (`vercel.json` and the
+   workflows are read at `new_sha`), and whether those workflows are bounded;
+3. refuses a workflow with no `timeout-minutes` or no concurrency group
+   (`WORKFLOW_UNBOUNDED`), naming the lines to add;
+4. counts the builds against today's limits (UTC) per repository, per provider
+   and deployment-wide, and records each allowed action once, keyed by its
+   explicit fields (action, provider, repository, ref, commit, workflow, run);
+5. answers `ALLOW` within budget, or `AUTH_REQUIRED` past it with the exact
+   owner grant command. Asking again for the same commit is answered from the
+   record and not counted twice. A commit no provider builds is allowed and not
+   counted (`NO_HOSTED_BUILD`).
+
+Default limits, signed in `ACP_BUDGET_POLICY` (`scripts/policy-admin.py
+budget-policy`): 20 hosted builds per repository and 60 in all per day, of which
+Vercel 40, Railway 10 and Actions 30; 5 production merges per repository; 10
+manual CI runs; 6 concurrent heavy subagents per session. A policy's `metered`
+block may lower or raise a repository's own hosted-build and merge limits.
+
+The owner is asked only past a budget or for production, through a grant:
+`scripts/policy-admin.py budget-grant --action hosted_build --repo OWNER/NAME
+--uses 1 --expires 2h --reason "…" --apply`. A grant is bounded in uses and
+time and takes effect at once, without a deployment.
+
+**Fail closed.** No budget policy, unreadable provider evidence, a provider
+response that does not match the expected fields, an unknown action, an
+ungoverned repository, or a deployment without the shared PostgreSQL ledger
+(file storage) all refuse the paid build, each with a remedy. Local work is
+never blocked outright: a refused heavy local build points at `reg build`, a
+refused heavy subagent at sonnet or haiku.
+
+**Caller identity.** The shared bearer cannot tell a lane from a coordinator.
+`ACP_CALLERS` (signed; `scripts/policy-admin.py caller`) issues each lane and
+coordinator its own token, scoped to repositories; ACP stores only the token's
+SHA-256. The admin credential identifies the owner. Until a coordinator has its
+own credential, the shared bearer is treated as a lane: production merges,
+pushes to production branches and manual CI need an owner grant.
+
+**Posture.** `GET /internal/posture` lists every governed repository's Vercel,
+Railway and Actions build behaviour, today's budget use, and the risky settings
+ranked, each with the exact fix and who applies it. Billing, spend caps, build
+machines and concurrency are the owner's to change; ACP reports them and changes
+nothing. `POST /internal/posture/refresh` (owner or coordinator) re-reads the
+providers, at most every 10 minutes per repository;
+`scripts/posture-report.py --refresh` renders the page. Provider deployment
+counts above what ACP authorized appear as `UNRECORDED_BUILDS`.
+
+Provider reads go only to `api.github.com`, `api.vercel.com` and
+`backboard.railway.com`, with an 8-second timeout, a 1 MiB response cap and no
+redirects. Railway queries are fixed and never read variables. The hook client
+contract is in [docs/METERED_ACTIONS.md](docs/METERED_ACTIONS.md).
 
 ### Recovery is separate from containment
 
@@ -1140,6 +1217,11 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_SNAPSHOT_MAX_BODY_BYTES` | no | Body cap for an integrity snapshot. Default `131072`. |
 | `ACP_PATH_CASE_SENSITIVE` | no | `1` to compare protected paths case-sensitively. Default: case-insensitive matching, with the difference reported. |
 | `ACP_BOARD_READ_GATE` | no | `locked` (default), `contained`, or `off`. Only has an effect once a policy declares `boards`. |
+| `ACP_BUDGET_POLICY` | for metered actions | Signed deployment-wide limits. Without it every metered action is refused (`BUDGET_POLICY_UNAVAILABLE`). |
+| `ACP_CALLERS` | no | Signed per-caller credentials: lane and coordinator token hashes, each scoped to repositories. Unset: every caller is the shared bearer. |
+| `ACP_VERCEL_TOKEN` | for Vercel evidence | Vercel token ACP reads projects and deployments with. Only GETs are sent. |
+| `ACP_VERCEL_TEAM_ID` | with a team | Team the Vercel projects belong to. |
+| `ACP_RAILWAY_TOKEN` | for Railway evidence | Railway token for the fixed read-only project and usage-limit queries. |
 
 `configured()` is `False` (and `/internal/app-status`, `/internal/app-probe`
 report it) until the App ID and private key are set — `/health` still returns
@@ -1260,6 +1342,8 @@ python3 test_gateway_board_gate.py
 python3 test_register_policy.py
 python3 test_github_app.py
 python3 test_vercel_adapter.py
+python3 test_gateway_metering.py
+python3 test_providers.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials
@@ -1273,7 +1357,9 @@ ACP_TEST_DATABASE_URL=postgresql://127.0.0.1:5432/acp_runtime_test .venv/bin/pyt
 ```
 
 Create a disposable, empty local database first. This check applies this release's
-migrations, exercises rollback and concurrent capability consumption, reconnects
+migrations, exercises rollback, concurrent capability consumption, the metered-action
+ledger, grants and subagent leases (including two requests racing for the last
+budget slot, of which exactly one commits), reconnects
 to persisted containment and audit state, and temporarily removes schema history
 to prove readiness fails closed. It rejects non-loopback and non-test targets.
 It does not connect to Neon or prove production failover or backup recovery.
