@@ -436,6 +436,29 @@ def test_grant_route_needs_the_admin_credential():
             assert status == 403 and body["error"] == "ADMIN_REQUIRED"
 
 
+def test_posture_refresh_works_in_short_stalest_first_batches():
+    policies = [policy(policy_id=f"repo{i}", repository={"owner": OWNER, "name": f"Repo{i}",
+                                                          "canonical_remote": f"https://github.com/{OWNER}/Repo{i}.git"})
+                for i in range(5)]
+    with env(ACP_POLICY=json.dumps([signed(p) for p in policies])):
+        fresh()
+        gateway._POSTURE.clear()
+        seen = []
+        fake = lambda pol, token_for, now: (seen.append(pol["repository"]["name"]) or
+                                            {"schema_version": 1, "repository": pol["repository"]["name"],
+                                             "fetched_at": "x", "vercel": [], "railway": None,
+                                             "github_actions": {}, "errors": []})
+        with patch.object(gateway.providers, "posture_snapshot", fake), \
+                patch.object(gateway, "store_ledger", lambda: None):
+            first = gateway.refresh_posture(now=NOW)
+            assert len(first["refreshed"]) == gateway.POSTURE_REFRESH_BATCH and len(first["remaining"]) == 2
+            second = gateway.refresh_posture(now=NOW + 1)
+            assert len(second["refreshed"]) == 2 and second["remaining"] == []
+            third = gateway.refresh_posture(now=NOW + 2)
+            assert third["refreshed"] == [] and len(third["skipped_recent"]) == 5
+        assert sorted(seen) == [f"Repo{i}" for i in range(5)]
+
+
 def test_limits_validation_is_exact():
     assert metering.validated_limits({})["hosted_build"]["per_day_total"] == 60
     assert metering.validated_limits({"manual_ci": {"per_day_total": None}})["manual_ci"] == {}

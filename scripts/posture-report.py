@@ -36,9 +36,13 @@ def main() -> int:
     admin = admin_module()
     bearer = admin.keychain("ACP_GATEWAY_TOKEN")
     if args.refresh:
-        result = admin.gateway_call("/internal/posture/refresh", bearer, admin.keychain("ACP_POLICY_ADMIN_TOKEN"), {})
-        print(f"refreshed {len(result['refreshed'])}, skipped {len(result['skipped_recent'])} (refreshed recently)",
-              file=sys.stderr)
+        admin_token, refreshed = admin.keychain("ACP_POLICY_ADMIN_TOKEN"), 0
+        for _ in range(50):                      # one short request per batch of repositories
+            result = admin.gateway_call("/internal/posture/refresh", bearer, admin_token, {})
+            refreshed += len(result["refreshed"])
+            if not result.get("remaining"):
+                break
+        print(f"refreshed {refreshed}, skipped {len(result['skipped_recent'])} (refreshed recently)", file=sys.stderr)
     body = admin.gateway_call("/internal/posture", bearer)
     if args.json:
         print(json.dumps(body, indent=2, sort_keys=True))

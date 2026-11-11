@@ -346,7 +346,8 @@ Railway and Actions build behaviour, today's budget use, and the risky settings
 ranked, each with the exact fix and who applies it. Billing, spend caps, build
 machines and concurrency are the owner's to change; ACP reports them and changes
 nothing. `POST /internal/posture/refresh` (owner or coordinator) re-reads the
-providers, at most every 10 minutes per repository;
+providers, at most every 10 minutes per repository and three repositories per request (it answers
+`remaining`; POST again for the next batch);
 `scripts/posture-report.py --refresh` renders the page. Provider deployment
 counts above what ACP authorized appear as `UNRECORDED_BUILDS`.
 

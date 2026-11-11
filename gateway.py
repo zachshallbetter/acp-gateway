@@ -4629,6 +4629,7 @@ def github_evidence(claim, context=None, policy=None):
 
 _POSTURE = {}                 # file backend only; PostgreSQL keeps snapshots in provider_snapshots
 POSTURE_REFRESH_SECONDS = 600
+POSTURE_REFRESH_BATCH = 3      # repositories per request: keeps each request, and its transaction, short
 GRANT_FIELDS = {"action", "owner", "name", "uses", "expires_minutes", "reason", "request_id"}
 
 
@@ -4716,14 +4717,17 @@ def refresh_posture(now=None):
     """Read every governed repository's providers once, read-only, and keep the snapshots."""
     now = time.time() if now is None else now
     ledger = store_ledger()
-    refreshed, skipped = [], []
+    refreshed, skipped, due = [], [], []
     for policy in _governed_policies():
         slug = f"{policy['repository']['owner']}/{policy['repository']['name']}".lower()
         latest = ledger.snapshot_latest("github_actions", slug)[1] if ledger is not None \
             else (_POSTURE.get(slug) or {}).get("at")
         if latest and now - latest < POSTURE_REFRESH_SECONDS:
             skipped.append(slug)
-            continue
+        else:
+            due.append((latest or 0, slug, policy))
+    due.sort(key=lambda entry: (entry[0], entry[1]))          # stalest first, then by name: deterministic
+    for _latest, slug, policy in due[:POSTURE_REFRESH_BATCH]:
         snapshot = providers.posture_snapshot(policy, lambda owner: owner_token(owner)[0], now)
         if ledger is not None:
             for provider in ("vercel", "railway", "github_actions"):
@@ -4734,8 +4738,10 @@ def refresh_posture(now=None):
         else:
             _POSTURE[slug] = {"at": now, "snapshot": snapshot}
         refreshed.append(slug)
-    return {"refreshed": refreshed, "skipped_recent": skipped,
-            "remedy": "Snapshots refresh at most every 10 minutes per repository." if skipped else None}
+    remaining = [slug for _latest, slug, _policy in due[POSTURE_REFRESH_BATCH:]]
+    return {"refreshed": refreshed, "skipped_recent": skipped, "remaining": remaining,
+            "remedy": ("POST again to refresh the next batch." if remaining else
+                       "Snapshots refresh at most every 10 minutes per repository." if skipped else None)}
 
 
 def posture_view(now=None):

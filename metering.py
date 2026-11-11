@@ -288,7 +288,8 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                            f"This {'merge' if action == 'production_merge' else 'build'} deploys production "
                            f"({branch}). Production needs the coordinator's credential or an owner grant; this "
                            f"caller is a {caller['kind']} caller.",
-                           f"Hand the merge to your coordinator, or ask the owner for a one-use grant: "
+                           f"Hand the {'merge' if action == 'production_merge' else 'push'} to your coordinator, "
+                           f"or ask the owner for a one-use grant: "
                            f"{grant_command(action, owner, name)}",
                            builds=evidence["builds"], caller_kind=caller["kind"])
 
