@@ -5,7 +5,7 @@
     .venv/bin/python scripts/policy-admin.py grant OWNER/NAME --checkout DIR [--ref REF] [--apply]
     .venv/bin/python scripts/policy-admin.py repin OWNER/NAME --checkout DIR [--ref REF] [--apply]
     .venv/bin/python scripts/policy-admin.py unregister OWNER/NAME [--apply]
-    .venv/bin/python scripts/policy-admin.py meter OWNER/NAME [--vercel PRJ ...] [--railway-project ID
+    .venv/bin/python scripts/policy-admin.py meter OWNER/NAME [--vercel PRJ ... [--vercel-team TEAM]] [--railway-project ID
                      [--railway-service ID ...]] [--production-branch B] [--protect ACTION] [--apply]
     .venv/bin/python scripts/policy-admin.py budget-policy [--limits FILE] [--apply]
     .venv/bin/python scripts/policy-admin.py budget-grant --action A [--repo OWNER/NAME] --uses N
@@ -418,7 +418,7 @@ def cmd_meter(args) -> int:
         raise SystemExit(f"error: no production policy governs {owner}/{name}; register it first")
     providers = {}
     if args.vercel:
-        providers["vercel"] = {"project_ids": args.vercel}
+        providers["vercel"] = {"project_ids": args.vercel, **({"team_id": args.vercel_team} if args.vercel_team else {})}
     if args.railway_project:
         providers["railway"] = {"project_id": args.railway_project, "service_ids": args.railway_service}
     updated_policy = {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id")}
@@ -547,6 +547,7 @@ def main() -> int:
     meter = sub.add_parser("meter", help="turn on metered actions for a governed repository")
     meter.add_argument("repository", metavar="OWNER/NAME")
     meter.add_argument("--vercel", action="append", default=[], metavar="PROJECT_ID")
+    meter.add_argument("--vercel-team", metavar="TEAM_ID", help="the Vercel team the projects belong to")
     meter.add_argument("--railway-project")
     meter.add_argument("--railway-service", action="append", default=[])
     meter.add_argument("--production-branch", action="append", default=[])

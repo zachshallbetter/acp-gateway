@@ -130,19 +130,20 @@ def _day(epoch):
 MACHINE_TYPES = ("14cpu-28gb", "basic", "enhanced", "standard", "turbo")
 
 
-def _vercel_url(path, **query):
-    team = os.getenv("ACP_VERCEL_TEAM_ID", "").strip()
+def _vercel_url(path, team_id=None, **query):
+    # A project lives in one team; the policy names it. ACP_VERCEL_TEAM_ID is only the default.
+    team = team_id or os.getenv("ACP_VERCEL_TEAM_ID", "").strip()
     if team:
         query["teamId"] = team
     return "https://api.vercel.com" + path + ("?" + urlencode(query) if query else "")
 
 
-def vercel_project(project_id, now=None, fetch=_fetch):
+def vercel_project(project_id, now=None, fetch=_fetch, team_id=None):
     """The project's git link and build settings (GET /v9/projects/{idOrName})."""
     now = time.time() if now is None else now
 
     def load():
-        raw = fetch("vercel", _vercel_url("/v9/projects/" + quote(project_id, safe="")),
+        raw = fetch("vercel", _vercel_url("/v9/projects/" + quote(project_id, safe=""), team_id),
                     os.getenv("ACP_VERCEL_TOKEN", "").strip())
         _need("vercel", raw, "id", str, "project")
         _need("vercel", raw, "name", str, "project")
@@ -181,10 +182,10 @@ def vercel_project(project_id, now=None, fetch=_fetch):
                 "elastic_concurrency": _need("vercel", resource, "elasticConcurrencyEnabled", bool,
                                              "project.resourceConfig", optional=True)}
 
-    return _cached(_CACHE, ("vercel-project", project_id), SETTINGS_TTL, now, load)
+    return _cached(_CACHE, ("vercel-project", team_id, project_id), SETTINGS_TTL, now, load)
 
 
-def vercel_deployments_per_day(project_id, days=7, now=None, fetch=_fetch):
+def vercel_deployments_per_day(project_id, days=7, now=None, fetch=_fetch, team_id=None):
     """Deployment counts per UTC day, newest first (GET /v7/deployments)."""
     now = time.time() if now is None else now
     since = int((now - days * 86400) * 1000)
@@ -193,7 +194,8 @@ def vercel_deployments_per_day(project_id, days=7, now=None, fetch=_fetch):
         query = {"projectId": project_id, "since": since, "limit": 100}
         if until:
             query["until"] = until
-        raw = fetch("vercel", _vercel_url("/v7/deployments", **query), os.getenv("ACP_VERCEL_TOKEN", "").strip())
+        raw = fetch("vercel", _vercel_url("/v7/deployments", team_id, **query),
+                    os.getenv("ACP_VERCEL_TOKEN", "").strip())
         rows = _need("vercel", raw, "deployments", list, "deployments")
         for row in rows:
             created = _need("vercel", row, "created", (int, float), "deployments[]")
@@ -566,7 +568,7 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
             vercel = providers["vercel"]
             config_path = "vercel.json"
             for project_id in vercel.get("project_ids", []):
-                project = vercel_project(project_id, now, fetch)
+                project = vercel_project(project_id, now, fetch, vercel.get("team_id"))
                 if project.get("root_directory"):
                     config_path = project["root_directory"].strip("/") + "/vercel.json"
                 config = github_json_file(owner, name, config_path, sha, token_for, fetch)
@@ -616,11 +618,12 @@ def posture_snapshot(policy, token_for, now=None, fetch=_fetch, head_sha=None):
             return None
 
     for project_id in (providers.get("vercel") or {}).get("project_ids", []):
-        project = guarded("vercel", lambda: vercel_project(project_id, now, fetch))
+        team_id = (providers.get("vercel") or {}).get("team_id")
+        project = guarded("vercel", lambda: vercel_project(project_id, now, fetch, team_id))
         if project:
             project = dict(project)
             project["deployments_per_day"] = guarded(
-                "vercel", lambda: vercel_deployments_per_day(project_id, now=now, fetch=fetch)) or {}
+                "vercel", lambda: vercel_deployments_per_day(project_id, now=now, fetch=fetch, team_id=team_id)) or {}
             project["vercel_json"] = guarded("github_actions", lambda: github_json_file(
                 owner, name, (project.get("root_directory") or "").strip("/") + "/vercel.json"
                 if project.get("root_directory") else "vercel.json", head, token_for, fetch))

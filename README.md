@@ -1220,7 +1220,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_BUDGET_POLICY` | for metered actions | Signed deployment-wide limits. Without it every metered action is refused (`BUDGET_POLICY_UNAVAILABLE`). |
 | `ACP_CALLERS` | no | Signed per-caller credentials: lane and coordinator token hashes, each scoped to repositories. Unset: every caller is the shared bearer. |
 | `ACP_VERCEL_TOKEN` | for Vercel evidence | Vercel token ACP reads projects and deployments with. Only GETs are sent. |
-| `ACP_VERCEL_TEAM_ID` | with a team | Team the Vercel projects belong to. |
+| `ACP_VERCEL_TEAM_ID` | no | Default Vercel team. A policy's `metered.providers.vercel.team_id` names the team its projects belong to and takes precedence, so projects in several teams can be metered. The token must reach every such team. |
 | `ACP_RAILWAY_TOKEN` | for Railway evidence | Railway token for the fixed read-only project and usage-limit queries. |
 
 `configured()` is `False` (and `/internal/app-status`, `/internal/app-probe`

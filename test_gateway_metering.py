@@ -454,7 +454,10 @@ def test_record_key_is_deterministic_and_field_ordered():
 
 
 def test_policy_metered_block_is_validated():
+    assert metering.validated_metered({"providers": {"vercel": {"project_ids": ["prj_a"], "team_id": "team_x1"}}},
+                                      "p")["providers"]["vercel"]["team_id"] == "team_x1"
     for bad in ({"providers": {"netlify": {}}}, {"hosted_build": {"per_day": "many"}}, {"extra": 1},
+                {"providers": {"vercel": {"project_ids": ["prj_a"], "team_id": "not a team"}}},
                 {"providers": {"railway": {"project_id": "not-a-uuid"}}}):
         try:
             metering.validated_metered(bad, "p")

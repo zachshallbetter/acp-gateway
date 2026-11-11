@@ -136,12 +136,15 @@ def validated_metered(raw, policy_id):
         raise ValueError(f"{policy_id}: metered.providers may name vercel and railway only")
     clean = {}
     if "vercel" in providers:
-        ids = (providers["vercel"] or {}).get("project_ids") if isinstance(providers["vercel"], dict) else None
+        block = providers["vercel"] if isinstance(providers["vercel"], dict) else {}
+        ids, team = block.get("project_ids"), block.get("team_id")
         if not isinstance(ids, list) or not ids or len(ids) > 10 or \
                 not all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", i) for i in ids) or \
-                set(providers["vercel"]) - {"project_ids"}:
-            raise ValueError(f"{policy_id}: metered.providers.vercel must be {{\"project_ids\": [...]}}")
-        clean["vercel"] = {"project_ids": ids}
+                set(block) - {"project_ids", "team_id"} or \
+                (team is not None and not (isinstance(team, str) and re.fullmatch(r"team_[A-Za-z0-9]{1,64}", team))):
+            raise ValueError(f"{policy_id}: metered.providers.vercel must be "
+                             f"{{\"project_ids\": [...], \"team_id\": \"team_...\" (optional)}}")
+        clean["vercel"] = {"project_ids": ids, **({"team_id": team} if team else {})}
     if "railway" in providers:
         block = providers["railway"]
         if not isinstance(block, dict) or set(block) - {"project_id", "service_ids"} or \

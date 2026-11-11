@@ -77,11 +77,11 @@ deploys.
    the same release if it shares the database.
 2. **Budget policy.** `scripts/policy-admin.py budget-policy --apply` signs the default limits into
    `ACP_BUDGET_POLICY`.
-3. **Provider credentials.** Set `ACP_VERCEL_TOKEN`, `ACP_VERCEL_TEAM_ID` and `ACP_RAILWAY_TOKEN` on the
-   deployment. The GitHub App needs read access to Actions and Checks for run counts. Organization
+3. **Provider credentials.** Set `ACP_VERCEL_TOKEN` (scoped to every team that holds a metered project),
+   `ACP_RAILWAY_TOKEN` and, optionally, a default `ACP_VERCEL_TEAM_ID` on the deployment. The GitHub App needs read access to Actions and Checks for run counts. Organization
    billing reads need the organization's Administration (read) permission. Personal-account Actions
    spend is not readable through an App, so the posture report lists it as unreadable.
-4. **Meter repositories.** `scripts/policy-admin.py meter OWNER/NAME --vercel <project id>
+4. **Meter repositories.** `scripts/policy-admin.py meter OWNER/NAME --vercel <project id> [--vercel-team <team id>]
    [--railway-project <id> --railway-service <id>] --apply` for each governed repository.
 5. **Callers.** `scripts/policy-admin.py caller <id> --kind coordinator --repo OWNER/* --apply` for each
    coordinator, and `--kind lane` for each lane. Until then the shared bearer counts as a lane.

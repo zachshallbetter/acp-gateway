@@ -156,6 +156,23 @@ def test_vercel_project_is_normalised():
         assert project["build_machine_selection"] == "elastic" and project["elastic_concurrency"] is True
 
 
+def test_each_policy_reads_vercel_in_its_own_team():
+    with creds(), patch.dict(os.environ, {"ACP_VERCEL_TEAM_ID": "team_default"}):
+        fresh()
+        fake = Fake({**github_routes(), "/v9/projects/": VERCEL_PROJECT, "/v7/deployments": VERCEL_DEPLOYMENTS})
+        policy = {"repository": POLICY["repository"],
+                  "metered": {"providers": {"vercel": {"project_ids": ["prj_widget"], "team_id": "team_other"}}}}
+        providers.build_evidence("hosted_build", policy, CLAIM,
+                                 {"trigger": "push", "ref": "refs/heads/feature", "new_sha": SHA}, token_for, NOW, fake)
+        providers.posture_snapshot(policy, token_for, NOW, fake)
+        vercel_urls = [url for provider, url, _ in fake.calls if provider == "vercel"]
+        assert vercel_urls and all("teamId=team_other" in url for url in vercel_urls), vercel_urls
+        fresh()
+        fake = Fake({"/v9/projects/": VERCEL_PROJECT})
+        providers.vercel_project("prj_widget", NOW, fake)
+        assert "teamId=team_default" in fake.calls[0][1]
+
+
 def test_vercel_divergence_is_reported_not_guessed():
     with creds():
         for broken in ({**VERCEL_PROJECT, "gitProviderOptions": {"createDeployments": "sometimes"}},
