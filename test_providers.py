@@ -324,6 +324,16 @@ def providers_ignore_semantics(fix):
     return '"$VERCEL_ENV" = "production" ]; then exit 1; else exit 0' in fix
 
 
+def test_railway_triggers_on_one_branch_are_one_finding():
+    snapshot = {"repository": "Example-Org/Widget", "vercel": [], "github_actions": {"spend": {"readable": True}},
+                "railway": {"name": "widget", "triggers": [
+                    {"repository": "Example-Org/Widget", "branch": "main", "service_id": "a", "environment_id": "e"},
+                    {"repository": "Example-Org/Widget", "branch": "main", "service_id": "b", "environment_id": "e"}],
+                    "usage_limit": {"hard_limit": 50}}}
+    found = [f for f in posture.findings(snapshot, [], DAY) if f["code"] == "RAILWAY_DEPLOYS_ON_PUSH"]
+    assert len(found) == 1 and "2 service environments" in found[0]["problem"]
+
+
 def test_recorded_builds_clear_the_unrecorded_finding():
     with creds():
         fresh()

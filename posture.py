@@ -72,10 +72,17 @@ def findings(snapshot, ledger_rows=None, day=None):
 
     railway = snapshot.get("railway")
     if railway:
+        watched = {}
         for trigger in railway.get("triggers") or []:
+            if trigger["repository"].lower() != repo.lower():
+                continue                             # another repository's trigger in a shared project
+            key = (trigger["repository"], trigger["branch"])
+            watched[key] = watched.get(key, 0) + 1
+        for (repository, branch), services in sorted(watched.items()):
             out.append(_finding(
                 "medium", "RAILWAY_DEPLOYS_ON_PUSH", repo, f"railway:{railway['name']}",
-                f"Railway deploys every push to {trigger['branch']} of {trigger['repository']}.",
+                f"Railway deploys every push to {branch} of {repository}"
+                + (f" ({services} service environments)." if services > 1 else "."),
                 "Keep it only if this branch is production. Otherwise Railway dashboard: Service > Settings > "
                 "Source: disconnect the branch, and deploy with railway up under an ACP hosted_build decision.",
                 owner_only=True))
