@@ -6,7 +6,7 @@
     .venv/bin/python scripts/policy-admin.py repin OWNER/NAME --checkout DIR [--ref REF] [--apply]
     .venv/bin/python scripts/policy-admin.py unregister OWNER/NAME [--apply]
     .venv/bin/python scripts/policy-admin.py meter OWNER/NAME [--vercel PRJ ...] [--railway-project ID
-                     [--railway-service ID ...]] [--production-branch B] [--apply]
+                     [--railway-service ID ...]] [--production-branch B] [--protect ACTION] [--apply]
     .venv/bin/python scripts/policy-admin.py budget-policy [--limits FILE] [--apply]
     .venv/bin/python scripts/policy-admin.py budget-grant --action A [--repo OWNER/NAME] --uses N
                      --expires 2h --reason TEXT [--apply]
@@ -423,7 +423,9 @@ def cmd_meter(args) -> int:
         providers["railway"] = {"project_id": args.railway_project, "service_ids": args.railway_service}
     updated_policy = {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id")}
     actions = list(updated_policy.get("protected_actions") or rp.gateway.DEFAULT_PROTECTED_ACTIONS)
-    for action in ("hosted_build", "production_merge", "manual_ci"):
+    for action in ("hosted_build", "production_merge", "manual_ci", *args.protect):
+        if not rp.gateway.ACTION_RE.match(action):
+            raise SystemExit(f"error: {action!r} is not an action name")
         if action not in actions:
             actions.append(action)
     updated_policy.update(protected_actions=sorted(actions), version=int(policy["version"]) + 1,
@@ -548,6 +550,8 @@ def main() -> int:
     meter.add_argument("--railway-project")
     meter.add_argument("--railway-service", action="append", default=[])
     meter.add_argument("--production-branch", action="append", default=[])
+    meter.add_argument("--protect", action="append", default=[], metavar="ACTION",
+                       help="also list this action, e.g. database.migrate")
     meter.add_argument("--apply", action="store_true")
     budget = sub.add_parser("budget-policy", help="sign the deployment-wide limits")
     budget.add_argument("--limits", help="JSON file of limits overriding the defaults")
