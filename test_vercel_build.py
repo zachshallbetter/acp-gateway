@@ -67,7 +67,7 @@ class VercelBuildTests(unittest.TestCase):
     def test_production_build_fails_when_migrations_are_pending_and_writes_nothing(self):
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 1)
-        self.assertIn("pending migrations: 0001, 0002, 0003", cp.stdout)
+        self.assertIn("pending migrations: 0001, 0002, 0003, 0004", cp.stdout)
         self.assertIn("ACP-authorized", cp.stdout)
         self.assertIsNone(self.schema_rows())
 
@@ -81,16 +81,26 @@ class VercelBuildTests(unittest.TestCase):
         self.migrate()
         with psycopg.connect(self.url) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at) "
-                               "VALUES (4, %s, CURRENT_TIMESTAMP)", ("a" * 64,))
+                               "VALUES (5, %s, CURRENT_TIMESTAMP)", ("a" * 64,))
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 1)
-        self.assertIn("versions this release does not ship: 0004", cp.stdout)
-        self.assertEqual(self.schema_rows(), 4)
+        self.assertIn("versions this release does not ship: 0005", cp.stdout)
+        self.assertEqual(self.schema_rows(), 5)
+
+    def test_production_build_runs_on_a_database_ahead_by_additive_migrations(self):
+        self.migrate()
+        with psycopg.connect(self.url) as connection:
+            connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
+                               "VALUES (5, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+        cp = self.build("production", self.url)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn('"ahead_additive_versions": ["0005"]', cp.stdout)
+        self.assertEqual(self.schema_rows(), 5)
 
     def test_preview_build_warns_and_never_writes(self):
         cp = self.build("preview", self.url)
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("warning: the Preview database is pending migrations: 0001, 0002, 0003", cp.stdout)
+        self.assertIn("warning: the Preview database is pending migrations: 0001, 0002, 0003, 0004", cp.stdout)
         self.assertIn("nothing was written", cp.stdout)
         self.assertIsNone(self.schema_rows())
         no_url = self.build("preview")

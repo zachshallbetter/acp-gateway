@@ -25,29 +25,14 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from db_migrations import MigrationError, apply_migrations, migration_files
+from db_migrations import MigrationError, applied_history, apply_migrations, classify
 import postgres_store
 
 
 def check(dsn: str) -> dict:
-    available = migration_files()
     with psycopg.connect(postgres_store.secure_database_dsn(dsn), connect_timeout=5) as connection:
         connection.read_only = True
-        present = connection.execute(
-            "SELECT to_regclass('public.schema_migrations') IS NOT NULL").fetchone()[0]
-        applied = dict(connection.execute(
-            "SELECT version, trim(checksum) FROM schema_migrations ORDER BY version").fetchall()) if present else {}
-    expected = {version: checksum for version, _name, checksum, _sql in available}
-    mismatched = sorted(v for v, c in applied.items() if v in expected and c != expected[v])
-    unknown = sorted(set(applied) - set(expected))
-    pending = sorted(set(expected) - set(applied))
-    gap = bool(applied) and sorted(applied) != list(range(1, max(applied) + 1))
-    status = "conflict" if mismatched or unknown or gap else ("pending" if pending else "current")
-    return {"status": status, "applied_versions": [f"{v:04d}" for v in sorted(applied)],
-            "pending_versions": [f"{v:04d}" for v in pending],
-            "checksum_mismatch_versions": [f"{v:04d}" for v in mismatched],
-            "unknown_versions": [f"{v:04d}" for v in unknown],
-            "history_has_gap": gap}
+        return classify(applied_history(connection))
 
 
 def apply(dsn: str) -> list[int]:

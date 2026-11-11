@@ -206,6 +206,28 @@ class PostgresStoreTests(unittest.TestCase):
             self.assertEqual(body["vercel"][0]["name"], "new")
             self.assertAlmostEqual(fetched, now, delta=1)
 
+    def test_runtime_accepts_only_additive_newer_migrations(self):
+        with psycopg.connect(DSN) as connection:
+            connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
+                               "VALUES (5, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+        try:
+            postgres_store.validate_schema()             # a newer, additive migration: still runs
+            with psycopg.connect(DSN) as connection:
+                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 5")
+            with self.assertRaises(postgres_store.StorageError):
+                postgres_store.validate_schema()         # not additive: refuses
+        finally:
+            with psycopg.connect(DSN) as connection:
+                connection.execute("DELETE FROM schema_migrations WHERE version = 5")
+        postgres_store.validate_schema()
+
+    def test_applied_migration_records_whether_it_is_additive(self):
+        with psycopg.connect(DSN, row_factory=dict_row) as connection:
+            rows = {r["version"]: r["additive"] for r in
+                    connection.execute("SELECT version, additive FROM schema_migrations").fetchall()}
+        self.assertTrue(rows[4])
+        self.assertFalse(rows[1])
+
     def test_readiness_refuses_missing_schema_without_losing_liveness(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -231,7 +253,7 @@ class PostgresStoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3])
+        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4])
         postgres_store.validate_schema()
 
 

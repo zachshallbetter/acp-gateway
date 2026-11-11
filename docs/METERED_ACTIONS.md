@@ -70,11 +70,10 @@ HOLD and the secrets guard stay local and owner-only. ACP does not replace them.
 Each step is the owner's, in order. Nothing in this change sets a variable, applies a migration or
 deploys.
 
-1. **Migration 0003.** It only adds tables. The release check is exact: the running deployment
-   refuses a database with a migration it does not ship, and a production build refuses a database
-   missing one. So apply `scripts/migrate-db.py` under an ACP `database.migrate` ALLOW and promote the
-   new production deployment straight after; the window between them answers 503. Railway must be on
-   the same release if it shares the database.
+1. **Migration 0003.** Applied 2026-11-11. At the time the release check was exact, so the running
+   deployment answered 503 until the new one was promoted. From migration 0004 on, a migration whose
+   first line is `-- acp-migration: additive` is recorded as such, and a running release keeps serving
+   on a database that is ahead of it only by additive migrations; see "Migrations" in the README.
 2. **Budget policy.** `scripts/policy-admin.py budget-policy --apply` signs the default limits into
    `ACP_BUDGET_POLICY` on both hosts. Every `policy-admin.py` write goes to Vercel and Railway together.
 3. **Provider credentials.** Set `ACP_VERCEL_TOKEN` (scoped to every team that holds a metered project),

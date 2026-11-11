@@ -16,7 +16,7 @@ import re
 import threading
 
 import certifi
-from db_migrations import migration_files
+from db_migrations import applied_history, classify
 
 
 class StorageError(RuntimeError):
@@ -192,13 +192,8 @@ def current() -> "PostgresStore":
 
 
 def _validate_schema_connection(connection) -> None:
-    available = migration_files()
-    recorded = connection.execute(
-        "SELECT version, checksum FROM schema_migrations ORDER BY version"
-    ).fetchall()
-    expected = [(version, digest) for version, _name, digest, _sql in available]
-    actual = [(row["version"], row["checksum"].strip()) for row in recorded]
-    if actual != expected:
+    # Every migration this release ships, unchanged; newer ones only if all are additive.
+    if classify(applied_history(connection))["status"] != "current":
         raise StorageError("database migration history does not match this release")
     head = connection.execute(
         "SELECT chain_id FROM audit_chain_heads WHERE chain_id = 'primary'"

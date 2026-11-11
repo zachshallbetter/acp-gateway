@@ -54,7 +54,7 @@ class MigrateDbTests(unittest.TestCase):
         report = json.loads(cp.stdout)
         self.assertEqual(report["status"], "pending")
         self.assertEqual(report["applied_versions"], [])
-        self.assertEqual(report["pending_versions"], ["0001", "0002", "0003"])
+        self.assertEqual(report["pending_versions"], ["0001", "0002", "0003", "0004"])
         with psycopg.connect(self.url) as connection:
             self.assertIsNone(connection.execute(
                 "SELECT to_regclass('public.schema_migrations')").fetchone()[0])
@@ -62,7 +62,7 @@ class MigrateDbTests(unittest.TestCase):
     def test_apply_then_check_is_current_and_reapply_is_a_no_op(self):
         first = self.run_script()
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(json.loads(first.stdout)["applied_versions"], ["0001", "0002", "0003"])
+        self.assertEqual(json.loads(first.stdout)["applied_versions"], ["0001", "0002", "0003", "0004"])
         again = self.run_script()
         self.assertEqual(json.loads(again.stdout)["applied_versions"], [])
         cp = self.run_script("--check")

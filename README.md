@@ -1355,7 +1355,8 @@ Self-contained — mocks the GitHub calls, no network or real credentials
 needed.
 
 Use the repository environment with the pinned runtime dependencies installed.
-The PostgreSQL integration checks are separate:
+`python3 test_db_migrations.py` checks, without a database, which migration histories a
+release may run on. The PostgreSQL integration checks are separate:
 
 ```bash
 ACP_TEST_DATABASE_URL=postgresql://127.0.0.1:5432/acp_runtime_test .venv/bin/python test_postgres_store.py
@@ -1368,6 +1369,27 @@ budget slot, of which exactly one commits), reconnects
 to persisted containment and audit state, and temporarily removes schema history
 to prove readiness fails closed. It rejects non-loopback and non-test targets.
 It does not connect to Neon or prove production failover or backup recovery.
+
+### Migrations
+
+`migrations/NNNN_name.sql` are applied in order by `scripts/migrate-db.py` under an ACP
+`database.migrate` ALLOW, and each one is recorded in `schema_migrations` with its checksum.
+One resolver (`db_migrations.classify`) decides what a database's history means for a
+release, and runtime readiness, `migrate-db.py --check` and the production build guard all
+use it:
+
+- **current**: every migration the release ships is applied, unchanged. Newer migrations are
+  allowed only if every one is recorded as additive (`ahead_additive_versions`).
+- **pending**: some of the release's migrations are missing. The production build refuses.
+- **conflict**: a checksum differs, the history has a gap, or a newer migration is not
+  additive. The running release refuses its database and the build refuses.
+
+A migration that only adds (new tables, new columns with defaults, new indexes) starts with
+the line `-- acp-migration: additive`, and that claim is reviewed with the SQL. Applying one
+leaves the running release serving, so the order is: migrate, then deploy, with ACP up
+throughout. A migration without the marker still needs the old lockstep (migrate, then
+promote straight away, with 503s in between), and should be split into expand and contract
+steps instead.
 
 ## Using it from an agent
 
