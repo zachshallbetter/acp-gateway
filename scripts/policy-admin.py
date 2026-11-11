@@ -47,7 +47,9 @@ caller    issues a per-caller credential for a lane or a coordinator: a new toke
           Keychain under ACP_GATEWAY_TOKEN_<CALLER_ID>, and only its SHA-256 goes into the signed
           ACP_CALLERS. The token is never printed.
 
-Policy changes take effect on the next production deployment.
+Every write goes to both production hosts: Vercel (loaded on its next production deployment)
+and Railway (which restarts and loads it). If Railway refuses after Vercel accepted, the
+command fails and prints how to finish, because the hosts would otherwise differ.
 
 Owner credentials come from the macOS Keychain service "ACP Gateway Production"
 (ACP_POLICY_SIGNING_KEY, ACP_POLICY_ADMIN_TOKEN, ACP_GATEWAY_TOKEN). They are read into
@@ -74,6 +76,11 @@ GATEWAY = os.environ.get("ACP_GATEWAY_URL", "https://acp-gateway.vercel.app").rs
 KEYCHAIN_SERVICE = "ACP Gateway Production"
 KEY_ID = "acp-policy-hmac-sha256"
 POLICY_FILE = HERE / "policies/production.json"
+# The second production host. Every signed document ACP loads goes to both, or the hosts drift.
+RAILWAY_PROJECT = "a3dbbfc5-3fe7-4365-a754-9a7856766f05"
+RAILWAY_SERVICE = "b2f28e52-a113-41c5-b29f-6dcb6a54d3aa"
+RAILWAY_ENVIRONMENT = "dac18c6b-a1ce-485b-b3a4-a8949dc5ad6e"
+RAILWAY_URL = "https://acp-gateway-production.up.railway.app"
 
 
 def keychain(account: str) -> str:
@@ -121,6 +128,16 @@ def gateway_call(path: str, bearer: str, admin: str | None = None, body: dict | 
             detail = {}
         raise SystemExit(f"error: {path} answered {exc.code} {detail.get('error', '')}: "
                          f"{detail.get('detail', '')} {detail.get('remedy', '')}".rstrip())
+
+
+def gateway_call_at(base: str, path: str, bearer: str) -> dict:
+    """GET one route on a named gateway host (the second production host, for drift checks)."""
+    global GATEWAY
+    saved, GATEWAY = GATEWAY, base.rstrip("/")
+    try:
+        return gateway_call(path, bearer)
+    finally:
+        GATEWAY = saved
 
 
 def load_register_policy():
@@ -187,13 +204,9 @@ def cmd_register(args) -> int:
         print("nothing to change")
         return 0
     if not args.apply:
-        print("dry run: pass --apply to write ACP_POLICY on Vercel and policies/production.json")
+        print("dry run: pass --apply to write ACP_POLICY on Vercel, Railway and policies/production.json")
         return 0
-    text = json.dumps(updated, separators=(",", ":"), sort_keys=True)
-    vercel_api(f"/v9/projects/{PROJECT}/env/{entry['id']}", "PATCH", {"value": text})
-    POLICY_FILE.write_text(text + "\n", encoding="utf-8")
-    print("wrote production ACP_POLICY on Vercel and policies/production.json; "
-          "the next production deployment loads it")
+    write_document(entry, updated)
     return 0
 
 
@@ -369,8 +382,23 @@ def env_entry(key: str):
     return next((e for e in envs if e["key"] == key and e.get("target") == ["production"]), None)
 
 
+def write_railway(key: str, text: str) -> None:
+    """Set one variable on the Railway host from stdin, so the value never reaches a process list.
+
+    Setting a variable restarts the Railway service, which then loads it.
+    """
+    result = subprocess.run(["railway", "variable", "set", key, "--stdin", "-p", RAILWAY_PROJECT,
+                             "-s", RAILWAY_SERVICE, "-e", RAILWAY_ENVIRONMENT],
+                            input=text, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"error: Vercel has the new {key} but Railway refused it, so the hosts now differ. "
+                         f"Re-run this command, or set it by hand: railway variable set {key} --stdin "
+                         f"-p {RAILWAY_PROJECT} -s {RAILWAY_SERVICE} -e {RAILWAY_ENVIRONMENT}")
+    print(f"wrote {key} on Railway; the service restarts and loads it")
+
+
 def write_env(key: str, text: str) -> None:
-    """Create or replace one encrypted production variable. Its value is never printed."""
+    """Create or replace one encrypted production variable on both hosts. Its value is never printed."""
     entry = env_entry(key)
     if entry is None:
         vercel_api(f"/v10/projects/{PROJECT}/env", "POST",
@@ -378,6 +406,7 @@ def write_env(key: str, text: str) -> None:
     else:
         vercel_api(f"/v9/projects/{PROJECT}/env/{entry['id']}", "PATCH", {"value": text})
     print(f"wrote production {key} on Vercel; the next production deployment loads it")
+    write_railway(key, text)
 
 
 def signed_document(document: dict, key: str, loader_variable: str, rp) -> dict:
@@ -520,6 +549,7 @@ def write_document(entry: dict, document) -> None:
     POLICY_FILE.write_text(text + "\n", encoding="utf-8")
     print("wrote production ACP_POLICY on Vercel and policies/production.json; "
           "the next production deployment loads it")
+    write_railway("ACP_POLICY", text)
 
 
 def main() -> int:

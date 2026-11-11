@@ -23,6 +23,10 @@ rp = admin.load_register_policy()
 
 KEY = "test-signing-key"
 
+# Railway is the second host; no test may reach the real CLI. Every write is recorded here.
+RAILWAY_WRITES = []
+admin.write_railway = lambda key, text: RAILWAY_WRITES.append((key, text))
+
 
 def signed(policy):
     return rp.sign(policy, KEY, admin.KEY_ID)
@@ -82,6 +86,29 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
         self.assertEqual(sorted(states), ["o-a", "o-b", "snackstudio-erosion-lab"])
         self.assertNotIn("artifact_manifest", fake.patched[-1])
+
+    def test_apply_writes_railway_the_same_bytes_as_vercel(self):
+        RAILWAY_WRITES.clear()
+        code, fake, written, _ = self.run_register(existing(), "o/b", apply=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(RAILWAY_WRITES, [("ACP_POLICY", written.rstrip("\n"))])
+
+    def test_dry_run_writes_neither_host(self):
+        RAILWAY_WRITES.clear()
+        self.run_register(existing(), "o/b")
+        self.assertEqual(RAILWAY_WRITES, [])
+
+    def test_railway_refusing_after_vercel_fails_loudly_with_the_fix(self):
+        refused = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="unauthorized")
+        with patch.object(admin.subprocess, "run", return_value=refused):
+            spec2 = importlib.util.spec_from_file_location("policy_admin_real", ROOT / "scripts/policy-admin.py")
+            real = importlib.util.module_from_spec(spec2)
+            spec2.loader.exec_module(real)
+            with patch.object(real.subprocess, "run", return_value=refused):
+                with self.assertRaises(SystemExit) as stop:
+                    real.write_railway("ACP_POLICY", "{}")
+        self.assertIn("hosts now differ", str(stop.exception))
+        self.assertIn("railway variable set ACP_POLICY --stdin", str(stop.exception))
 
     def test_registering_an_unchanged_repository_again_changes_nothing(self):
         code, fake, written, _ = self.run_register(existing(), "o/b", apply=True)

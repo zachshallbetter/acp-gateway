@@ -44,10 +44,19 @@ def main() -> int:
                 break
         print(f"refreshed {refreshed}, skipped {len(result['skipped_recent'])} (refreshed recently)", file=sys.stderr)
     body = admin.gateway_call("/internal/posture", bearer)
+    import posture
+    try:
+        drift = posture.policy_drift(admin.gateway_call("/internal/policy", bearer),
+                                     admin.gateway_call_at(admin.RAILWAY_URL, "/internal/policy", bearer))
+    except SystemExit as exc:                          # the peer could not be read: that is a finding too
+        drift = [{"severity": "high", "code": "POLICY_DRIFT_UNCHECKED", "repository": "railway",
+                  "subject": admin.RAILWAY_URL, "problem": f"Railway's policies could not be read: {exc}",
+                  "fix": "Check the Railway service is up (GET /ready) and answers the shared bearer.",
+                  "who": "owner"}]
+    body["findings"] = drift + body["findings"]
     if args.json:
         print(json.dumps(body, indent=2, sort_keys=True))
         return 0
-    import posture
     Path(args.out).write_text(posture.render_html(body), encoding="utf-8")
     high = sum(1 for f in body["findings"] if f["severity"] == "high")
     print(f"wrote {args.out}: {len(body['findings'])} findings, {high} high", file=sys.stderr)

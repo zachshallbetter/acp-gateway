@@ -41,15 +41,25 @@ def findings(snapshot, ledger_rows=None, day=None):
                 f"Add to vercel.json: \"ignoreCommand\": \"{PRODUCTION_ONLY_IGNORE}\" so only production builds; "
                 "previews then run only on request (vercel deploy) under an ACP hosted_build decision.",
                 owner_only=False))
-        if project.get("build_machine_selection") == "elastic" or \
-                project.get("build_machine_type") in ("turbo", "enhanced", "14cpu-28gb"):
+        last = project.get("last_build_machine") or {}
+        large_setting = project.get("build_machine_selection") == "elastic" or \
+            project.get("build_machine_type") in ("turbo", "enhanced", "14cpu-28gb")
+        large_actual = last.get("selection") == "elastic" or (last.get("cores") or 0) > 4
+        if large_setting or large_actual:
+            ran = (f" The last build ran on {last.get('cores')} cores, {last.get('selection')} selection "
+                   f"({last.get('selection_source')})." if last else "")
             out.append(_finding(
                 "high", "VERCEL_LARGE_OR_ELASTIC_MACHINE", repo, f"vercel:{name}",
-                f"Builds run on {project.get('build_machine_type') or 'an'} machine with "
-                f"{project.get('build_machine_selection') or 'unset'} selection, which can scale to large, "
-                "costly machines.",
-                "Vercel dashboard: Project Settings > Build and Deployment > Build Machine: choose Standard and "
-                "turn off elastic selection.", owner_only=True))
+                f"The project is set to a {project.get('build_machine_type') or 'default'} machine with "
+                f"{project.get('build_machine_selection') or 'default'} selection.{ran} Elastic or large machines "
+                "scale cost with every build.",
+                "Vercel dashboard: Project Settings > Build and Deployment > Build Machine: choose Standard (or "
+                "Basic) and fixed selection; check Team Settings for an elastic default.", owner_only=True))
+        elif not last:
+            out.append(_finding(
+                "low", "VERCEL_MACHINE_UNVERIFIED", repo, f"vercel:{name}",
+                "No recent build shows which machine this project really uses; only the setting was read.",
+                "Nothing to change. The next build's record confirms the machine.", owner_only=False))
         if project.get("elastic_concurrency"):
             out.append(_finding(
                 "medium", "VERCEL_ELASTIC_CONCURRENCY", repo, f"vercel:{name}",
@@ -176,6 +186,28 @@ def _collapse_account_findings(found):
         finding["repository"] = ", ".join(sorted(set(finding.pop("repositories"))))
         kept.append(finding)
     return kept
+
+
+def policy_drift(primary, peer, primary_name="vercel", peer_name="railway"):
+    """Findings for policies the two production hosts hold differently (from GET /internal/policy)."""
+    def index(view):
+        return {p["policy_id"]: (p.get("version"), p.get("signature"), p.get("state"))
+                for p in (view or {}).get("policies") or []}
+    a, b = index(primary), index(peer)
+    out = []
+    for policy_id in sorted(set(a) | set(b)):
+        if a.get(policy_id) == b.get(policy_id):
+            continue
+        left = "absent" if policy_id not in a else f"v{a[policy_id][0]} {a[policy_id][2]}"
+        right = "absent" if policy_id not in b else f"v{b[policy_id][0]} {b[policy_id][2]}"
+        out.append(_finding(
+            "high", "POLICY_DRIFT", policy_id, f"{primary_name}/{peer_name}",
+            f"The production hosts hold this policy differently ({primary_name}: {left}; {peer_name}: {right}), "
+            "so the same request can be decided differently depending on which host answers.",
+            "Re-run the last scripts/policy-admin.py command that changed it (it writes both hosts), or copy "
+            "policies/production.json to Railway: railway variable set ACP_POLICY --stdin -p <project> "
+            "-s <service> -e <environment>.", owner_only=True))
+    return out
 
 
 def report(snapshots, ledger_rows, day, budget):

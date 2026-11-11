@@ -76,7 +76,7 @@ deploys.
    new production deployment straight after; the window between them answers 503. Railway must be on
    the same release if it shares the database.
 2. **Budget policy.** `scripts/policy-admin.py budget-policy --apply` signs the default limits into
-   `ACP_BUDGET_POLICY`.
+   `ACP_BUDGET_POLICY` on both hosts. Every `policy-admin.py` write goes to Vercel and Railway together.
 3. **Provider credentials.** Set `ACP_VERCEL_TOKEN` (scoped to every team that holds a metered project),
    `ACP_RAILWAY_TOKEN` and, optionally, a default `ACP_VERCEL_TEAM_ID` on the deployment. The GitHub App needs read access to Actions and Checks for run counts. Organization
    billing reads need the organization's Administration (read) permission. Personal-account Actions

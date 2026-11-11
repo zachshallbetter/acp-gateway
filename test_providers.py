@@ -30,6 +30,10 @@ VERCEL_DEPLOYMENTS = {"deployments": [
     {"uid": "dpl_3", "created": int((NOW - 86400) * 1000), "target": None, "source": "cli"},
 ], "pagination": {"count": 3, "next": None, "prev": None}}
 
+VERCEL_DEPLOYMENT_DETAIL = {"uid": "dpl_1", "resourceConfig": {"buildMachine": {
+    "cores": 4, "memory": 8192, "purchaseType": "standard", "machineSelectionType": "elastic",
+    "selectionSource": "elastic-algorithm", "defaultPurchaseType": "standard"}}}
+
 RAILWAY_PROJECT = {"data": {"project": {
     "id": "a3dbbfc5-3fe7-4365-a754-9a7856766f05", "name": "agent-control-plane",
     "workspaceId": "75016e16-34ac-462d-b2e3-22312c398829",
@@ -311,7 +315,8 @@ def test_posture_ranks_findings_and_gives_exact_fixes():
     with creds():
         fresh()
         fake = Fake({**github_routes(CI_UNBOUNDED), "/v9/projects/": VERCEL_PROJECT,
-                     "/v7/deployments": VERCEL_DEPLOYMENTS, "AcpProject": RAILWAY_PROJECT,
+                     "/v7/deployments": VERCEL_DEPLOYMENTS, "/v13/deployments/": VERCEL_DEPLOYMENT_DETAIL,
+                     "AcpProject": RAILWAY_PROJECT,
                      "AcpLimit": RAILWAY_LIMIT, "/actions/runs": {"total_count": 4, "workflow_runs": []},
                      "/check-runs": {"total_count": 2, "check_runs": [
                          {"name": "ci", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}},
@@ -350,6 +355,52 @@ def test_railway_triggers_on_one_branch_are_one_finding():
                     "usage_limit": {"hard_limit": 50}}}
     found = [f for f in posture.findings(snapshot, [], DAY) if f["code"] == "RAILWAY_DEPLOYS_ON_PUSH"]
     assert len(found) == 1 and "2 service environments" in found[0]["problem"]
+
+
+def test_last_build_machine_overrides_a_reassuring_setting():
+    fixed = {**VERCEL_PROJECT, "resourceConfig": {"buildMachineType": "basic", "buildMachineSelection": "fixed"}}
+    with creds():
+        fresh()
+        fake = Fake({**github_routes(), "/v9/projects/": fixed, "/v7/deployments": VERCEL_DEPLOYMENTS,
+                     "/v13/deployments/": VERCEL_DEPLOYMENT_DETAIL})
+        snapshot = providers.posture_snapshot({"repository": POLICY["repository"],
+                                               "metered": {"providers": {"vercel": {"project_ids": ["prj_widget"]}}}},
+                                              token_for, NOW, fake)
+    machine = snapshot["vercel"][0]["last_build_machine"]
+    assert machine["selection"] == "elastic" and machine["cores"] == 4 and machine["deployment"] == "dpl_1"
+    found = [f for f in posture.findings(snapshot, [], DAY) if f["code"] == "VERCEL_LARGE_OR_ELASTIC_MACHINE"]
+    assert found and "last build ran on 4 cores, elastic" in found[0]["problem"]
+    calm = {**VERCEL_DEPLOYMENT_DETAIL, "resourceConfig": {"buildMachine": {
+        "cores": 2, "machineSelectionType": "fixed", "purchaseType": "basic", "selectionSource": "project-setting"}}}
+    with creds():
+        fresh()
+        fake = Fake({**github_routes(), "/v9/projects/": fixed, "/v7/deployments": VERCEL_DEPLOYMENTS,
+                     "/v13/deployments/": calm})
+        snapshot = providers.posture_snapshot({"repository": POLICY["repository"],
+                                               "metered": {"providers": {"vercel": {"project_ids": ["prj_widget"]}}}},
+                                              token_for, NOW, fake)
+    assert "VERCEL_LARGE_OR_ELASTIC_MACHINE" not in [f["code"] for f in posture.findings(snapshot, [], DAY)]
+    unknown = {**VERCEL_DEPLOYMENT_DETAIL, "resourceConfig": {"buildMachine": {"machineSelectionType": "quantum"}}}
+    with creds():
+        fresh()
+        try:
+            providers.vercel_last_build_machine("prj_widget", NOW, Fake({"/v7/deployments": VERCEL_DEPLOYMENTS,
+                                                                         "/v13/deployments/": unknown}))
+        except providers.ProviderError as exc:
+            assert exc.kind == "DIVERGED"
+        else:
+            raise AssertionError("unknown selection must diverge")
+
+
+def test_policy_drift_between_hosts_is_a_finding():
+    same = {"policies": [{"policy_id": "a", "version": 2, "signature": "s2", "state": "ACTIVE"}]}
+    assert posture.policy_drift(same, same) == []
+    behind = {"policies": [{"policy_id": "a", "version": 1, "signature": "s1", "state": "ACTIVE"}]}
+    missing = {"policies": []}
+    for peer, text in ((behind, "railway: v1 ACTIVE"), (missing, "railway: absent")):
+        found = posture.policy_drift(same, peer)
+        assert len(found) == 1 and found[0]["code"] == "POLICY_DRIFT" and text in found[0]["problem"]
+        assert found[0]["severity"] == "high" and found[0]["fix"]
 
 
 def test_recorded_builds_clear_the_unrecorded_finding():

@@ -208,6 +208,34 @@ def vercel_deployments_per_day(project_id, days=7, now=None, fetch=_fetch, team_
     return dict(sorted(counts.items(), reverse=True))
 
 
+def vercel_last_build_machine(project_id, now=None, fetch=_fetch, team_id=None):
+    """The machine the project's latest build actually ran on (GET /v13/deployments/{id}), or None.
+
+    The project setting says what the next build should use; this says what the last one used.
+    """
+    raw = fetch("vercel", _vercel_url("/v7/deployments", team_id, projectId=project_id, limit=1),
+                os.getenv("ACP_VERCEL_TOKEN", "").strip())
+    rows = _need("vercel", raw, "deployments", list, "deployments")
+    if not rows:
+        return None
+    uid = _need("vercel", rows[0], "uid", str, "deployments[]")
+    detail = fetch("vercel", _vercel_url("/v13/deployments/" + quote(uid, safe=""), team_id),
+                   os.getenv("ACP_VERCEL_TOKEN", "").strip())
+    resource = _need("vercel", detail, "resourceConfig", dict, "deployment", optional=True) or {}
+    machine = _need("vercel", resource, "buildMachine", dict, "deployment.resourceConfig", optional=True)
+    if machine is None:
+        return None
+    selection = _need("vercel", machine, "machineSelectionType", str, "buildMachine", optional=True)
+    if selection is not None and selection not in ("elastic", "fixed"):
+        raise ProviderError("vercel", "DIVERGED", "buildMachine.machineSelectionType is unknown")
+    return {"deployment": uid,
+            "cores": _need("vercel", machine, "cores", int, "buildMachine", optional=True),
+            "memory_mb": _need("vercel", machine, "memory", int, "buildMachine", optional=True),
+            "purchase_type": _need("vercel", machine, "purchaseType", str, "buildMachine", optional=True),
+            "selection": selection,
+            "selection_source": _need("vercel", machine, "selectionSource", str, "buildMachine", optional=True)}
+
+
 def vercel_branch_enabled(config, branch):
     """False when a vercel.json turns git deployments off for this branch."""
     git = (config or {}).get("git")
@@ -624,6 +652,8 @@ def posture_snapshot(policy, token_for, now=None, fetch=_fetch, head_sha=None):
             project = dict(project)
             project["deployments_per_day"] = guarded(
                 "vercel", lambda: vercel_deployments_per_day(project_id, now=now, fetch=fetch, team_id=team_id)) or {}
+            project["last_build_machine"] = guarded(
+                "vercel", lambda: vercel_last_build_machine(project_id, now=now, fetch=fetch, team_id=team_id))
             project["vercel_json"] = guarded("github_actions", lambda: github_json_file(
                 owner, name, (project.get("root_directory") or "").strip("/") + "/vercel.json"
                 if project.get("root_directory") else "vercel.json", head, token_for, fetch))

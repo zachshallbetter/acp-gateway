@@ -349,7 +349,11 @@ nothing. `POST /internal/posture/refresh` (owner or coordinator) re-reads the
 providers, at most every 10 minutes per repository and three repositories per request (it answers
 `remaining`; POST again for the next batch);
 `scripts/posture-report.py --refresh` renders the page. Provider deployment
-counts above what ACP authorized appear as `UNRECORDED_BUILDS`.
+counts above what ACP authorized appear as `UNRECORDED_BUILDS`. A Vercel project's build
+machine is judged by what its latest build actually ran on, not only by its setting. The
+report script also compares the policies both production hosts hold and reports any
+difference as `POLICY_DRIFT`; `scripts/policy-admin.py` writes every signed document to
+Vercel and Railway together, and fails with the fix if Railway refuses.
 
 Provider reads go only to `api.github.com`, `api.vercel.com` and
 `backboard.railway.com`, with an 8-second timeout, a 1 MiB response cap and no
