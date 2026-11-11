@@ -249,7 +249,15 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
         keys = {"local": record_key(action, "local", owner.lower(), name.lower(), context["ref"],
                                     context["new_sha"], context.get("workflow"), context.get("run_id"))}
     # Replay: the same action asked again is answered from the record, never counted twice.
+    # Authority is per caller: a record made for a coordinator does not authorize a lane.
     prior = [ledger.ledger_get(k) for k in keys.values()]
+    if all(prior) and production and not _caller_may_reach_production(caller):
+        return Outcome("AUTH_REQUIRED", "OWNER_REQUIRED",
+                       f"This deploys production ({branch}). It is already authorized for another caller, and that "
+                       f"authorization is not transferable; this caller is a {caller['kind']} caller.",
+                       f"Leave it to the caller that holds the authorization, or ask the owner for a grant: "
+                       f"{grant_command(action, owner, name)}",
+                       builds=evidence["builds"], caller_kind=caller["kind"])
     if all(prior):
         return Outcome("ALLOW", prior[0]["reason_code"],
                        "Already authorized for this exact commit; the earlier record stands and is not counted again.",

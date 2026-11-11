@@ -195,6 +195,21 @@ def test_shared_or_lane_caller_cannot_merge_to_production_without_a_grant():
             assert "coordinator" in result["remedy"] and "budget-grant" in result["remedy"]
 
 
+def test_a_coordinators_authorization_does_not_transfer_to_a_lane():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        first = decide(request(ref="refs/heads/main"), ledger, caller=COORDINATOR)
+        assert first["decision"] == "ALLOW", first
+        for caller in (LANE, None):
+            again = decide(request(ref="refs/heads/main"), ledger, caller=caller, now=NOW + 5)
+            assert again["decision"] == "AUTH_REQUIRED" and again["reason"] == "OWNER_REQUIRED", again
+            assert "not transferable" in again["detail"]
+        replay = decide(request(ref="refs/heads/main"), ledger, caller=COORDINATOR, now=NOW + 10)
+        assert replay["decision"] == "ALLOW" and replay.get("replayed") is True
+        assert ledger.ledger_count(metering.budget_day(NOW), ["hosted_build"]) == 1
+
+
 def test_push_to_production_branch_is_production_too():
     with env():
         fresh()
