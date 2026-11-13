@@ -67,9 +67,13 @@ def report(step: str, **fields) -> None:
 
 def migration_state() -> tuple[int, dict]:
     """migrate-db.py --check in its own process, so the connection string never enters this one's output."""
-    if not os.environ.get("ACP_DATABASE_MIGRATION_URL", "").strip():
-        raise Stop("ACP_DATABASE_MIGRATION_URL is not set. Load it from the owner's .env.local "
-                   "(set -a; . ./.env.local; set +a) and run this again")
+    dsn = os.environ.get("ACP_DATABASE_MIGRATION_URL", "").strip()
+    if not dsn:
+        raise Stop("ACP_DATABASE_MIGRATION_URL is not set. Run this under "
+                   "latchkey run --env-file .env.local -- ...")
+    if dsn.startswith("latchkey://"):
+        raise Stop("ACP_DATABASE_MIGRATION_URL is a Latchkey reference, not a value. Run this under "
+                   "latchkey run --env-file .env.local -- ...")
     result = acp_ops.run(sys.executable, str(ROOT / "scripts/migrate-db.py"), "--check")
     try:
         state = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else {}

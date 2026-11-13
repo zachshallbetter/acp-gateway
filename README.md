@@ -1396,11 +1396,12 @@ steps instead.
 
 `scripts/release.py` releases a reviewed pull request to both production hosts in that
 order. Run it from a clean checkout of the pull request branch, pushed, at the commit to
-release, with `ACP_DATABASE_MIGRATION_URL` loaded:
+release. `.env.local` names its secrets as `latchkey://` references, so run it under
+`latchkey run`, which supplies `ACP_DATABASE_MIGRATION_URL` to the process without printing it:
 
 ```bash
-.venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N --dry-run
-.venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N
+latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N --dry-run
+latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N
 ```
 
 1. It checks that HEAD is the published branch tip and fast-forwards `origin/main`.

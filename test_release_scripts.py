@@ -218,6 +218,12 @@ class MigrationTests(unittest.TestCase):
         with patch.dict(os.environ, {"ACP_DATABASE_MIGRATION_URL": ""}):
             with self.assertRaisesRegex(Stop, "ACP_DATABASE_MIGRATION_URL is not set"):
                 release.migration_state()
+        reference = "latchkey://acp-gateway/production/ACP_DATABASE_MIGRATION_URL"
+        with patch.dict(os.environ, {"ACP_DATABASE_MIGRATION_URL": reference}), \
+                patch.object(acp_ops, "run") as ran:
+            with self.assertRaisesRegex(Stop, "Latchkey reference.*latchkey run --env-file"):
+                release.migration_state()
+        ran.assert_not_called()
 
     def test_a_conflicting_history_stops_before_anything_changes(self):
         with patch.dict(os.environ, {"ACP_DATABASE_MIGRATION_URL": "set"}), \
