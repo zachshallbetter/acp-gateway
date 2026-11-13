@@ -1421,7 +1421,9 @@ latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work
 
 A failure stops the release where it is and says what state each host is in. A failed
 Vercel build leaves the alias on the previous deployment and Railway untouched; fix forward
-with a new release. `--dry-run` runs the checks and the migration check and changes nothing.
+with a new release. Rerunning after the merge resumes: when `main` already holds HEAD, the
+merge is skipped and the Vercel check, Railway deploy and health checks run again. `--dry-run`
+runs the checks and the migration check and changes nothing.
 `--skip-railway` releases to Vercel only.
 
 `scripts/ff-merge.py --work-item OWNER/NAME#N [--rev REV]` is step 4 on its own, for any

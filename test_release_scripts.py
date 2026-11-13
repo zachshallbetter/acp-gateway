@@ -311,6 +311,7 @@ class RailwayTests(unittest.TestCase):
             if args[:3] == ("railway", "deployment", "list"):
                 return completed(json.dumps(listings.pop(0)))
             if args[:2] == ("railway", "up"):
+                assert "--path-as-root" in args, args
                 self.uploaded.append(sorted(p.name for p in Path(args[2]).iterdir()))
                 return completed()
             raise AssertionError(args)
@@ -336,14 +337,16 @@ class RailwayTests(unittest.TestCase):
 
 
 class ReleaseOrderTests(unittest.TestCase):
-    def run_release(self, dry_run=False, step=None, skip_railway=False):
+    def run_release(self, dry_run=False, step=None, skip_railway=False, resuming=False):
         calls = []
         update = {"owner": "zachshallbetter", "name": "acp-gateway", "remote": "origin", "ref": "refs/heads/main",
                   "old_sha": "b" * 40, "new_sha": SHA}
 
         def git(checkout, *args):
-            if args[0] == "status":
+            if args[0] in ("status", "fetch"):
                 return ""
+            if args[0] == "rev-parse":
+                return SHA if args[1] == "HEAD" or resuming else "b" * 40
             if args[0] == "ls-remote":
                 return f"{SHA}\trefs/heads/feature"
             raise AssertionError(args)
@@ -383,6 +386,15 @@ class ReleaseOrderTests(unittest.TestCase):
 
     def test_skip_railway_releases_to_vercel_only(self):
         self.assertNotIn("railway", self.run_release(skip_railway=True))
+
+    def test_a_rerun_after_the_merge_resumes_with_the_deploys(self):
+        self.assertEqual(self.run_release(resuming=True),
+                         ["check", "harness", "vercel", "alias", "railway", "verify"])
+
+    def test_a_rerun_with_pending_migrations_stops(self):
+        step = {"from": "0003", "to": "0004", "versions": ["0004"]}
+        with self.assertRaisesRegex(Stop, "missing its migrations"):
+            self.run_release(resuming=True, step=step)
 
     def test_dry_run_changes_nothing(self):
         step = {"from": "0003", "to": "0004", "versions": ["0004"]}

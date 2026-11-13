@@ -177,7 +177,7 @@ def railway_deploy(checkout: Path, new_sha: str, timeout: float) -> dict:
         unpacked = subprocess.run(["tar", "-x", "-C", tree], input=archive.stdout, capture_output=True)
         if unpacked.returncode != 0:
             raise Stop("the release tree could not be unpacked; Railway was not deployed")
-        up = acp_ops.run("railway", "up", tree, "--detach", *RAILWAY_IDS, cwd=tree)
+        up = acp_ops.run("railway", "up", tree, "--path-as-root", "--detach", *RAILWAY_IDS, cwd=tree)
         if up.returncode != 0:
             raise Stop(f"railway up failed ({up.stderr.strip()[-300:] or 'no detail'}); Railway still runs the "
                        "previous release")
@@ -212,21 +212,33 @@ def release(args, checkout: Path) -> None:
     branch = args.branch or git(checkout, "symbolic-ref", "--short", "HEAD")
     if git(checkout, "status", "--porcelain", "--untracked-files=no"):
         raise Stop("the checkout has uncommitted changes; release from a clean checkout of the branch")
-    update = ff_merge.plan(checkout, "origin", "refs/heads/main", "HEAD")
+    head = git(checkout, "rev-parse", "HEAD")
+    git(checkout, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    resuming = git(checkout, "rev-parse", "refs/remotes/origin/main") == head
+    if resuming:
+        # A release that stopped after the merge: main already holds this exact revision, so the
+        # remaining steps (Vercel check, Railway, verify) run again and the merge is skipped.
+        update = {"owner": "zachshallbetter", "name": "acp-gateway", "ref": "refs/heads/main", "new_sha": head}
+    else:
+        update = ff_merge.plan(checkout, "origin", "refs/heads/main", "HEAD")
     if git(checkout, "ls-remote", "origin", f"refs/heads/{branch}").split()[:1] != [update["new_sha"]]:
         raise Stop(f"origin/{branch} is not at HEAD ({update['new_sha'][:12]}); push the branch and run this again")
-    report("plan", branch=branch, **update)
+    report("plan", branch=branch, resuming=resuming, **update)
     _code, state = migration_state()
     step = pending_plan(state)
     report("migrations", status=state.get("status"), pending=step["versions"] if step else [])
+    if resuming and step:
+        raise Stop("main already holds this release but the database is missing its migrations; apply them under "
+                   "their own database.migrate decision before deploying again")
     if args.dry_run:
         return
     report("harness", allowed_by=acp_ops.harness_gate(update["name"]))
-    token = acp_ops.bearer(args.token_account)
-    if step:
-        migrate(update, branch, token, args.work_item, step)
-    ff_merge.merge(checkout, update, token, args.work_item)
-    report("merged", ref=update["ref"], new_sha=update["new_sha"])
+    if not resuming:
+        token = acp_ops.bearer(args.token_account)
+        if step:
+            migrate(update, branch, token, args.work_item, step)
+        ff_merge.merge(checkout, update, token, args.work_item)
+        report("merged", ref=update["ref"], new_sha=update["new_sha"])
     build = vercel_build(update["new_sha"], args.timeout)
     vercel_alias(build)
     report("vercel", deployment=build.get("url"))
