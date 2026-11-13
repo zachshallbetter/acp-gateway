@@ -171,6 +171,24 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(acp_ops.harness_gate("repo"), "owner approval for hosted repo")
 
 
+class BearerTests(unittest.TestCase):
+    def test_the_environment_comes_before_the_keychain(self):
+        with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": "from-env"}), patch.object(acp_ops, "run") as ran:
+            self.assertEqual(acp_ops.bearer("ACP_GATEWAY_TOKEN"), "from-env")
+        ran.assert_not_called()
+
+    def test_an_unresolved_reference_names_the_fix(self):
+        with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": "latchkey://acp-gateway/production/ACP_GATEWAY_TOKEN"}):
+            with self.assertRaisesRegex(Stop, "latchkey run --env-file"):
+                acp_ops.bearer("ACP_GATEWAY_TOKEN")
+
+    def test_neither_source_names_the_fix(self):
+        with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": ""}), \
+                patch.object(acp_ops, "run", return_value=completed("", 44)):
+            with self.assertRaisesRegex(Stop, "neither in the environment nor in the Keychain"):
+                acp_ops.bearer("ACP_GATEWAY_TOKEN")
+
+
 class AuthorizeTests(unittest.TestCase):
     def test_returns_decision_fields_only(self):
         body = {"decision": "ALLOW", "reason": "VERIFIED_AND_PERMITTED", "capability_token": "secret",

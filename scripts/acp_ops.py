@@ -6,8 +6,9 @@ questions the guards would: is the machine on hold, and has the owner opened an 
 window for this repository (`python3 ~/.claude/hooks/approve.py hosted <repo> [minutes]`)?
 On a machine without the harness, ACP's decision is the only gate.
 
-Bearer tokens come from the macOS Keychain service "ACP Gateway Production" and are never
-printed. Database connection strings stay in the environment of the process that uses them.
+The bearer token comes from the environment (`latchkey run --env-file .env.local` supplies it),
+falling back to the macOS Keychain service "ACP Gateway Production", and is never printed.
+Database connection strings stay in the environment of the process that uses them.
 """
 from __future__ import annotations
 
@@ -55,9 +56,17 @@ def github_repository(checkout: Path | str, remote: str) -> tuple[str, str]:
 
 
 def bearer(account: str) -> str:
+    """The caller's token: the environment variable of that name (as `latchkey run` supplies it), else the Keychain."""
+    value = os.environ.get(account, "").strip()
+    if value.startswith("latchkey://"):
+        raise Stop(f"{account} is a Latchkey reference, not a value. Run this under "
+                   "latchkey run --env-file .env.local -- ...")
+    if value:
+        return value
     result = run("security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w")
     if result.returncode != 0 or not result.stdout.strip():
-        raise Stop(f"the Keychain has no {account} under {KEYCHAIN_SERVICE!r}; store the caller's token there")
+        raise Stop(f"{account} is neither in the environment nor in the Keychain under {KEYCHAIN_SERVICE!r}. "
+                   "Run this under latchkey run --env-file .env.local -- ...")
     return result.stdout.strip()
 
 
