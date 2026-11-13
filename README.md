@@ -1349,6 +1349,7 @@ python3 test_github_app.py
 python3 test_vercel_adapter.py
 python3 test_gateway_metering.py
 python3 test_providers.py
+python3 test_release_scripts.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials
@@ -1390,6 +1391,41 @@ leaves the running release serving, so the order is: migrate, then deploy, with 
 throughout. A migration without the marker still needs the old lockstep (migrate, then
 promote straight away, with 503s in between), and should be split into expand and contract
 steps instead.
+
+### Releasing
+
+`scripts/release.py` releases a reviewed pull request to both production hosts in that
+order. Run it from a clean checkout of the pull request branch, pushed, at the commit to
+release, with `ACP_DATABASE_MIGRATION_URL` loaded:
+
+```bash
+.venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N --dry-run
+.venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N
+```
+
+1. It checks that HEAD is the published branch tip and fast-forwards `origin/main`.
+2. It refuses while the machine is on hold or no owner approval window is open
+   (`approve.py hosted acp-gateway`): its pushes and deploys run in subprocesses the local
+   Bash guards cannot see, so it asks their questions itself.
+3. If the production database lacks this release's migrations, it asks ACP for an exact
+   `database.migrate`, applies them and checks again. It applies only migrations marked
+   additive; anything else stops the release with the fix.
+4. It fast-forwards `main` under an exact `git.protected_ref.update`. Vercel builds `main`
+   and moves the production alias on its own.
+5. It waits for Vercel's build of that SHA to be READY and the alias to point at it.
+6. It deploys `git archive` of the same SHA to Railway, so nothing outside the commit is
+   uploaded, and waits for SUCCESS.
+7. It checks `/health` and `/ready` on both hosts.
+
+A failure stops the release where it is and says what state each host is in. A failed
+Vercel build leaves the alias on the previous deployment and Railway untouched; fix forward
+with a new release. `--dry-run` runs the checks and the migration check and changes nothing.
+`--skip-railway` releases to Vercel only.
+
+`scripts/ff-merge.py --work-item OWNER/NAME#N [--rev REV]` is step 4 on its own, for any
+governed repository whose `main` ACP guards: it refuses a revision that is not published or
+not a fast-forward, asks ACP for the exact update, and pushes it at once, never with
+`--force`.
 
 ## Using it from an agent
 
