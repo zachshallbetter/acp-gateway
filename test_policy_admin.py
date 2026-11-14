@@ -262,5 +262,18 @@ class RepinUnregisterTests(unittest.TestCase):
         self.assertEqual([p["policy_id"] for p in fake.patched], ["o-b"])
 
 
+class CredentialTests(unittest.TestCase):
+    def test_the_environment_comes_before_the_keychain(self):
+        with patch.dict(os.environ, {"ACP_POLICY_SIGNING_KEY": "from-env"}), patch.object(subprocess, "run") as ran:
+            self.assertEqual(admin.keychain("ACP_POLICY_SIGNING_KEY"), "from-env")
+        ran.assert_not_called()
+
+    def test_an_unresolved_latchkey_reference_names_the_fix(self):
+        reference = "latchkey://ACP_POLICY_SIGNING_KEY"
+        with patch.dict(os.environ, {"ACP_POLICY_SIGNING_KEY": reference}):
+            with self.assertRaisesRegex(SystemExit, "latchkey run --env-file"):
+                admin.keychain("ACP_POLICY_SIGNING_KEY")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,9 +51,9 @@ Every write goes to both production hosts: Vercel (loaded on its next production
 and Railway (which restarts and loads it). If Railway refuses after Vercel accepted, the
 command fails and prints how to finish, because the hosts would otherwise differ.
 
-Owner credentials come from the macOS Keychain service "ACP Gateway Production"
-(ACP_POLICY_SIGNING_KEY, ACP_POLICY_ADMIN_TOKEN, ACP_GATEWAY_TOKEN). They are read into
-memory, never printed and never written to disk. Agents do not run this: it is the
+Owner credentials (ACP_POLICY_SIGNING_KEY, ACP_POLICY_ADMIN_TOKEN, ACP_GATEWAY_TOKEN) come from the
+environment, as `latchkey run --env-file .env.local -- ...` supplies them, else the macOS Keychain
+service "ACP Gateway Production". They are read into memory, never printed and never written to disk. Agents do not run this: it is the
 operator path that the gateway bearer cannot reach.
 """
 from __future__ import annotations
@@ -84,10 +84,18 @@ RAILWAY_URL = "https://acp-gateway-production.up.railway.app"
 
 
 def keychain(account: str) -> str:
+    """An owner credential: the environment variable of that name (`latchkey run`), else the Keychain."""
+    value = os.environ.get(account, "").strip()
+    if value.startswith("latchkey://"):
+        raise SystemExit(f"error: {account} is a Latchkey reference, not a value; run this under "
+                         "latchkey run --env-file .env.local -- ...")
+    if value:
+        return value
     out = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
-        raise SystemExit(f"error: Keychain has no {account} under {KEYCHAIN_SERVICE!r}")
+        raise SystemExit(f"error: {account} is neither in the environment nor in the Keychain under "
+                         f"{KEYCHAIN_SERVICE!r}; run this under latchkey run --env-file .env.local -- ...")
     return out.stdout.strip()
 
 
