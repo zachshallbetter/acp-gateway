@@ -8,9 +8,8 @@ It acts on the checkout it lives in, which must be clean and on the pull request
 commit to release, with ACP_DATABASE_MIGRATION_URL in the environment (never printed). In order:
 
 1. Plan: HEAD is published as BRANCH on GitHub and fast-forwards origin/main.
-2. Harness: the machine is not on hold and the owner has an approval window open
-   (`python3 ~/.claude/hooks/approve.py hosted acp-gateway 30`), because the pushes and
-   deploys below run in subprocesses the Bash guards cannot see.
+2. Hold: the machine is not on hold (~/.claude/hooks/HOLD). The pushes and deploys below run in
+   subprocesses the Bash guards cannot see, so the script checks the hold itself and asks ACP.
 3. Migrate: if the production database lacks this release's migrations, ask ACP for an
    exact `database.migrate`, apply them, and check again. Only migrations marked additive
    are applied here: the running release keeps serving on them. Anything else stops.

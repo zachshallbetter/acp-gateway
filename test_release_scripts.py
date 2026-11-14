@@ -158,17 +158,14 @@ class HarnessTests(unittest.TestCase):
     def test_without_the_harness_acp_is_the_only_gate(self):
         self.assertIn("ACP is the only gate", acp_ops.harness_gate("repo"))
 
-    def test_hold_and_a_missing_approval_refuse_with_the_fix(self):
+    def test_the_hold_refuses(self):
         self.write_guard(held="incident")
         with self.assertRaisesRegex(Stop, "on hold \\(incident\\)"):
             acp_ops.harness_gate("repo")
-        self.write_guard(approved=False)
-        with self.assertRaisesRegex(Stop, "approve.py hosted repo 30"):
-            acp_ops.harness_gate("repo")
 
-    def test_an_open_window_lets_it_through(self):
-        self.write_guard(approved=True)
-        self.assertEqual(acp_ops.harness_gate("repo"), "owner approval for hosted repo")
+    def test_no_approval_window_is_needed(self):
+        self.write_guard(approved=False)
+        self.assertEqual(acp_ops.harness_gate("repo"), "not on hold")
 
 
 class BearerTests(unittest.TestCase):

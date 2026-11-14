@@ -1406,9 +1406,9 @@ latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work
 ```
 
 1. It checks that HEAD is the published branch tip and fast-forwards `origin/main`.
-2. It refuses while the machine is on hold or no owner approval window is open
-   (`approve.py hosted acp-gateway`): its pushes and deploys run in subprocesses the local
-   Bash guards cannot see, so it asks their questions itself.
+2. It refuses while the machine is on hold (`~/.claude/hooks/HOLD`). Its pushes and deploys run
+   in subprocesses the local Bash guards cannot see, so it checks the hold itself; the merge is
+   decided by ACP.
 3. If the production database lacks this release's migrations, it asks ACP for an exact
    `database.migrate`, applies them and checks again. It applies only migrations marked
    additive; anything else stops the release with the fix.

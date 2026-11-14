@@ -1,10 +1,9 @@
 """What scripts/ff-merge.py and scripts/release.py share: git, the ACP decision and the owner's harness.
 
 A script that pushes or deploys from a subprocess is invisible to the local Bash guards, which
-read only the command line. So before any push or deploy these scripts ask the same two
-questions the guards would: is the machine on hold, and has the owner opened an approval
-window for this repository (`python3 ~/.claude/hooks/approve.py hosted <repo> [minutes]`)?
-On a machine without the harness, ACP's decision is the only gate.
+read only the command line. So these scripts ask ACP themselves (the merge is an exact
+git.protected_ref.update) and, before any push or deploy, check the one local control the guards
+keep: the machine's hold (~/.claude/hooks/HOLD). Owner approval windows are retired; ACP decides.
 
 The bearer token comes from the environment (`latchkey run --env-file .env.local` supplies it),
 falling back to the macOS Keychain service "ACP Gateway Production", and is never printed.
@@ -70,12 +69,8 @@ def bearer(account: str) -> str:
     return result.stdout.strip()
 
 
-def harness_gate(repo_name: str, scope: str = "hosted") -> str:
-    """Refuse while the machine is on hold or no owner approval covers this repository.
-
-    Returns a short note on what allowed it. The harness's own reader is used, so an approval
-    means exactly what it means to the guards (and its use is logged the same way).
-    """
+def harness_gate(repo_name: str) -> str:
+    """Refuse while the machine is on hold, read with the harness's own reader. Returns a short note."""
     home = Path(os.path.expanduser(os.environ.get("HARNESS_HOME", "~/.claude/hooks")))
     source = home / "guard_common.py"
     if not source.is_file():
@@ -85,11 +80,8 @@ def harness_gate(repo_name: str, scope: str = "hosted") -> str:
     spec.loader.exec_module(module)
     hold = module.held()
     if hold:
-        raise Stop(f"the machine is on hold ({hold}); nothing was pushed or deployed")
-    if not module.approved(scope, repo_name):
-        raise Stop(f"no owner approval covers {scope} actions for {repo_name}. The owner opens one from their own "
-                   f"terminal: python3 ~/.claude/hooks/approve.py {scope} {repo_name} 30")
-    return f"owner approval for {scope} {repo_name}"
+        raise Stop(f"the machine is on hold ({hold}); nothing was pushed or deployed for {repo_name}")
+    return "not on hold"
 
 
 def authorize(token: str, owner: str, name: str, action: str, head_sha: str, context: dict, summary: str,
