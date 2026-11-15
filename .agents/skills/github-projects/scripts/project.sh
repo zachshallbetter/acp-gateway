@@ -51,7 +51,7 @@ case "$cmd" in
     if gp_acp_enabled; then
       gp_gateway_get "/internal/projects?owner=$(gp_uri "$owner")" \
         | jq -r --arg a "$star" '.projects[] |
-            "  \(if (.number|tostring)==$a then "★" else " " end) #\(.number)  \(.title)"
+            "  \(if (.number|tostring)==$a then "★" else " " end) #\(.number)  \(.title // "")"
             + (if .allowed then "" else "   [not in the gateway allowlist]" end)'
       exit 0
     fi

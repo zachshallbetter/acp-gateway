@@ -737,8 +737,16 @@ def require_owner(owner):
                       owners_available=known_owners())
 
 
-def project_list(owner):
-    """Every board `owner` exposes to this App, with the number to ask for next."""
+BOARD_LISTING_FIELDS = ("number", "closed", "allowed")
+
+
+def project_list(owner, *, full=False):
+    """Every board `owner` exposes to this App, with the number to ask for next.
+
+    ACP_PROJECT_ALLOWLIST decides which boards agents may read, so a board it
+    does not admit is listed by number only: its title, description and URL are
+    board content too. `full` (the owner's credential) lists everything.
+    """
     owner = require_owner(owner)
     token, credential = owner_token(owner)
     boards, cursor, pages, root, block, errors = [], None, 0, None, {}, []
@@ -753,7 +761,8 @@ def project_list(owner):
         block = found["projectsV2"] or {}
         for node in block.get("nodes") or []:
             node["allowed"] = project_allowed(node["number"], owner)
-            boards.append(node)
+            boards.append(node if full or node["allowed"]
+                          else {name: node.get(name) for name in BOARD_LISTING_FIELDS})
         pages += 1
         info = block.get("pageInfo") or {}
         cursor = info.get("endCursor")
@@ -762,9 +771,9 @@ def project_list(owner):
     return {
         "owner": owner, "owner_type": root, "projects": boards, "snapshot_source": credential,
         "count": len(boards), "total": block.get("totalCount"),
-        "allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", ""),
+        **({"allowlist": os.getenv("ACP_PROJECT_ALLOWLIST", "")} if full else {}),
         "note": "Pass a board's `number` as ?project= to /internal/project-context. `allowed:false` means "
-                "ACP_PROJECT_ALLOWLIST does not admit it yet.",
+                "ACP_PROJECT_ALLOWLIST does not admit it yet, so only its number is listed.",
     }
 
 
@@ -5126,7 +5135,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "A user's ProjectsV2 boards are unreachable to any App -- those owners need a classic "
                             "PAT with read:project in ACP_GITHUB_TOKEN_<OWNER>, listed above by name only."}
         if route == "/internal/projects":
-            return project_list(first("owner"))
+            return project_list(first("owner"), full=self.admin)
         if route == "/internal/project-context":
             return project_context(first("owner"), first("project"))
         if route == "/internal/client-status":

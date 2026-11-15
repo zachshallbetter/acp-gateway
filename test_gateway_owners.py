@@ -231,6 +231,22 @@ def test_project_list_reports_numbers_and_whether_they_are_allowed():
     assert out["owner_type"] == "user" and out["count"] == 2
     assert [b["number"] for b in out["projects"]] == [38, 40]
     assert [b["allowed"] for b in out["projects"]] == [True, False]
+    assert out["projects"][0]["title"] == "Azimuth — World Runtime"
+    assert "title" not in out["projects"][1], "a board the allowlist does not admit is listed by number only"
+    assert "allowlist" not in out
+
+
+def test_the_owner_lists_every_board_in_full():
+    fresh()
+    boards = {"data": {"user": {"projectsV2": {
+        "totalCount": 1, "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [{"number": 40, "title": "Scratch", "closed": True, "shortDescription": "private notes"}]}}}}
+    org_miss = {"data": {"organization": None}, "errors": [{"message": "Could not resolve to an Organization"}]}
+    with patch.dict(os.environ, {"ACP_PROJECT_ALLOWLIST": "zachshallbetter:38"}), \
+         patch("gateway.installation_token", return_value={"token": "t"}), \
+         patch("gateway.urlopen", side_effect=[resp(org_miss), resp(boards)]):
+        out = gateway.project_list("zachshallbetter", full=True)
+    assert out["projects"][0]["shortDescription"] == "private notes" and out["allowlist"] == "zachshallbetter:38"
 
 
 # ---- 5. the field roster a writer needs -----------------------------------

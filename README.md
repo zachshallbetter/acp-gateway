@@ -36,7 +36,8 @@ pattern, not just that one ecosystem.
 - Exposes the reads an agent needs to find its way without being told:
   `GET /internal/installations` (which accounts are readable),
   `GET /internal/projects?owner=` (which boards that account has, each with the
-  number to ask for, and whether the allowlist admits it), and
+  number to ask for, and whether the allowlist admits it; a board it does not
+  admit is listed by number only, except to the owner's credential), and
   `GET /internal/project-context?owner=&project=` — a live ProjectsV2 GraphQL
   snapshot (fields + **every** item, including archived items, paged) for an
   allowlisted board. Each item carries `isArchived`; coordinator queues must

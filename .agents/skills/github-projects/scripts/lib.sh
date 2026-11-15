@@ -149,7 +149,7 @@ gp_target_hint() {
   if [ -n "${OWNER:-}" ]; then
     gp_gateway_get "/internal/projects?owner=$(gp_uri "$OWNER")" 2>/dev/null | jq -r '
       "  boards on \(.owner):",
-      (.projects[]? | "    --project \(.number)  \(.title)"
+      (.projects[]? | "    --project \(.number)  \(.title // "")"
         + (if .allowed then "" else "   [not in the gateway allowlist]" end))' >&2
   else
     gp_gateway_get "/internal/installations" 2>/dev/null | jq -r '
