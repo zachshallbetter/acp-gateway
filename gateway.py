@@ -1508,7 +1508,11 @@ def consume_capability(keys, now, jti, expires_at=None):
     for key in keys:
         entry = security_store().get(key)
         if entry is None:
-            continue
+            if not str(jti).startswith("static:"):
+                continue
+            # A static grant can be spent on a resource that has no containment
+            # record yet; the marker has to persist all the same.
+            entry = security_store().setdefault(key, {})
         used = entry.setdefault("consumed", [])
         if jti not in used:
             used.append(jti)
@@ -3031,12 +3035,21 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
             return finish("DENY", "RECOVERY_AUTHORIZATION_REQUIRED",
                           f"This operation rewrites or replaces protected history, so it needs an explicit "
                           f"recovery authorization naming this exact ref: {why}.")
+        # A single-use grant is spent once per resource, whoever presents it: the
+        # actor is self-asserted, so it must not key the consumption.
+        static_keys = [key for key in trace["keys"] if key.startswith("resource:")]
+        static_jti = f"static:{trace['resource_id']}:{grant.get('recovery_id')}"
+        if grant.get("single_use") and capability_consumed(static_keys, static_jti, now):
+            return finish("DENY", "RECOVERY_AUTHORIZATION_REQUIRED",
+                          "This operation rewrites or replaces protected history, so it needs an explicit "
+                          "recovery authorization naming this exact ref: the single-use recovery "
+                          "authorization has already been used.")
         scope_of = {"ref": context.get("ref"), "old_sha": context.get("old_sha"),
                     "new_sha": context.get("new_sha")}
         body, token = build_capability("operation", parsed, claim, policy, action, scope_of, now,
                                        trace["keys"], authorization_id=grant.get("recovery_id"))
         if grant.get("single_use"):
-            consume_capability(trace["keys"], now, "static:" + str(grant.get("recovery_id")))
+            consume_capability(static_keys, now, static_jti, grant.get("expires_at"))
         return finish("ALLOW", "RECOVERY_AUTHORIZED",
                       "Authorized for exactly the ref, observed SHA and target SHA in the recovery authorization.",
                       recovery_authorization_id=grant.get("recovery_id"),

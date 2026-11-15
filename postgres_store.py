@@ -234,6 +234,14 @@ def _validate_schema_connection(connection) -> None:
         raise StorageError("database audit-chain head is not initialized")
 
 
+def _consumption_actor(keys, jti):
+    """Whose consumption this is. A static recovery grant is spent per resource,
+    whichever actor presents it, so it records the wildcard actor."""
+    if str(jti).startswith("static:"):
+        return "*"
+    return next((key[len("actor:"):] for key in keys if key.startswith("actor:")), None)
+
+
 def _timestamp(value, *, default_now=False):
     if value is None:
         return datetime.now(timezone.utc) if default_now else None
@@ -826,8 +834,8 @@ class PostgresStore:
 
     def capability_consumed(self, keys, jti, now):
         resource = next((key[len("resource:"):] for key in keys if key.startswith("resource:")), None)
-        actor = next((key[len("actor:"):] for key in keys if key.startswith("actor:")), None)
-        if not resource or "/" not in resource or not actor or str(jti).startswith("static:"):
+        actor = _consumption_actor(keys, jti)
+        if not resource or "/" not in resource or not actor:
             return False
         owner, name = resource.split("/", 1)
         return self.connection.execute(
@@ -838,8 +846,8 @@ class PostgresStore:
 
     def consume_capability(self, keys, jti, now, expires_at):
         resource = next((key[len("resource:"):] for key in keys if key.startswith("resource:")), None)
-        actor = next((key[len("actor:"):] for key in keys if key.startswith("actor:")), None)
-        if not resource or "/" not in resource or not actor or str(jti).startswith("static:"):
+        actor = _consumption_actor(keys, jti)
+        if not resource or "/" not in resource or not actor:
             return
         owner, name = resource.split("/", 1)
         cursor = self.connection.execute(

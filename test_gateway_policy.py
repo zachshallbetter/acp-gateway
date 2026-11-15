@@ -517,6 +517,21 @@ def test_an_exact_recovery_authorization_is_honoured():
     assert out["authorized_action"]["ref"] == "refs/heads/main"
 
 
+def test_a_single_use_recovery_authorization_is_spent_once_whoever_presents_it():
+    fresh()
+    once = [{**RECOVERY[0], "single_use": True}]
+    with env(ACP_RECOVERY_AUTHORIZATIONS=json.dumps(once)):
+        first = gateway.authorize(rewrite(recovery_authorization_id="rec-001"), verifier=verifier())
+        again = gateway.authorize(rewrite(recovery_authorization_id="rec-001"), verifier=verifier())
+        other = request("git.history.rewrite", actor_id="github-user:99999",
+                        context={"ref": "refs/heads/main", "old_sha": "bad0001", "new_sha": "good002",
+                                 "recovery_authorization_id": "rec-001"})
+        elsewhere = gateway.authorize(other, verifier=verifier())
+    assert first["decision"] == "ALLOW" and first["reason"] == "RECOVERY_AUTHORIZED", first
+    for out in (again, elsewhere):
+        assert out["decision"] == "DENY" and "already been used" in out["detail"], out
+
+
 def test_a_recovery_authorization_cannot_reach_another_ref_or_sha():
     fresh()
     with env(ACP_RECOVERY_AUTHORIZATIONS=json.dumps(RECOVERY)):
