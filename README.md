@@ -247,7 +247,7 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `CIRCUMVENTION_SUSPECTED`, `POLICY_MODIFICATION_FORBIDDEN`,
 `CREDENTIAL_MODIFICATION_FORBIDDEN`, `ADMINISTRATIVELY_AUTHORIZED`,
 `VERIFIED_AND_PERMITTED`. Metered actions add `WITHIN_BUDGET`, `GRANT_APPLIED`,
-`NO_HOSTED_BUILD`, `BUDGET_EXCEEDED`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
+`NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `BUDGET_EXCEEDED`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
 `SUBAGENT_LIMIT_REACHED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
 `CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
 `PROVIDER_RESPONSE_DIVERGED`, `BUDGET_LEDGER_UNAVAILABLE` and
@@ -313,9 +313,15 @@ A repository opts in by listing the first three in its policy's
    and deployment-wide, and records each allowed action once, keyed by its
    explicit fields (action, provider, repository, ref, commit, workflow, run);
 5. answers `ALLOW` within budget, or `AUTH_REQUIRED` past it with the exact
-   owner grant command. Asking again for the same commit is answered from the
-   record and not counted twice. A commit no provider builds is allowed and not
-   counted (`NO_HOSTED_BUILD`).
+   owner grant command. Asking again for the same pushed commit is answered from
+   the record and not counted twice; a CLI deploy (`cli_deploy`, `railway_up`) or
+   a manual dispatch starts a new run each time, so each invocation is counted
+   (the same `context.tool_use_id` counts once). A commit no provider builds is
+   allowed and not counted (`NO_HOSTED_BUILD`); a CLI deploy to a provider the
+   policy does not meter is refused (`PROVIDER_NOT_METERED`). What builds comes
+   from the repository's evidence for the trigger, never from
+   `context.provider`, and a CLI deploy counts as production whatever ref it
+   claims.
 
 Default limits, signed in `ACP_BUDGET_POLICY` (`scripts/policy-admin.py
 budget-policy`): 20 hosted builds per repository and 60 in all per day, of which

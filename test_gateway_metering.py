@@ -243,6 +243,49 @@ def test_manual_ci_is_coordinator_only_and_capped():
         assert decide(ci("2" * 40), ledger, caller=COORDINATOR, provide=builds)["reason"] == "BUDGET_EXCEEDED"
 
 
+def test_the_caller_cannot_choose_which_builds_are_counted():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        named = decide(request(provider="railway"), ledger)            # vercel builds this push all the same
+        assert named["decision"] == "ALLOW" and named["reason"] == "WITHIN_BUDGET", named
+        assert ledger.ledger_count(metering.budget_day(NOW), ["hosted_build"]) == 1
+        absent = decide(request(trigger="railway_up", sha="3" * 40), ledger, caller=COORDINATOR,
+                        provide=evidence(builds=[]))
+        assert absent["decision"] == "DENY" and absent["reason"] == "PROVIDER_NOT_METERED", absent
+        try:
+            gateway.parse_authorization_request(request(trigger="cli_deploy", provider="railway"))
+            raise AssertionError("a CLI deploy named a provider it does not deploy to")
+        except (gateway.TargetError, metering.MeteringError):
+            pass
+
+
+def test_a_cli_deploy_is_production_whatever_ref_it_claims():
+    with env():
+        fresh()
+        out = decide(request(trigger="cli_deploy", ref="refs/heads/feature-x"), metering.MemoryLedger(),
+                     caller=LANE)
+        assert out["decision"] == "AUTH_REQUIRED" and out["reason"] == "OWNER_REQUIRED", out
+
+
+def test_each_cli_deploy_and_manual_dispatch_is_counted():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        day = metering.budget_day(NOW)
+        for n in range(3):
+            out = decide(request(trigger="cli_deploy", ref="refs/heads/main"), ledger, caller=COORDINATOR,
+                         now=NOW + n)
+            assert out["decision"] == "ALLOW" and not out.get("replayed"), out
+        assert ledger.ledger_count(day, ["hosted_build"]) == 3, "three deploys of one commit are three builds"
+        retried = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_1"), ledger,
+                         caller=COORDINATOR, now=NOW + 5)
+        again = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_1"), ledger,
+                       caller=COORDINATOR, now=NOW + 6)
+        assert again.get("replayed") is True and retried["decision"] == "ALLOW", "one invocation counts once"
+        assert ledger.ledger_count(day, ["hosted_build"]) == 4
+
+
 # ---- fail closed, with remedies -------------------------------------------
 def test_unbounded_workflow_is_refused_with_the_exact_change():
     with env():

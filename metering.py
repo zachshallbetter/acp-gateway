@@ -25,6 +25,13 @@ HOSTED_PROVIDERS = ("vercel", "railway", "github_actions")
 TRIGGERS = {"hosted_build": frozenset({"push", "cli_deploy", "railway_up"}),
             "production_merge": frozenset({"merge", "promote"}),
             "manual_ci": frozenset({"workflow_dispatch", "rerun"})}
+# A CLI deploy targets whatever the linked project deploys, not a branch, so the
+# claimed ref says nothing about whether it reaches production.
+BRANCH_INDEPENDENT_TRIGGERS = frozenset({"cli_deploy", "railway_up"})
+# The provider these triggers start; every other trigger builds every connected provider.
+TRIGGER_PROVIDER = {"cli_deploy": "vercel", "railway_up": "railway"}
+# Each request with these triggers starts a new paid run of the same commit.
+INVOCATION_TRIGGERS = frozenset({"cli_deploy", "railway_up", "workflow_dispatch"})
 CALLER_KINDS = ("shared", "lane", "coordinator", "owner")
 PRODUCTION_CALLERS = frozenset({"coordinator", "owner"})
 HEAVY_MODEL = re.compile(r"opus|fable", re.I)
@@ -84,6 +91,9 @@ def validate_context(action, context, session_id):
         provider = context.get("provider")
         if provider is not None and provider not in HOSTED_PROVIDERS:
             raise MeteringError("context.provider must be vercel, railway or github_actions.", "context.provider")
+        if provider is not None and trigger in TRIGGER_PROVIDER and provider != TRIGGER_PROVIDER[trigger]:
+            raise MeteringError(f"trigger {trigger} deploys to {TRIGGER_PROVIDER[trigger]}, not {provider}.",
+                                "context.provider", f"Send provider: {TRIGGER_PROVIDER[trigger]}, or leave it out.")
         if action == "manual_ci":
             if not WORKFLOW_PATH.match(context.get("workflow") or ""):
                 raise MeteringError("manual_ci needs context.workflow as .github/workflows/<file>.yml.",
@@ -228,7 +238,9 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
     owner, name = claim["owner"], claim["name"]
     metered = policy.get("metered") or {"production_branches": ["main"], "providers": {}}
     branch = context["ref"][len("refs/heads/"):]
-    production = action == "production_merge" or branch in metered["production_branches"]
+    trigger = context.get("trigger")
+    production = action == "production_merge" or branch in metered["production_branches"] \
+        or trigger in BRANCH_INDEPENDENT_TRIGGERS
 
     if not evidence.get("available"):
         reason = "PROVIDER_RESPONSE_DIVERGED" if evidence.get("kind") == "DIVERGED" else "PROVIDER_EVIDENCE_UNAVAILABLE"
@@ -240,14 +252,27 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                        "(ACP_VERCEL_TOKEN / ACP_RAILWAY_TOKEN by name) and GET /internal/posture for the error.",
                        provider_error={"provider": evidence.get("provider"), "kind": evidence.get("kind")})
 
-    building = [b for b in evidence["builds"] if b["would_build"]
-                and (not context.get("provider") or b["provider"] == context["provider"])]
+    # What builds is the repository's evidence for this trigger, never the caller's choice of
+    # provider: a push builds every connected provider whichever one the caller names.
+    building = [b for b in evidence["builds"] if b["would_build"]]
+    if trigger in TRIGGER_PROVIDER and not building:
+        return Outcome("DENY", "PROVIDER_NOT_METERED",
+                       f"{trigger} deploys to {TRIGGER_PROVIDER[trigger]}, but the policy meters no "
+                       f"{TRIGGER_PROVIDER[trigger]} project for {owner}/{name}, so ACP cannot count it.",
+                       f"The owner enrolls the {TRIGGER_PROVIDER[trigger]} project for this repository "
+                       f"(scripts/policy-admin.py enroll), then ask again.",
+                       builds=evidence["builds"])
+    # A push of one commit builds once, so asking again is a replay. A CLI deploy or a manual
+    # dispatch starts a new run each time, so each invocation is its own record.
+    invocation = (context.get("tool_use_id") or request_id) if trigger in INVOCATION_TRIGGERS else None
     keys = {b["provider"]: record_key(action, b["provider"], owner.lower(), name.lower(), context["ref"],
-                                      context["new_sha"], context.get("workflow"), context.get("run_id"))
+                                      context["new_sha"], context.get("workflow"), context.get("run_id"),
+                                      *([invocation] if invocation else []))
             for b in building}
     if not building:
         keys = {"local": record_key(action, "local", owner.lower(), name.lower(), context["ref"],
-                                    context["new_sha"], context.get("workflow"), context.get("run_id"))}
+                                    context["new_sha"], context.get("workflow"), context.get("run_id"),
+                                    *([invocation] if invocation else []))}
     # Replay: the same action asked again is answered from the record, never counted twice.
     # Authority is per caller: a record made for a coordinator does not authorize a lane.
     prior = [ledger.ledger_get(k) for k in keys.values()]
