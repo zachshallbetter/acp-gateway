@@ -363,5 +363,33 @@ class CredentialTests(unittest.TestCase):
                 admin.keychain("ACP_POLICY_SIGNING_KEY")
 
 
+class CallerTokenTests(unittest.TestCase):
+    def test_the_token_reaches_the_keychain_on_stdin_never_on_argv(self):
+        fake = FakeStore(None, version=0, name="callers")
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True)
+        with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                patch.object(subprocess, "run", return_value=completed) as ran, redirect_stdout(io.StringIO()):
+            self.assertEqual(admin.cmd_caller(args), 0)
+        argv = ran.call_args.args[0]
+        self.assertEqual(argv, ["security", "-i"])
+        sent = ran.call_args.kwargs["input"]
+        self.assertTrue(sent.startswith("add-generic-password -U -s "))
+        token = sent.rsplit("-w ", 1)[1].strip().strip('"')
+        self.assertGreaterEqual(len(token), 32)
+        self.assertNotIn(token, " ".join(argv))
+        self.assertEqual(len(fake.writes), 1)
+
+    def test_a_keychain_failure_stores_nothing_in_acp(self):
+        fake = FakeStore(None, version=0, name="callers")
+        failed = subprocess.CompletedProcess([], 1, "", "boom")
+        args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True)
+        with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                patch.object(subprocess, "run", return_value=failed), redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(SystemExit, "Keychain"):
+            admin.cmd_caller(args)
+        self.assertEqual(fake.writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

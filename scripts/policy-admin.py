@@ -615,8 +615,10 @@ def cmd_caller(args) -> int:
                     "token_sha256": hashlib.sha256(token.encode()).hexdigest()})
     document = {"callers_id": "acp-callers", "version": int(current.get("version", 0)) + 1, "callers": callers}
     signed = signed_document(document, key, "callers", rp)
-    stored = subprocess.run(["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", account,
-                             "-w", token], capture_output=True, text=True)
+    # The token goes to `security -i` on stdin, never on argv where `ps` would show it.
+    quoted = [json.dumps(v) for v in (KEYCHAIN_SERVICE, account, token)]
+    stored = subprocess.run(["security", "-i"], capture_output=True, text=True,
+                            input=f"add-generic-password -U -s {quoted[0]} -a {quoted[1]} -w {quoted[2]}\n")
     if stored.returncode != 0:
         raise SystemExit("error: could not store the token in the Keychain; nothing was stored in ACP")
     write_signed("callers", stored_version, signed)
