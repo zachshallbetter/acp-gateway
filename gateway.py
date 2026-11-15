@@ -2837,7 +2837,9 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                    provider_verification_state=trace["verification"].get("available"),
                    authorization_state=trace["state"], old_state=trace["entry_state"],
                    new_state=trace["state"], security_version=trace["security_version"],
-                   decision=decision, reason=reason)
+                   decision=decision, reason=reason, detail=detail, remedy=body.get("remedy"),
+                   expected_ref=body.get("expected_ref"), expected_revision=body.get("expected_revision"),
+                   observed_revision=body.get("observed_revision"))
         if trace["incident_id"]:
             touch_incident(trace["incident_id"], now, actor_id=parsed["actor_id"],
                            resource_id=trace["resource_id"], primary_reason=reason,
@@ -3267,11 +3269,23 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
     if action == "git.protected_ref.update":
         if not (context.get("ref") and context.get("old_sha") and context.get("new_sha")):
             return finish("DENY", "MISSING_REF_CONTEXT",
-                          "A protected ref update must state ref, old_sha and new_sha.")
+                          "A protected ref update must state ref, old_sha and new_sha.",
+                          missing=[field for field in ("ref", "old_sha", "new_sha") if not context.get(field)],
+                          remedy="Requesting agent: read the exact remote ref and supply context.ref, "
+                          "context.old_sha and context.new_sha. For creation, use 40 zeroes as old_sha only "
+                          "after confirming the ref is absent; new_sha must already be on the default branch. "
+                          "Request fresh authorization for the same action after correcting the fields.")
         observed = (evidence.get("ref") or {}).get("sha")
         if observed and observed != context["old_sha"]:
             return finish("REVERIFY_REQUIRED", "STALE_REF_STATE",
-                          "The ref has moved since the caller observed it.")
+                          "The remote ref does not match old_sha. A creation request requires the ref "
+                          "to be absent; an update requires its current revision.",
+                          expected_ref=context["ref"], expected_revision=context["old_sha"],
+                          observed_revision=observed,
+                          remedy="Requesting agent: re-read the exact remote ref, review its new state, "
+                          "and replace old_sha with the observed revision. If creation was intended and the "
+                          "ref now exists, reconcile that ref instead of replacing it. Request fresh "
+                          "authorization; do not force-push or change actions to evade this refusal.")
         fast_forward = evidence.get("fast_forward")
         if context.get("force") or context.get("non_fast_forward"):
             fast_forward = False
@@ -3283,19 +3297,35 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                               "GitHub does not hold new_sha yet, so ACP cannot confirm the update is a "
                               "fast-forward. Push new_sha to a non-protected ref (for example its pull "
                               "request branch), then request authorization again.",
-                              expected_ref=context["ref"], expected_revision=context["new_sha"])
+                              expected_ref=context["ref"], expected_revision=context["new_sha"],
+                              remedy="Requesting agent: verify new_sha is available on GitHub. If it is "
+                              "local only, obtain separate git.remote.update authorization to publish a "
+                              "candidate branch, then request this exact protected-ref action again. "
+                              "An approval for the candidate push does not approve the protected update.")
             return finish("REVERIFY_REQUIRED", "FAST_FORWARD_UNVERIFIED",
-                          "ACP could not compare old_sha with new_sha on GitHub, so it cannot confirm "
-                          "the update is a fast-forward. Request authorization again.",
-                          expected_ref=context["ref"], expected_revision=context["new_sha"])
+                          "ACP could not establish the requested ref transition from GitHub evidence. "
+                          "A failed comparison alone does not establish that new_sha is unpublished.",
+                          expected_ref=context["ref"], expected_revision=context["new_sha"],
+                          remedy="Requesting agent: read the exact remote ref and verify new_sha on GitHub. "
+                          "For creation, confirm absence, keep the zero old_sha, and verify new_sha is on "
+                          "the default branch; for an update, supply the current remote old_sha. Request "
+                          "authorization once after those checks. If verification still fails, give the "
+                          "ACP operator this request_id and the ref/SHA pair to inspect provider access. "
+                          "Local E0/E1 work may continue; the protected effect still needs a fresh ALLOW.")
 
     elevated = action in RECOVERY_ACTIONS or (action == "git.protected_ref.update" and fast_forward is not True)
     if elevated:
         grant, why = recovery_authorized(policy, claim, action, context, now)
         if grant is None:
             return finish("DENY", "RECOVERY_AUTHORIZATION_REQUIRED",
-                          f"This operation rewrites or replaces protected history, so it needs an explicit "
-                          f"recovery authorization naming this exact ref: {why}.")
+                          ("This request is outside the verified creation path, so it needs an explicit "
+                           if context.get("old_sha") == NEW_REF_SHA else
+                           "This operation rewrites or replaces protected history, so it needs an explicit ") +
+                          f"recovery authorization naming this exact ref: {why}.",
+                          remedy="Recovery administrator: review the exact ref, observed SHA and target SHA "
+                          "and use the separate authenticated recovery path if the transition is intended. "
+                          "The requesting agent must preserve the candidate and request_id; it cannot "
+                          "create a recovery grant or treat a deviation record as authorization.")
         # A single-use grant is spent once per resource, whoever presents it: the
         # actor is self-asserted, so it must not key the consumption.
         static_keys = [key for key in trace["keys"] if key.startswith("resource:")]
@@ -3304,7 +3334,10 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
             return finish("DENY", "RECOVERY_AUTHORIZATION_REQUIRED",
                           "This operation rewrites or replaces protected history, so it needs an explicit "
                           "recovery authorization naming this exact ref: the single-use recovery "
-                          "authorization has already been used.")
+                          "authorization has already been used.",
+                          remedy="Recovery administrator: the registered single-use grant is spent. Issue a "
+                          "new recovery authorization for this exact ref if the transition is still intended. "
+                          "The requesting agent must preserve the candidate and request_id.")
         scope_of = {"ref": context.get("ref"), "old_sha": context.get("old_sha"),
                     "new_sha": context.get("new_sha")}
         body, token = build_capability("operation", parsed, claim, policy, action, scope_of, now,
@@ -5042,7 +5075,7 @@ def github_evidence(claim, context=None, policy=None):
             except HTTPError as exc:
                 found["fast_forward"] = None
                 if exc.code == 404:
-                    found["fast_forward_unknown"] = "REVISION_NOT_PUBLISHED"
+                    found["error"] = "GitHub returned HTTP 404 for the default-branch comparison; target publication is unverified"
             except Exception:
                 found["fast_forward"] = None
         else:
@@ -5052,10 +5085,10 @@ def github_evidence(claim, context=None, policy=None):
             compared = repo_api(owner, f"/repos/{owner}/{name}/compare/{context['old_sha']}...{context['new_sha']}")
             found["fast_forward"] = compared.get("status") in ("ahead", "identical")
         except HTTPError as exc:
-            # 404: GitHub does not hold one of the revisions yet, so ancestry is unknown, not refuted.
+            # A comparison 404 cannot identify which revision or permission is missing.
             found["fast_forward"] = None
             if exc.code == 404:
-                found["fast_forward_unknown"] = "REVISION_NOT_PUBLISHED"
+                found["error"] = "GitHub returned HTTP 404 for the revision comparison; target publication is unverified"
         except Exception:
             found["fast_forward"] = None
     return found

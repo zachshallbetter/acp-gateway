@@ -229,6 +229,12 @@ def test_a_moved_ref_is_reverified_not_allowed():
                                                  "new_sha": "def456"}),
                                 verifier=verifier(ref_sha="999999", fast_forward=True))
     assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "STALE_REF_STATE", out
+    assert out["observed_revision"] == "999999" and out["expected_revision"] == "abc123", out
+    assert "Requesting agent" in out["remedy"] and "re-read" in out["remedy"], out
+    assert "capability_token" not in out and "authorized_action" not in out, out
+    event = gateway.AUDIT[-1]
+    assert event["request_id"] == out["request_id"] and event["remedy"] == out["remedy"], event
+    assert event["observed_revision"] == "999999" and event["expected_revision"] == "abc123", event
 
 
 def test_an_unpublished_new_sha_is_reverified_not_treated_as_a_rewrite():
@@ -251,6 +257,9 @@ def test_an_uncomparable_update_is_reverified():
                                                  "new_sha": "def456"}),
                                 verifier=verifier(ref_sha="abc123", fast_forward=None))
     assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "FAST_FORWARD_UNVERIFIED", out
+    assert "once after those checks" in out["remedy"] and "ACP operator" in out["remedy"], out
+    assert "Local E0/E1 work may continue" in out["remedy"], out
+    assert "capability_token" not in out and "authorized_action" not in out, out
 
 
 def test_a_diverged_update_still_requires_recovery():
@@ -261,9 +270,11 @@ def test_a_diverged_update_still_requires_recovery():
                                                  "new_sha": "def456"}),
                                 verifier=verifier(ref_sha="abc123", fast_forward=False))
     assert out["decision"] == "DENY" and out["reason"] == "RECOVERY_AUTHORIZATION_REQUIRED", out
+    assert out["remedy"].startswith("Recovery administrator:"), out
+    assert "capability_token" not in out and "authorized_action" not in out, out
 
 
-def test_github_evidence_marks_a_missing_revision_unpublished():
+def test_github_comparison_404_does_not_claim_the_target_is_unpublished():
     from urllib.error import HTTPError
 
     def api(owner, path):
@@ -276,7 +287,8 @@ def test_github_evidence_marks_a_missing_revision_unpublished():
     with env(**{gateway.owner_env_name(OWNER): "token"}), patch.object(gateway, "repo_api", api):
         found = gateway.github_evidence({"owner": OWNER, "name": REPO},
                                         {"ref": "refs/heads/main", "old_sha": "abc123", "new_sha": "def456"})
-    assert found["fast_forward"] is None and found["fast_forward_unknown"] == "REVISION_NOT_PUBLISHED", found
+    assert found["fast_forward"] is None and "fast_forward_unknown" not in found, found
+    assert "HTTP 404" in found["error"] and "publication is unverified" in found["error"], found
 
 
 def creation_api(ref_exists=False, status="behind", compare_code=None):
@@ -334,10 +346,38 @@ def test_a_new_ref_that_already_exists_or_cannot_be_read_is_not_assumed_new():
     assert creation_evidence(unreadable)["fast_forward"] is None
 
 
-def test_a_new_ref_with_an_unpublished_sha_is_reported_unpublished():
+def test_a_new_ref_with_a_failed_comparison_does_not_claim_the_target_is_unpublished():
     api, _ = creation_api(compare_code=404)
     found = creation_evidence(api)
-    assert found["fast_forward"] is None and found["fast_forward_unknown"] == "REVISION_NOT_PUBLISHED", found
+    assert found["fast_forward"] is None and "fast_forward_unknown" not in found, found
+    assert "default-branch comparison" in found["error"], found
+
+
+def test_missing_ref_context_names_fields_and_preserves_the_creation_path():
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update", context={
+            "ref": "refs/tags/v1.0.0", "new_sha": "def456"}), verifier=verifier())
+    assert out["decision"] == "DENY" and out["reason"] == "MISSING_REF_CONTEXT", out
+    assert out["missing"] == ["old_sha"], out
+    assert "40 zeroes" in out["remedy"] and "same action" in out["remedy"], out
+    assert "capability_token" not in out and "authorized_action" not in out, out
+
+
+def test_failed_tag_creation_comparison_gives_checks_and_a_bounded_handoff():
+    api, _ = creation_api(compare_code=404)
+    fresh()
+    with env():
+        out = gateway.authorize(request("git.protected_ref.update", context={
+            "ref": "refs/tags/v1.0.0", "old_sha": gateway.NEW_REF_SHA,
+            "new_sha": "def456"}),
+            verifier=lambda *_: {**creation_evidence(api), "notice_sha256": NOTICE})
+    assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "FAST_FORWARD_UNVERIFIED", out
+    assert out["authorization_state"] == "NORMAL", out
+    assert "does not establish" in out["detail"], out
+    assert "confirm absence" in out["remedy"] and "once after those checks" in out["remedy"], out
+    assert "ACP operator" in out["remedy"] and "request_id" in out["remedy"], out
+    assert "capability_token" not in out and "authorized_action" not in out, out
 
 
 def test_creating_a_tag_on_the_default_branch_is_allowed_and_others_need_recovery():

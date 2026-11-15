@@ -226,7 +226,7 @@ and permits **only** that exact action, ref and SHA pair.
 | `ALLOW` | `A0` | Proceed with exactly the authorized action. Routine; needs no user interaction. |
 | `DENY` | `A1` | Do not proceed. |
 | `AUTH_REQUIRED` | `A2` | Complete the authentication flow in `auth`, then retry. |
-| `REVERIFY_REQUIRED` | `A3` | ACP could verify this repository before and cannot now. Do not proceed. |
+| `REVERIFY_REQUIRED` | `A3` | Required repository or ref evidence is unavailable, stale, or incomplete. The protected effect cannot proceed; inspect the reason and remedy. |
 | `QUARANTINE` | `A4` | Containment. Do not proceed, and do not attempt repair. |
 | `LOCKED` | `A5` | Controlled operations are suspended until authenticated administrative recovery. |
 | `RECOVERY_AUTHORIZED` | `A6` | One exact recovery transition is authorized, once. Nothing else is. |
@@ -252,6 +252,31 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
 `PROVIDER_RESPONSE_DIVERGED`, `BUDGET_LEDGER_UNAVAILABLE` and
 `BUDGET_POLICY_UNAVAILABLE`.
+
+### Correcting a request after refusal
+
+Read `decision`, `reason`, `detail`, `remedy`, `authorization_state`, and
+`request_id` together. A ref verification failure with `authorization_state:
+NORMAL` is distinct from containment or an administrator-only recovery.
+
+| Reason | Safe next step | Responsible role |
+| --- | --- | --- |
+| `MISSING_REF_CONTEXT` | Supply the listed `missing` fields. For creation, confirm the ref is absent and use the zero `old_sha`; retain the exact action, ref, and target revision. | Requesting agent |
+| `STALE_REF_STATE` | Re-read the exact remote ref and reconcile its observed revision before requesting authorization again. Never overwrite a ref that appeared during creation. | Requesting agent |
+| `FAST_FORWARD_UNVERIFIED` | Verify the remote ref and target. Creation additionally requires the target to be on the default branch. Make one corrected request; if evidence remains unavailable, hand its `request_id` and ref/SHA pair to the ACP operator. | Requesting agent, then ACP operator |
+| `REVISION_NOT_PUBLISHED` | Independently check the target; publish a local candidate only through a separately authorized branch push, then request the original protected effect again. | Requesting agent |
+| `RECOVERY_AUTHORIZATION_REQUIRED` | Preserve the candidate and request ID for review through the separate authenticated recovery path. | Recovery administrator |
+
+A GitHub comparison HTTP 404 alone does not establish which revision or
+permission is missing. ACP reports it as unverified comparison evidence,
+without asserting that the target commit is unpublished. Existing reason codes
+remain supported. Guidance is not authorization: every retry requires a fresh
+exact `ALLOW`. Do not change action names, force-push, repeatedly poll, or use a
+deviation record to evade a refusal. Bounded local E0/E1 work may continue;
+`QUARANTINE` and `LOCKED` retain their separate containment procedures.
+Decision audit events retain the same detail, remedy, and expected/observed
+revision fields alongside `request_id`, so a later investigation can recover
+the instructions actually returned to the agent.
 
 ### Repository trust
 
