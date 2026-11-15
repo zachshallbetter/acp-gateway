@@ -877,7 +877,7 @@ class PostgresStore:
 
     _LEDGER_COLUMNS = ("record_key", "request_id", "action", "provider", "resource_owner", "resource_name",
                        "ref", "sha", "caller_kind", "caller_id", "reason", "reason_code", "counted",
-                       "budget_day", "grant_id", "evidence_digest", "created_at")
+                       "budget_day", "grant_id", "evidence_digest", "created_at", "project")
 
     def ledger_get(self, key):
         row = self.connection.execute(
@@ -896,16 +896,55 @@ class PostgresStore:
         if cursor.rowcount != 1:
             raise StorageError("metered action was recorded concurrently")
 
-    def ledger_count(self, day, actions, owner=None, name=None, provider=None, distinct_sha=False):
+    def ledger_count(self, day, actions, owner=None, name=None, provider=None, distinct_sha=False,
+                     project=None, reason_code=None):
         clauses, parameters = ["counted", "budget_day = %s", "action = ANY(%s)"], [day, list(actions)]
-        for column, value in (("resource_owner", owner), ("resource_name", name), ("provider", provider)):
+        for column, value in (("resource_owner", owner), ("resource_name", name), ("provider", provider),
+                              ("project", project), ("reason_code", reason_code)):
             if value is not None:
                 clauses.append(f"{column} = %s")
-                parameters.append(value.lower() if column != "provider" else value)
+                parameters.append(value.lower() if column in ("resource_owner", "resource_name") else value)
         measure = "count(DISTINCT sha)" if distinct_sha else "count(*)"
         return self.connection.execute(
             f"SELECT {measure} AS count FROM spend_ledger WHERE " + " AND ".join(clauses), parameters
         ).fetchone()["count"]
+
+    def ledger_recent(self, actions, provider, project, since):
+        """Creation times (epoch, oldest first) of one project's counted builds since `since`."""
+        rows = self.connection.execute(
+            "SELECT EXTRACT(EPOCH FROM created_at) AS at FROM spend_ledger WHERE counted AND action = ANY(%s) "
+            "AND provider = %s AND project = %s AND created_at >= %s ORDER BY created_at LIMIT %s",
+            (list(actions), provider, project, _timestamp(since), MAX_STATE_ROWS)).fetchall()
+        return [float(row["at"]) for row in rows]
+
+    def ledger_project_days(self, actions, provider, project, days):
+        """{day: counted builds} for one project over the given budget days."""
+        rows = self.connection.execute(
+            "SELECT budget_day, count(*) AS count FROM spend_ledger WHERE counted AND action = ANY(%s) "
+            "AND provider = %s AND project = %s AND budget_day = ANY(%s::date[]) GROUP BY budget_day",
+            (list(actions), provider, project, list(days))).fetchall()
+        return {row["budget_day"].isoformat(): row["count"] for row in rows}
+
+    def ledger_sha_refs(self, actions, owner, name, sha):
+        """The refs one commit was already counted under, for this repository."""
+        rows = self.connection.execute(
+            "SELECT DISTINCT ref FROM spend_ledger WHERE counted AND action = ANY(%s) AND resource_owner = %s "
+            "AND resource_name = %s AND sha = %s AND ref IS NOT NULL ORDER BY ref",
+            (list(actions), (owner or "").lower(), (name or "").lower(), sha)).fetchall()
+        return [row["ref"] for row in rows]
+
+    def ledger_repositories(self, day, actions, provider=None, project=None):
+        """[{repository, used}] for a day, most used first: who consumed a scope."""
+        clauses, parameters = ["counted", "budget_day = %s", "action = ANY(%s)", "resource_owner IS NOT NULL"], \
+            [day, list(actions)]
+        for column, value in (("provider", provider), ("project", project)):
+            if value is not None:
+                clauses.append(f"{column} = %s")
+                parameters.append(value)
+        rows = self.connection.execute(
+            "SELECT resource_owner || '/' || resource_name AS repository, count(*) AS used FROM spend_ledger "
+            "WHERE " + " AND ".join(clauses) + " GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 20", parameters).fetchall()
+        return [{"repository": row["repository"], "used": row["used"]} for row in rows]
 
     def ledger_day(self, day):
         rows = self.connection.execute(

@@ -78,6 +78,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = Path(__file__).resolve().parent.parent
@@ -555,6 +556,10 @@ def cmd_enroll(args) -> int:
         print("dry run: pass --apply to store it in ACP")
         return 0
     write_document(version, updated)
+    if len(args.repositories) == 1:
+        # The gateway loads the new document within seconds; show what it now sees for this repository.
+        time.sleep(5)
+        print_coverage(args.repositories[0])
     return 0
 
 
@@ -635,6 +640,34 @@ def cmd_caller(args) -> int:
     return 0
 
 
+def print_coverage(repository: str | None = None) -> int:
+    """The coverage audit from the gateway: every live Vercel project, metered or flagged with its fix."""
+    query = ""
+    if repository:
+        owner, _, name = repository.partition("/")
+        query = "?" + urllib.parse.urlencode({"owner": owner, "name": name})
+    result = gateway_call("/internal/coverage" + query, keychain("ACP_GATEWAY_TOKEN"),
+                          keychain("ACP_POLICY_ADMIN_TOKEN"))
+    print("coverage: " + ", ".join(f"{count} {status.lower()}" for status, count in result["summary"].items() if count))
+    for row in result["projects"]:
+        if row["status"] == "METERED":
+            continue
+        print(f"  {row['status']:<19} {row['name'] or row['project_id']:<32} "
+              f"{row['linked_repository'] or row['metered_for'] or '(no repository)'}")
+        if row.get("remedy"):
+            print(f"      {row['remedy']}")
+    for repo, command in sorted({(r["linked_repository"] or r["metered_for"], r["command"])
+                                 for r in result["projects"] if r.get("command")}):
+        print(f"  fix {repo}: {command}")
+    for error in result["errors"]:
+        print(f"  error reading {error['provider']} {error.get('team_id', '')}: {error['detail']}")
+    return 1 if any(r["status"] != "METERED" for r in result["projects"]) or result["errors"] else 0
+
+
+def cmd_coverage(args) -> int:
+    return print_coverage(args.repository)
+
+
 def write_document(version: int, document) -> None:
     """Store the policy document signed on `version`, and mirror it to policies/production.json."""
     write_signed("policy", version, document)
@@ -695,6 +728,8 @@ def main() -> int:
                         help='JSON {"OWNER/NAME": {"project_id": ID, "service_ids": [ID, ...]}} for many repositories')
     enroll.add_argument("--production-branch", action="append", default=[])
     enroll.add_argument("--apply", action="store_true")
+    coverage = sub.add_parser("coverage", help="every live Vercel project, metered or flagged with its fix")
+    coverage.add_argument("repository", nargs="?", metavar="OWNER/NAME")
     caller = sub.add_parser("caller", help="issue a lane or coordinator credential")
     caller.add_argument("caller_id")
     caller.add_argument("--kind", required=True, choices=["lane", "coordinator"])
@@ -705,7 +740,8 @@ def main() -> int:
         raise SystemExit("error: run this from an acp-gateway checkout")
     return {"register": cmd_register, "grant": cmd_grant, "repin": cmd_repin,
             "unregister": cmd_unregister, "meter": cmd_meter, "budget-policy": cmd_budget_policy,
-            "budget-grant": cmd_budget_grant, "caller": cmd_caller, "enroll": cmd_enroll}[args.command](args)
+            "budget-grant": cmd_budget_grant, "caller": cmd_caller, "enroll": cmd_enroll,
+            "coverage": cmd_coverage}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -247,7 +247,9 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `CIRCUMVENTION_SUSPECTED`, `POLICY_MODIFICATION_FORBIDDEN`,
 `CREDENTIAL_MODIFICATION_FORBIDDEN`, `ADMINISTRATIVELY_AUTHORIZED`,
 `VERIFIED_AND_PERMITTED`. Metered actions add `WITHIN_BUDGET`, `GRANT_APPLIED`,
-`NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `OVER_BUDGET_NOTED`, `BUDGET_EXCEEDED`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
+`NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `OVER_BUDGET_NOTED`, `BUDGET_EXCEEDED`, `PRIORITY_GRANTED`,
+`BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY`, `SERVICE_LIMIT_REACHED`,
+`SERVICE_OVER_LIMIT`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
 `SUBAGENT_LIMIT_REACHED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
 `CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
 `PROVIDER_RESPONSE_DIVERGED`, `BUDGET_LEDGER_UNAVAILABLE` and
@@ -335,11 +337,27 @@ A repository opts in by listing the first three in its policy's
    workflows are read at `new_sha`), and whether those workflows are bounded;
 3. refuses a workflow with no `timeout-minutes` or no concurrency group
    (`WORKFLOW_UNBOUNDED`), naming the lines to add;
-4. counts the builds against today's limits (UTC) per repository, per provider
-   and deployment-wide, and records each allowed action once, keyed by its
-   explicit fields (action, provider, repository, ref, commit, workflow, run);
-5. answers `ALLOW` within budget, or `AUTH_REQUIRED` past it with the exact
-   owner grant command. Asking again for the same pushed commit is answered from
+4. reads the live state of each service it would build on (Vercel: today's
+   deployments and builds in flight across the team; Railway: today's
+   deployments and the workspace usage limit), falling back to its own ledger
+   for a service it cannot read;
+5. paces builds of each provider project: one already running
+   (`BUILD_IN_FLIGHT`), one less than `min_spacing_seconds` after the last
+   (`BUILD_PACED`), a burst of `burst_builds` in `burst_minutes`
+   (`BUILD_BURST`) or a service with `per_provider_concurrent` builds running
+   (`SERVICE_AT_CAPACITY`) is answered `REVERIFY_REQUIRED` with `retry_after`
+   seconds: commit locally, keep working, push once later;
+6. counts the builds against today's budget (UTC) for each provider project
+   (a Vercel project, a Railway project, a workflow) and against each service's
+   ceiling, and records each allowed action once per project, keyed by its
+   explicit fields (action, provider, repository, ref, commit, workflow, run,
+   and the project when one push builds several projects of one provider);
+7. answers `ALLOW` within budget, or `AUTH_REQUIRED` past it with the exact
+   owner grant command. Every repository decision carries `advice`: each
+   project's use today and recent pace, the services' state, what the push
+   triggers, and recommendations such as batching pushes, waiting for a running
+   build, turning off preview builds nobody opens, or not pushing one commit
+   under two branches. Asking again for the same pushed commit is answered from
    the record and not counted twice; a CLI deploy (`cli_deploy`, `railway_up`) or
    a manual dispatch starts a new run each time, so each invocation is counted
    (the same `context.tool_use_id` counts once). A commit no provider builds is
@@ -350,10 +368,38 @@ A repository opts in by listing the first three in its policy's
    claims.
 
 Default limits, signed in `ACP_BUDGET_POLICY` (`scripts/policy-admin.py
-budget-policy`): 20 hosted builds per repository and 60 in all per day, of which
-Vercel 40, Railway 10 and Actions 30; 5 production merges per repository; 10
-manual CI runs; 6 concurrent heavy subagents per session. A policy's `metered`
-block may lower or raise a repository's own hosted-build and merge limits.
+budget-policy`). Each provider project's daily budget is 1.5 times its busiest
+day of the last week, kept between `project_floor` 15 and `project_ceiling` 40
+(`per_project_per_day` fixes one number instead). Service ceilings,
+`per_provider_per_day`, compare with the provider's own count of today's
+deployments where it can be read: Vercel 150, Railway 30, Actions 100; and at
+most 4 Vercel builds in flight (`per_provider_concurrent`). Builds of one project
+are spaced 120 seconds apart (`min_spacing_seconds`), and 5 in 30 minutes is a
+burst (`burst_builds`, `burst_minutes`). 5 production merges per repository; 10
+manual CI runs; 6 concurrent heavy subagents per session. The repository and
+deployment-wide totals (`per_repo_per_day` 20, `per_day_total` 60) are reported
+in `budget.usage` with `enforced: false`, never enforced: one project's builds
+never refuse another's. A policy's `metered` block may set `hosted_build.per_day`
+for each of its projects, `projects: {<project id>: {per_day}}` for one, and its
+merge limit.
+
+**Priority.** A lane or coordinator that cannot continue without a push sends
+`context.priority: {blocking: continue_work|release|fix, reason}`. ACP waives
+spacing, a running build of the project and the project's own budget for it
+(`PRIORITY_GRANTED`, counted and recorded as such) up to
+`priority_per_project_per_day` 3 times a project a day. It never waives a burst,
+a saturated service or a service ceiling, and the shared bearer cannot ask.
+Refusals priority would clear carry `priority_request`. Priority is not spent
+when nothing needed waiving.
+
+**Coverage.** `GET /internal/coverage` matches every live Vercel project in the
+metered teams to the policies: `METERED`, `MISLINKED` (metered for one repository,
+git-linked to another), `UNMETERED_GOVERNED`, `UNGOVERNED`, `UNLINKED` or
+`MISSING` (a metered id the team no longer has), each with its remedy and one
+`enroll` command per repository. `?owner=&name=` narrows it to one repository,
+which is all a scoped caller may ask; the full audit is for the coordinator, the
+owner or the admin credential. `scripts/policy-admin.py coverage [OWNER/NAME]`
+prints it, and `enroll` prints it for the repository it just enrolled.
 
 A production merge costs nothing by itself (its builds are metered as hosted
 builds), so for the coordinator and the owner the daily merge count is awareness,

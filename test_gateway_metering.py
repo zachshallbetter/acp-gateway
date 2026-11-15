@@ -50,7 +50,18 @@ def env(policy_body=None, limits=None, budget_doc=True, **extra):
     return patch.dict(os.environ, base, clear=False)
 
 
+# Builds of one project are paced, so a test that makes several in a row advances a clock between them
+# (ten minutes each, well inside one budget day) unless it passes `now` itself.
+_CLOCK = {"now": NOW}
+
+
+def tick():
+    _CLOCK["now"] += 600
+    return _CLOCK["now"]
+
+
 def fresh():
+    _CLOCK["now"] = NOW
     gateway._REGISTRY.update(key=None, value=None)
     gateway._BUDGETS.update(key=None, value=None)
     gateway._CALLERS.update(key=None, value=None)
@@ -68,13 +79,16 @@ def verifier():
     return verify
 
 
-def evidence(builds=None, workflows=None, available=True, kind=None):
+def evidence(builds=None, workflows=None, available=True, kind=None, capacity=None):
     def provide(action, policy_body, claim, context):
         if not available:
             return {"available": False, "kind": kind or "UNAVAILABLE", "provider": "vercel", "detail": "HTTP 503"}
         rows = builds if builds is not None else [
             {"provider": "vercel", "project": "widget", "would_build": True, "why": "builds every push"}]
-        return {"available": True, "builds": rows, "workflows": workflows or [], "digest": "d" * 64}
+        out = {"available": True, "builds": rows, "workflows": workflows or [], "digest": "d" * 64}
+        if capacity is not None:
+            out["capacity"] = capacity
+        return out
     return provide
 
 
@@ -87,7 +101,8 @@ def request(action="hosted_build", ref="refs/heads/feature", sha=SHA, **context)
             "context": {k: v for k, v in ctx.items() if v is not None}}
 
 
-def decide(body, ledger, caller=None, provide=None, now=NOW):
+def decide(body, ledger, caller=None, provide=None, now=None):
+    now = tick() if now is None else now
     return gateway.authorize(body, verifier=verifier(), now=now, caller=caller,
                              provider_evidence=provide or evidence(), ledger=ledger)
 
@@ -184,13 +199,211 @@ def test_owner_grant_lets_one_more_through_and_is_used_up():
         assert decide(request(sha="3" * 40), ledger)["decision"] == "AUTH_REQUIRED"
 
 
-def test_deployment_wide_and_provider_limits_count_across_repositories():
+def test_a_service_ceiling_counts_every_repository_on_that_service():
     with env(limits={"hosted_build": {"per_provider_per_day": {"vercel": 1}}}):
         fresh()
         ledger = metering.MemoryLedger()
         assert decide(request(sha="1" * 40), ledger)["decision"] == "ALLOW"
-        over = decide(request(sha="2" * 40), ledger)
-        assert over["decision"] == "AUTH_REQUIRED" and over["budget"]["exceeded"]["scope"] == "vercel"
+        over = decide(request(sha="2" * 40), ledger, provide=evidence(builds=[
+            {"provider": "vercel", "project": "other-site", "project_id": "prj_other", "would_build": True,
+             "why": "builds every push"}]))
+        assert over["decision"] == "AUTH_REQUIRED" and over["reason"] == "SERVICE_LIMIT_REACHED", over
+        assert over["budget"]["exceeded"]["scope"] == "service vercel"
+        assert "priority_request" not in over, "priority never waives a service ceiling"
+
+
+# ---- per-project budgets, pacing, priority and advice ----------------------
+SITE = {"provider": "vercel", "project": "site", "project_id": "prj_site", "would_build": True,
+        "why": "Vercel builds every push to a connected repository"}
+DOCS = {"provider": "vercel", "project": "docs", "project_id": "prj_docs", "would_build": True,
+        "why": "Vercel builds every push to a connected repository"}
+
+
+def test_one_projects_budget_never_refuses_another_project():
+    with env(limits={"hosted_build": {"per_project_per_day": 2}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        for sha in ("1" * 40, "2" * 40):
+            assert decide(request(sha=sha), ledger, provide=evidence(builds=[SITE]))["decision"] == "ALLOW"
+        site = decide(request(sha="3" * 40), ledger, provide=evidence(builds=[SITE]))
+        assert site["reason"] == "BUDGET_EXCEEDED" and site["budget"]["exceeded"]["scope"] == "project vercel/site"
+        docs = decide(request(sha="4" * 40), ledger, provide=evidence(builds=[DOCS]))
+        assert docs["decision"] == "ALLOW" and docs["reason"] == "WITHIN_BUDGET", docs
+        totals = {u["scope"]: u for u in docs["budget"]["usage"]}
+        assert totals["deployment-wide hosted-build"]["enforced"] is False, "totals are reported, not enforced"
+
+
+def test_a_projects_default_budget_follows_its_own_history():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        for index in range(20):                                   # 20 builds of prj_site yesterday
+            ledger.ledger_insert({"record_key": f"{index:064x}", "request_id": f"r{index}", "action": "hosted_build",
+                                  "provider": "vercel", "project": "prj_site", "resource_owner": "example-org",
+                                  "resource_name": "widget", "ref": "refs/heads/x", "sha": "c" * 40,
+                                  "caller_kind": "lane", "caller_id": "l", "reason": "earlier work today",
+                                  "counted": True, "reason_code": "WITHIN_BUDGET",
+                                  "budget_day": metering.budget_day(NOW - 86400), "grant_id": None,
+                                  "evidence_digest": None, "created_at": NOW - 86400})
+        out = decide(request(), ledger, provide=evidence(builds=[SITE]))
+        usage = {u["scope"]: u for u in out["budget"]["usage"]}["project vercel/site"]
+        assert usage["limit"] == 30 and usage["limit_source"].startswith("history"), usage
+        quiet = decide(request(sha="2" * 40), ledger, provide=evidence(builds=[DOCS]))
+        assert {u["scope"]: u for u in quiet["budget"]["usage"]}["project vercel/docs"]["limit"] == 15, "the floor"
+
+
+def test_a_project_override_in_the_repository_policy_wins():
+    metered = {"production_branches": ["main"], "projects": {"prj_site": {"per_day": 1}},
+               "providers": {"vercel": {"project_ids": ["prj_site", "prj_docs"]}}}
+    with env(policy_body=policy(metered=metered)):
+        fresh()
+        ledger = metering.MemoryLedger()
+        assert decide(request(sha="1" * 40), ledger, provide=evidence(builds=[SITE]))["decision"] == "ALLOW"
+        assert decide(request(sha="2" * 40), ledger, provide=evidence(builds=[SITE]))["reason"] == "BUDGET_EXCEEDED"
+
+
+def test_record_keys_are_unchanged_for_one_project_and_distinct_for_several():
+    context = {"ref": "refs/heads/feature", "new_sha": SHA}
+    before = metering.record_key("hosted_build", "vercel", OWNER.lower(), REPO.lower(), "refs/heads/feature", SHA,
+                                 None, None)
+    keys = metering._record_keys("hosted_build", OWNER, REPO, context, None, [SITE])
+    assert keys == {("vercel", "prj_site"): before}, "a single project keeps the key every earlier record has"
+    both = metering._record_keys("hosted_build", OWNER, REPO, context, None, [SITE, DOCS])
+    assert len(set(both.values())) == 2 and before not in both.values()
+
+
+def test_two_projects_of_one_repository_are_two_records():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        out = decide(request(), ledger, provide=evidence(builds=[SITE, DOCS]))
+        assert out["decision"] == "ALLOW", out
+        rows = ledger.ledger_day(metering.budget_day(NOW))
+        assert sorted(r["project"] for r in rows) == ["prj_docs", "prj_site"]
+        assert any(r["code"] == "MULTI_SERVICE" for r in out["advice"]["recommendations"])
+
+
+def test_builds_of_one_project_are_spaced_and_priority_waives_the_spacing():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        assert decide(request(sha="1" * 40), ledger, caller=LANE, now=NOW)["decision"] == "ALLOW"
+        paced = decide(request(sha="2" * 40), ledger, caller=LANE, now=NOW + 30)
+        assert paced["decision"] == "REVERIFY_REQUIRED" and paced["reason"] == "BUILD_PACED", paced
+        assert paced["retry_after"] == 91 and paced["priority_request"]["remaining_today"] == 3
+        ask = {"blocking": "continue_work", "reason": "the lane needs CI on this branch to continue"}
+        granted = decide(request(sha="2" * 40, priority=ask), ledger, caller=LANE, now=NOW + 31)
+        assert granted["decision"] == "ALLOW" and granted["reason"] == "PRIORITY_GRANTED", granted
+        row = [r for r in ledger.ledger_day(metering.budget_day(NOW)) if r["sha"] == "2" * 40][0]
+        assert row["reason_code"] == "PRIORITY_GRANTED" and row["counted"]
+        later = decide(request(sha="3" * 40, priority=ask), ledger, caller=LANE, now=NOW + 1000)
+        assert later["reason"] == "WITHIN_BUDGET", "priority is not spent when nothing needed waiving"
+
+
+def test_priority_is_bounded_per_project_and_never_for_the_shared_bearer():
+    ask = {"blocking": "fix", "reason": "the production fix cannot wait for spacing"}
+    with env(limits={"hosted_build": {"priority_per_project_per_day": 1}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        decide(request(sha="1" * 40), ledger, caller=LANE, now=NOW)
+        assert decide(request(sha="2" * 40, priority=ask), ledger, caller=LANE, now=NOW + 10)["reason"] == \
+            "PRIORITY_GRANTED"
+        spent = decide(request(sha="3" * 40, priority=ask), ledger, caller=LANE, now=NOW + 20)
+        assert spent["reason"] == "BUILD_PACED" and "priority_request" not in spent, spent
+        shared = decide(request(sha="4" * 40, priority=ask), ledger, caller=None, now=NOW + 30)
+        assert shared["reason"] == "BUILD_PACED" and "priority_request" not in shared
+
+
+def test_a_burst_is_deferred_even_with_priority():
+    ask = {"blocking": "continue_work", "reason": "the lane needs this branch built to continue"}
+    with env(limits={"hosted_build": {"min_spacing_seconds": 0}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        for n in range(5):
+            assert decide(request(sha=str(n) * 40), ledger, caller=LANE, now=NOW + n * 60)["decision"] == "ALLOW"
+        burst = decide(request(sha="9" * 40, priority=ask), ledger, caller=LANE, now=NOW + 300)
+        assert burst["decision"] == "REVERIFY_REQUIRED" and burst["reason"] == "BUILD_BURST", burst
+        assert burst["retry_after"] == 1501 and "priority_request" not in burst
+
+
+def test_a_build_already_running_defers_the_next_push():
+    flying = [{"provider": "vercel", "source": "live", "deployments_today": 3, "in_flight": 1,
+               "projects_in_flight": {"prj_site": 1}}]
+    with env():
+        fresh()
+        out = decide(request(), metering.MemoryLedger(), caller=LANE, provide=evidence(builds=[SITE], capacity=flying))
+        assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "BUILD_IN_FLIGHT", out
+        assert out["retry_after"] == 60 and out["priority_request"]
+        assert any(r["code"] == "WAIT_FOR_INFLIGHT" for r in out["advice"]["recommendations"])
+
+
+def test_the_service_ceiling_uses_the_providers_own_count_and_railway_over_limit():
+    busy = [{"provider": "vercel", "source": "live", "deployments_today": 150, "in_flight": 0, "projects_in_flight": {}}]
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        out = decide(request(), ledger, caller=COORDINATOR, provide=evidence(builds=[SITE], capacity=busy))
+        assert out["reason"] == "SERVICE_LIMIT_REACHED", out
+        assert {u["scope"]: u for u in out["budget"]["usage"]}["service vercel"]["source"] == "provider"
+        railway = {"provider": "railway", "project": "api", "project_id": "rw-1", "would_build": True, "why": "x"}
+        over = decide(request(trigger="railway_up", ref=None), ledger, caller=COORDINATOR,
+                      provide=evidence(builds=[railway], capacity=[
+                          {"provider": "railway", "source": "live", "deployments_today": 1, "over_limit": True}]))
+        assert over["decision"] == "AUTH_REQUIRED" and over["reason"] == "SERVICE_OVER_LIMIT", over
+        down = [{"provider": "vercel", "source": "unavailable", "detail": "HTTP 503"}]
+        fallback = decide(request(sha="5" * 40), ledger, caller=COORDINATOR,
+                          provide=evidence(builds=[SITE], capacity=down))
+        assert fallback["decision"] == "ALLOW", "an unreadable service falls back to ACP's ledger"
+
+
+def test_a_build_slot_is_deferred_when_the_service_is_saturated():
+    full = [{"provider": "vercel", "source": "live", "deployments_today": 10, "in_flight": 4, "projects_in_flight": {}}]
+    with env():
+        fresh()
+        out = decide(request(), metering.MemoryLedger(), caller=LANE, provide=evidence(builds=[SITE], capacity=full))
+        assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "SERVICE_AT_CAPACITY", out
+        assert out["retry_after"] == 120 and "priority_request" not in out
+        assert any(r["code"] == "SERVICE_BUSY" for r in out["advice"]["recommendations"])
+
+
+def test_advice_names_previews_repeat_commits_and_batching():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        first = decide(request(sha="1" * 40), ledger, caller=LANE, provide=evidence(builds=[SITE]))
+        assert any(r["code"] == "PREVIEW_BUILDS" for r in first["advice"]["recommendations"]), first["advice"]
+        assert first["advice"]["resets_at"] == "2027-01-16T00:00:00Z"
+        for sha in ("2" * 40, "3" * 40):
+            decide(request(sha=sha), ledger, caller=LANE, provide=evidence(builds=[SITE]))
+        again = decide(request(ref="refs/heads/other", sha="3" * 40), ledger, caller=LANE,
+                       provide=evidence(builds=[SITE]))
+        codes = [r["code"] for r in again["advice"]["recommendations"]]
+        assert "SAME_COMMIT" in codes and "BATCH_PUSHES" in codes, codes
+        usage = again["advice"]["project_usage"][0]
+        assert usage["used_today"] == 3 and usage["builds_last_30m"] == 3 and usage["last_build_seconds_ago"] == 600
+
+
+def test_a_budget_refusal_says_who_used_the_scope():
+    with env(limits={"hosted_build": {"per_provider_per_day": {"vercel": 1}}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        decide(request(sha="1" * 40), ledger, provide=evidence(builds=[SITE]))
+        over = decide(request(sha="2" * 40), ledger, provide=evidence(builds=[DOCS]))
+        assert over["advice"]["usage_by_repository"] == [{"repository": "example-org/widget", "used": 1}], over
+        assert over["resets_at"] == "2027-01-16T00:00:00Z"
+
+
+def test_priority_is_validated():
+    with env():
+        fresh()
+        for bad in ({"blocking": "whenever", "reason": "long enough reason"}, {"blocking": "fix", "reason": "x"},
+                    "continue_work"):
+            try:
+                decide(request(priority=bad), metering.MemoryLedger(), caller=LANE)
+            except (gateway.TargetError, metering.MeteringError) as exc:
+                assert "priority" in str(exc) or "priority" in str(getattr(exc, "context", ""))
+            else:
+                raise AssertionError(f"accepted priority {bad!r}")
 
 
 # ---- production ------------------------------------------------------------
@@ -243,7 +456,7 @@ def test_coordinator_merges_past_five_a_day_are_counted_not_refused():
 
 
 def test_hosted_builds_past_budget_are_still_refused():
-    with env(limits={"hosted_build": {"per_repo_per_day": 1}}):
+    with env(limits={"hosted_build": {"per_project_per_day": 1}}):
         fresh()
         ledger = metering.MemoryLedger()
         assert decide(request(ref="refs/heads/main", sha="1" * 40), ledger, caller=COORDINATOR)["decision"] == "ALLOW"
@@ -349,13 +562,13 @@ def test_each_cli_deploy_and_manual_dispatch_is_counted():
         day = metering.budget_day(NOW)
         for n in range(3):
             out = decide(request(trigger="cli_deploy", ref="refs/heads/main"), ledger, caller=COORDINATOR,
-                         now=NOW + n)
+                         now=NOW + n * 600)
             assert out["decision"] == "ALLOW" and not out.get("replayed"), out
         assert ledger.ledger_count(day, ["hosted_build"]) == 3, "three deploys of one commit are three builds"
         retried = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_1"), ledger,
-                         caller=COORDINATOR, now=NOW + 5)
+                         caller=COORDINATOR, now=NOW + 1800)
         again = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_1"), ledger,
-                       caller=COORDINATOR, now=NOW + 6)
+                       caller=COORDINATOR, now=NOW + 1801)
         assert again.get("replayed") is True and retried["decision"] == "ALLOW", "one invocation counts once"
         assert ledger.ledger_count(day, ["hosted_build"]) == 4
 
@@ -640,6 +853,66 @@ def test_grant_route_needs_the_admin_credential():
         with Served() as served:
             status, body = served.call("/internal/budget/grant", TOKEN, body={"action": "hosted_build"})
             assert status == 403 and body["error"] == "ADMIN_REQUIRED"
+
+
+def _coverage_env():
+    widget = policy(metered={"production_branches": ["main"],
+                             "providers": {"vercel": {"project_ids": ["prj_widget", "prj_moved", "prj_gone"]}}})
+    gadget = policy(policy_id="gadget", repository={"owner": OWNER, "name": "Gadget",
+                                                    "canonical_remote": f"https://github.com/{OWNER}/Gadget.git"},
+                    metered=None)
+    gadget.pop("metered")
+    return env(ACP_POLICY=json.dumps([signed(widget), signed(gadget)]), ACP_VERCEL_TEAM_ID="team_abc",
+               ACP_VERCEL_TOKEN="v-token", ACP_POLICY_ADMIN_TOKEN="admin-token-0123456789abcdef")
+
+
+def _team_projects(provider, url, token, body=None):
+    assert "/v9/projects?" in url and "teamId=team_abc" in url
+    link = lambda repo: {"type": "github", "org": repo.split("/")[0], "repo": repo.split("/")[1]}
+    return {"projects": [
+        {"id": "prj_widget", "name": "widget", "link": link(f"{OWNER}/{REPO}")},
+        {"id": "prj_moved", "name": "moved", "link": link(f"{OWNER}/Elsewhere")},
+        {"id": "prj_gadget", "name": "gadget", "link": link(f"{OWNER}/Gadget")},
+        {"id": "prj_stray", "name": "stray", "link": link("Someone/Else")},
+        {"id": "prj_cli", "name": "cli-only"}], "pagination": {"next": None}}
+
+
+def test_coverage_flags_every_project_that_is_not_metered_where_it_builds():
+    with _coverage_env():
+        fresh()
+        gateway.providers._CACHE.clear()
+        view = gateway.coverage_view(now=NOW, fetch=_team_projects)
+    status = {row["project_id"]: row["status"] for row in view["projects"]}
+    assert status == {"prj_widget": "METERED", "prj_moved": "MISLINKED", "prj_gadget": "UNMETERED_GOVERNED",
+                      "prj_stray": "UNGOVERNED", "prj_cli": "UNLINKED", "prj_gone": "MISSING"}, status
+    rows = {row["project_id"]: row for row in view["projects"]}
+    assert rows["prj_gadget"]["command"].endswith(
+        f"enroll {OWNER.lower()}/gadget --vercel prj_gadget --vercel-team team_abc --apply")
+    assert rows["prj_gone"]["command"].endswith(
+        f"enroll {OWNER.lower()}/widget --vercel prj_moved --vercel prj_widget --vercel-team team_abc --apply"), \
+        "re-enrolling drops the id that no longer exists and keeps the rest"
+    assert "Elsewhere" in rows["prj_moved"]["remedy"] or "elsewhere" in rows["prj_moved"]["remedy"]
+    assert view["summary"]["METERED"] == 1 and view["errors"] == []
+
+
+def test_coverage_for_one_repository_and_who_may_ask():
+    with _coverage_env():
+        fresh()
+        gateway.providers._CACHE.clear()
+        one = gateway.coverage_view(OWNER, "Gadget", now=NOW, fetch=_team_projects)
+        assert one["governed"] is True and [r["project_id"] for r in one["projects"]] == ["prj_gadget"]
+        assert one["enroll_command"] and "--vercel prj_gadget" in one["enroll_command"]
+        lane_token = "lane-token-0123456789abcdef"
+        with env(ACP_CALLERS=callers_doc(lane_token, kind="lane", repos=[f"{OWNER}/{REPO}"])), Served() as served, \
+                patch.object(gateway, "coverage_view", lambda owner=None, name=None: {"repository": owner}):
+            status, body = served.call("/internal/coverage", lane_token)
+            assert status == 403 and body["error"] == "CALLER_NOT_PERMITTED", body
+            status, body = served.call(f"/internal/coverage?owner={OWNER}&name=Gadget", lane_token)
+            assert status == 403, "a lane sees only its own repositories"
+            status, body = served.call(f"/internal/coverage?owner={OWNER}&name={REPO}", lane_token)
+            assert status == 200, body
+            status, body = served.call("/internal/coverage", TOKEN, admin="admin-token-0123456789abcdef")
+            assert status == 200, body
 
 
 def test_posture_refresh_works_in_short_stalest_first_batches():

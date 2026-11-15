@@ -27,7 +27,7 @@ feature reaches production.
 
 | Action | Required `context` | Optional |
 |---|---|---|
-| `hosted_build` | `trigger` (`push`, `cli_deploy`, `railway_up`), `ref`, `new_sha`, `reason` | `ref` may be left out for `cli_deploy` and `railway_up`, which deploy the linked project from any checkout, detached included |
+| `hosted_build` | `trigger` (`push`, `cli_deploy`, `railway_up`), `ref`, `new_sha`, `reason` | `ref` may be left out for `cli_deploy` and `railway_up`, which deploy the linked project from any checkout, detached included; `priority` `{blocking: continue_work\|release\|fix, reason}` when the agent cannot continue without this push |
 | `production_merge` | `trigger` (`merge`, `promote`), `ref` (the production branch), `new_sha` (the merge result), `reason` | |
 | `manual_ci` | `trigger` (`workflow_dispatch`, `rerun`), `workflow` (`.github/workflows/<file>.yml`), `ref`, `new_sha`, `reason`; `run_id` for a rerun | |
 | `local_heavy_build` | `tool_use_id`, `machine_id`, `reason` | `repository_claim` |
@@ -67,8 +67,12 @@ The standard decision envelope, plus:
 |---|---|---|
 | `remedy` | every refusal | The next step. Show it to the agent as written. |
 | `grant_request` | a refusal an owner grant would clear | `{action, repository, uses, expires, reason, command}`: `command` is complete and runnable as is, with the request's reason. Show it to the owner. |
-| `builds` | repository actions | `[{provider, project, would_build, why}]` for each connected provider and workflow. |
-| `budget` | repository actions | `{day, usage: [{scope, used, limit}], exceeded?}` |
+| `builds` | repository actions | `[{provider, project, project_id, would_build, why}]` for each connected provider and workflow. |
+| `budget` | repository actions | `{day, usage: [{scope, used, limit, limit_source?, source?, enforced?}], exceeded?}`. Scopes: `project <provider>/<name>` and `service <provider>` are enforced; the repository and deployment-wide totals carry `enforced: false`. |
+| `advice` | repository actions, allow and refusal | `{project_usage: [{provider, project, used_today, limit, limit_source, builds_last_30m, last_build_seconds_ago}], service: [{provider, source, ceiling, deployments_today, in_flight}], triggers: [{provider, project, would_build, why}], recommendations: [{code, text}], resets_at}`; on a budget refusal also `usage_by_repository: [{repository, used}]`. Recommendation codes: `BATCH_PUSHES`, `NEAR_LIMIT`, `WAIT_FOR_INFLIGHT`, `PREVIEW_BUILDS`, `SAME_COMMIT`, `MULTI_SERVICE`, `SERVICE_BUSY`. Show each `text` to the agent. |
+| `retry_after` | `REVERIFY_REQUIRED` `BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY` | Seconds until asking again can succeed. Commit locally meanwhile. |
+| `priority_request` | a refusal priority would clear | `{field: "context.priority", blocking: [...], remaining_today, example}`. |
+| `resets_at` | budget refusals | When today's budgets reset (00:00 UTC). |
 | `authorized_action` | `ALLOW` | `{action, ref, new_sha, trigger, workflow?, run_id?}`. Proceed with exactly this. |
 | `lease_id` | `heavy_subagent` `ALLOW` | Send it to `POST /internal/subagent/release` when the subagent stops. |
 | `replayed` | a repeat of an allowed request | The earlier record stands; nothing was counted again. |
@@ -84,6 +88,10 @@ The standard decision envelope, plus:
 | No answer for `local_heavy_build` | Fall back to the local rule: run it through `reg build`. |
 | No answer for `heavy_subagent` | Fall back to the local rule: light models only. |
 | No answer for `build_admission`, or a reason outside the admission vocabulary | The register applies the same default contract itself and says so in its receipt (`decided_by: register`). |
+
+On every answer the hook prints each `advice.recommendations[].text`; with `retry_after` it says when
+to ask again, and with `priority_request` how to ask for priority (`ACP_PRIORITY="<blocking>: <reason>"`
+in the bootstrap client).
 
 The hook never retries a refusal unchanged. A retry with the same commit after a grant, a budget
 reset or a fixed workflow is the normal path, and is safe: allowed actions are recorded once.

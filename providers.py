@@ -33,6 +33,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_WORKFLOW_FILES = 40
 MAX_DEPLOYMENT_PAGES = 5
 SETTINGS_TTL = 600
+CAPACITY_TTL = 30            # live build activity: fresh enough to pace by, without a read per request
 RAILWAY_GRAPHQL = "https://backboard.railway.com/graphql/v2"
 SCHEMA_VERSION = 1
 
@@ -235,6 +236,86 @@ def vercel_last_build_machine(project_id, now=None, fetch=_fetch, team_id=None):
             "purchase_type": _need("vercel", machine, "purchaseType", str, "buildMachine", optional=True),
             "selection": selection,
             "selection_source": _need("vercel", machine, "selectionSource", str, "buildMachine", optional=True)}
+
+
+VERCEL_STATES = frozenset({"BUILDING", "CANCELED", "DELETED", "ERROR", "INITIALIZING", "QUEUED", "READY"})
+VERCEL_IN_FLIGHT = frozenset({"BUILDING", "INITIALIZING", "QUEUED"})
+
+
+def _day_start(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def vercel_team_activity(team_id, now=None, fetch=_fetch):
+    """Today's deployments across the team, and those still building, per project (GET /v6/deployments).
+
+    Counts every deployment Vercel made, ACP-authorized or not: dashboard redeploys and unmetered
+    projects use the same build capacity.
+    """
+    now = time.time() if now is None else now
+
+    def load():
+        total, in_flight, per_project, until, truncated = 0, 0, {}, None, True
+        for _ in range(MAX_DEPLOYMENT_PAGES):
+            query = {"since": int(_day_start(now) * 1000), "limit": 100}
+            if until:
+                query["until"] = until
+            raw = fetch("vercel", _vercel_url("/v6/deployments", team_id, **query),
+                        os.getenv("ACP_VERCEL_TOKEN", "").strip())
+            rows = _need("vercel", raw, "deployments", list, "deployments")
+            for row in rows:
+                _need("vercel", row, "uid", str, "deployments[]")
+                _need("vercel", row, "created", (int, float), "deployments[]")
+                state = _need("vercel", row, "state", str, "deployments[]", optional=True) or \
+                    _need("vercel", row, "readyState", str, "deployments[]")
+                if state not in VERCEL_STATES:
+                    raise ProviderError("vercel", "DIVERGED", "deployments[].state is unknown")
+                total += 1
+                if state in VERCEL_IN_FLIGHT:
+                    in_flight += 1
+                    for key in (_need("vercel", row, "projectId", str, "deployments[]", optional=True),
+                                _need("vercel", row, "name", str, "deployments[]", optional=True)):
+                        if key:
+                            per_project[key] = per_project.get(key, 0) + 1
+            page = _need("vercel", raw, "pagination", dict, "deployments", optional=True) or {}
+            until = page.get("next")
+            if not until or not rows:
+                truncated = False
+                break
+        return {"deployments_today": total, "in_flight": in_flight, "projects_in_flight": per_project,
+                "truncated": truncated}
+
+    return _cached(_CACHE, ("vercel-activity", team_id), CAPACITY_TTL, now, load)
+
+
+def vercel_team_projects(team_id, now=None, fetch=_fetch):
+    """Every project in the team with its git link (GET /v9/projects), for the coverage audit."""
+    now = time.time() if now is None else now
+
+    def load():
+        projects, after = [], None
+        for _ in range(MAX_DEPLOYMENT_PAGES * 2):
+            query = {"limit": 100}
+            if after:
+                query["from"] = after
+            raw = fetch("vercel", _vercel_url("/v9/projects", team_id, **query),
+                        os.getenv("ACP_VERCEL_TOKEN", "").strip())
+            for row in _need("vercel", raw, "projects", list, "projects"):
+                link = _need("vercel", row, "link", dict, "projects[]", optional=True) or {}
+                repo = None
+                if link.get("type") == "github":
+                    repo = f"{_need('vercel', link, 'org', str, 'projects[].link')}/" \
+                           f"{_need('vercel', link, 'repo', str, 'projects[].link')}"
+                projects.append({"id": _need("vercel", row, "id", str, "projects[]"),
+                                 "name": _need("vercel", row, "name", str, "projects[]"),
+                                 "linked_repository": repo})
+            page = _need("vercel", raw, "pagination", dict, "projects", optional=True) or {}
+            after = page.get("next")
+            if not after:
+                break
+        return sorted(projects, key=lambda p: p["id"])
+
+    return _cached(_CACHE, ("vercel-projects", team_id), SETTINGS_TTL, now, load)
 
 
 def vercel_branch_enabled(config, branch):
@@ -707,12 +788,14 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
                     config_path = project["root_directory"].strip("/") + "/vercel.json"
                 config = github_json_file(owner, name, config_path, sha, token_for, fetch)
                 runs, why = vercel_would_build(project, config, claim, branch, trigger)
-                builds.append({"provider": "vercel", "project": project["name"], "would_build": runs, "why": why})
+                builds.append({"provider": "vercel", "project": project["name"], "project_id": project["id"],
+                               "would_build": runs, "why": why})
         if trigger in ("push", "merge", "promote", "railway_up") and providers.get("railway"):
             railway = providers["railway"]
             project = railway_project(railway["project_id"], now, fetch)
             runs, why = railway_would_build(project, set(railway.get("service_ids") or []), claim, branch, trigger)
-            builds.append({"provider": "railway", "project": project["name"], "would_build": runs, "why": why})
+            builds.append({"provider": "railway", "project": project["name"], "project_id": project["id"],
+                           "would_build": runs, "why": why})
         if trigger in ("push", "merge", "promote", "workflow_dispatch", "rerun"):
             event = "push" if trigger in ("merge", "promote") else trigger
             for analysis in github_workflows(owner, name, sha, token_for, fetch):
@@ -721,12 +804,42 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
                 runs, why = workflow_runs_on(analysis, event, branch)
                 workflows.append({**analysis, "would_run": runs, "why": why})
                 builds.append({"provider": "github_actions", "project": analysis["path"],
-                               "would_build": runs, "why": why})
+                               "project_id": analysis["path"], "would_build": runs, "why": why})
     except ProviderError as exc:
         return {"available": False, "kind": exc.kind, "provider": exc.provider, "detail": exc.detail}
     body = {"schema_version": SCHEMA_VERSION, "builds": builds,
             "workflows": [{k: v for k, v in w.items() if k != "triggers"} for w in workflows]}
     return {"available": True, **body, "digest": digest(body)}
+
+
+def service_capacity(policy, building, now=None, fetch=_fetch):
+    """Live state of each service this request would build on. Never raises: a provider that cannot be
+    read is {"source": "unavailable"} and the decision falls back to ACP's own ledger for it.
+
+    Vercel: today's deployments and builds in flight across the team. Railway: today's deployments and
+    the workspace usage limit. GitHub Actions has no daily capacity reading, so it is ledger-only.
+    """
+    now = time.time() if now is None else now
+    configured = (policy.get("metered") or {}).get("providers") or {}
+    out = []
+    for provider in sorted({b["provider"] for b in building}):
+        try:
+            if provider == "vercel":
+                team = (configured.get("vercel") or {}).get("team_id") or os.getenv("ACP_VERCEL_TEAM_ID", "").strip()
+                out.append({"provider": "vercel", "source": "live", **vercel_team_activity(team or None, now, fetch)})
+            elif provider == "railway" and configured.get("railway"):
+                project = railway_project(configured["railway"]["project_id"], now, fetch)
+                limit = railway_usage_limit(project["workspace_id"], now, fetch) if project.get("workspace_id") \
+                    else {"over_limit": False, "soft_limit": None, "hard_limit": None}
+                out.append({"provider": "railway", "source": "live",
+                            "deployments_today": project["deployments_per_day"].get(_day(now), 0),
+                            "over_limit": limit["over_limit"], "soft_limit": limit["soft_limit"],
+                            "hard_limit": limit["hard_limit"]})
+            else:
+                out.append({"provider": provider, "source": "ledger"})
+        except ProviderError as exc:
+            out.append({"provider": provider, "source": "unavailable", "kind": exc.kind, "detail": exc.detail})
+    return out
 
 
 def posture_snapshot(policy, token_for, now=None, fetch=_fetch, head_sha=None):

@@ -467,6 +467,73 @@ def test_posture_reports_each_provider_error_without_hiding_the_rest():
                for f in posture.findings(snapshot, [], DAY))
 
 
+# ---- live capacity and the coverage audit -----------------------------------
+TEAM_ACTIVITY = {"deployments": [
+    {"uid": "d1", "created": int(NOW * 1000) - 1000, "state": "BUILDING", "projectId": "prj_widget", "name": "widget"},
+    {"uid": "d2", "created": int(NOW * 1000) - 2000, "state": "READY", "projectId": "prj_other", "name": "other"},
+    {"uid": "d3", "created": int(NOW * 1000) - 3000, "readyState": "QUEUED", "name": "other"},
+], "pagination": {"next": None}}
+TEAM_PROJECTS = {"projects": [
+    {"id": "prj_widget", "name": "widget", "link": {"type": "github", "org": "Example-Org", "repo": "Widget"}},
+    {"id": "prj_cli", "name": "cli-site"},
+], "pagination": {"next": None}}
+
+
+def test_team_activity_counts_today_and_builds_in_flight_per_project():
+    with creds():
+        fresh()
+        fake = Fake({"/v6/deployments": TEAM_ACTIVITY})
+        seen = providers.vercel_team_activity("team_abc", NOW, fake)
+    assert seen == {"deployments_today": 3, "in_flight": 2, "truncated": False,
+                    "projects_in_flight": {"prj_widget": 1, "widget": 1, "other": 1}}, seen
+    assert "teamId=team_abc" in fake.calls[0][1] and "since=" in fake.calls[0][1]
+
+
+def test_team_activity_refuses_an_unknown_state():
+    with creds():
+        fresh()
+        bad = {"deployments": [{"uid": "d1", "created": 1, "state": "EXPLODED"}]}
+        try:
+            providers.vercel_team_activity("team_abc", NOW, Fake({"/v6/deployments": bad}))
+            raise AssertionError("an unknown state was counted")
+        except providers.ProviderError as exc:
+            assert exc.kind == "DIVERGED"
+
+
+def test_service_capacity_reads_each_service_and_never_raises():
+    builds = [{"provider": "vercel"}, {"provider": "railway"}, {"provider": "github_actions"}]
+    with creds():
+        fresh()
+        fake = Fake({"/v6/deployments": TEAM_ACTIVITY, "AcpProject": RAILWAY_PROJECT, "AcpLimit": RAILWAY_LIMIT})
+        seen = {c["provider"]: c for c in providers.service_capacity(POLICY, builds, NOW, fake)}
+        assert seen["vercel"]["source"] == "live" and seen["vercel"]["in_flight"] == 2
+        assert seen["railway"] == {"provider": "railway", "source": "live", "deployments_today": 1,
+                                   "over_limit": False, "soft_limit": 20, "hard_limit": None}
+        assert seen["github_actions"] == {"provider": "github_actions", "source": "ledger"}
+        fresh()
+        down = providers.service_capacity(POLICY, builds[:1], NOW, Fake({}))
+        assert down[0]["source"] == "unavailable" and down[0]["kind"] == "UNAVAILABLE"
+
+
+def test_build_evidence_names_each_provider_project():
+    with creds():
+        fresh()
+        fake = Fake({**github_routes(), "/v9/projects/": VERCEL_PROJECT, "AcpProject": RAILWAY_PROJECT})
+        seen = providers.build_evidence("hosted_build", POLICY, CLAIM,
+                                        {"trigger": "push", "ref": "refs/heads/main", "new_sha": SHA},
+                                        token_for, NOW, fake)
+    ids = {b["provider"]: b["project_id"] for b in seen["builds"]}
+    assert ids == {"vercel": "prj_widget", "railway": "a3dbbfc5-3fe7-4365-a754-9a7856766f05",
+                   "github_actions": ".github/workflows/ci.yml"}, ids
+
+
+def test_team_projects_carry_their_git_link():
+    with creds():
+        fresh()
+        seen = providers.vercel_team_projects("team_abc", NOW, Fake({"/v9/projects?": TEAM_PROJECTS}))
+    assert seen == [{"id": "prj_cli", "name": "cli-site", "linked_repository": None},
+                    {"id": "prj_widget", "name": "widget", "linked_repository": "Example-Org/Widget"}]
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

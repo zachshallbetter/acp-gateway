@@ -2459,7 +2459,7 @@ CONTEXT_FIELDS = {"ref", "old_sha", "new_sha", "force", "non_fast_forward",
 # The only fields that are not strings. Everywhere else a list or a boolean is a
 # shape error, caught here rather than as a type error deep in the evaluation.
 NON_STRING_FIELDS = {"context.force", "context.non_fast_forward", "context.signals",
-                     "context.admission"} | NON_STRING_ENVELOPE
+                     "context.admission", "context.priority"} | NON_STRING_ENVELOPE
 CONTEXT_FIELDS = CONTEXT_FIELDS | metering.CONTEXT_FIELDS
 FIELD_LIMITS.update(metering.CONTEXT_LIMITS)
 
@@ -2740,9 +2740,19 @@ def store_ledger():
 def provider_evidence(action, policy, claim, context):
     """Live provider evidence for a metered action. Never raises: failure is unavailable evidence."""
     try:
-        return providers.build_evidence(action, policy, claim, context, token_for=lambda owner: owner_token(owner)[0])
+        evidence = providers.build_evidence(action, policy, claim, context,
+                                            token_for=lambda owner: owner_token(owner)[0])
     except Exception as exc:                                 # an unexpected failure is unavailable, never permission
         return {"available": False, "kind": "UNAVAILABLE", "provider": "providers", "detail": type(exc).__name__}
+    if evidence.get("available"):
+        # Live service state paces and caps builds; it is read after the build evidence and never makes it
+        # unavailable: a service ACP cannot read falls back to ACP's own ledger.
+        try:
+            evidence["capacity"] = providers.service_capacity(
+                policy, [b for b in evidence["builds"] if b["would_build"]])
+        except Exception as exc:                             # noqa: BLE001 -- fallback is the ledger, not permission
+            evidence["capacity"] = [{"provider": "providers", "source": "unavailable", "detail": type(exc).__name__}]
+    return evidence
 
 
 def authorize(request, verifier=None, admin=False, now=None, caller=None, provider_evidence=None,
@@ -5125,6 +5135,105 @@ def budget_view(now=None):
     return view
 
 
+COVERAGE_STATUSES = ("METERED", "MISLINKED", "UNMETERED_GOVERNED", "UNGOVERNED", "UNLINKED", "MISSING")
+
+
+def _admin_command(arguments):
+    prefix = os.environ.get("ACP_GRANT_COMMAND_PREFIX", "").strip() or metering.GRANT_COMMAND_PREFIX
+    return f"{prefix} {arguments}"
+
+
+def coverage_view(owner=None, name=None, now=None, fetch=None):
+    """Every live Vercel project matched to a governed, metered repository, or flagged with its fix.
+
+    METERED: a policy meters it and its git link (if any) is that repository. MISLINKED: metered for one
+    repository but git-linked to another, so pushes to the linked one build it unmetered. UNMETERED_GOVERNED:
+    linked to a governed repository whose policy does not meter it. UNGOVERNED: linked to a repository with no
+    policy. UNLINKED: no git link and not metered (CLI-only or abandoned). MISSING: a policy meters a project id
+    the team no longer has.
+    """
+    registry = policy_registry()
+    if registry["error"]:
+        raise UpstreamError(503, "POLICY_INVALID", registry["error"],
+                            remedy="Fix the policy document; coverage is measured against it.")
+    active = {}
+    for record in registry["policies"].values():
+        if record["state"] == "ACTIVE":
+            repo = record["policy"]["repository"]
+            active[f"{repo['owner']}/{repo['name']}".lower()] = record["policy"]
+    metered_by, teams = {}, set()
+    default_team = os.getenv("ACP_VERCEL_TEAM_ID", "").strip() or None
+    for slug, policy in active.items():
+        vercel = ((policy.get("metered") or {}).get("providers") or {}).get("vercel")
+        if vercel:
+            team = vercel.get("team_id") or default_team
+            teams.add(team)
+            for project_id in vercel["project_ids"]:
+                metered_by[project_id] = (slug, team)
+    if default_team:
+        teams.add(default_team)
+    rows, errors, seen = [], [], set()
+    kwargs = {} if fetch is None else {"fetch": fetch}
+    for team in sorted(t for t in teams if t):
+        try:
+            listed = providers.vercel_team_projects(team, now, **kwargs)
+        except providers.ProviderError as exc:
+            errors.append({"provider": "vercel", "team_id": team, "kind": exc.kind, "detail": exc.detail})
+            continue
+        for project in listed:
+            seen.add(project["id"])
+            linked = (project["linked_repository"] or "").lower() or None
+            metered = metered_by.get(project["id"])
+            row = {"provider": "vercel", "team_id": team, "project_id": project["id"], "name": project["name"],
+                   "linked_repository": linked, "metered_for": metered[0] if metered else None}
+            if metered and linked in (None, metered[0]):
+                row["status"] = "METERED"
+            elif metered:
+                row["status"] = "MISLINKED"
+                row["remedy"] = (f"Pushes to {linked} build this project, but ACP meters it for {metered[0]}. Link the "
+                                 f"Vercel project to {metered[0]}, or deploy it only by CLI from {metered[0]} and "
+                                 "disconnect its git link.")
+            elif linked and linked in active:
+                row["status"] = "UNMETERED_GOVERNED"
+            elif linked:
+                row["status"] = "UNGOVERNED"
+            else:
+                row["status"] = "UNLINKED"
+                row["remedy"] = "Enroll it for the repository that deploys it by CLI, or delete the project if unused."
+            rows.append(row)
+    for project_id, (slug, team) in sorted(metered_by.items()):
+        if project_id not in seen and not any(e.get("team_id") == team for e in errors):
+            rows.append({"provider": "vercel", "team_id": team, "project_id": project_id, "name": None,
+                         "linked_repository": None, "metered_for": slug, "status": "MISSING",
+                         "remedy": f"Re-enroll {slug} with the projects it really deploys; this id no longer exists."})
+    # One command per repository that has gaps: every project it should meter, in one enroll.
+    commands = {}
+    for row in rows:
+        repo = row["metered_for"] if row["status"] == "MISSING" else row["linked_repository"]
+        if row["status"] in ("UNMETERED_GOVERNED", "UNGOVERNED", "MISSING") and repo:
+            commands.setdefault((repo, row["team_id"]), set())
+    for (repo, team), ids in commands.items():
+        ids.update(r["project_id"] for r in rows if r["team_id"] == team and r["status"] != "MISSING" and
+                   (r["metered_for"] == repo or (r["linked_repository"] == repo and r["status"] in
+                                                 ("UNMETERED_GOVERNED", "UNGOVERNED", "METERED"))))
+    enroll = {repo: _admin_command(f"enroll {repo} " + " ".join(f"--vercel {i}" for i in sorted(ids)) +
+                                   f" --vercel-team {team} --apply")
+              for (repo, team), ids in sorted(commands.items()) if ids}
+    for row in rows:
+        repo = row["metered_for"] if row["status"] == "MISSING" else row["linked_repository"]
+        if row["status"] in ("UNMETERED_GOVERNED", "UNGOVERNED", "MISSING") and repo in enroll:
+            row["command"] = enroll[repo]
+    slug = f"{owner}/{name}".lower() if owner and name else None
+    if slug:
+        rows = [r for r in rows if slug in (r["linked_repository"], r["metered_for"])]
+    rows.sort(key=lambda r: (COVERAGE_STATUSES.index(r["status"]), r["linked_repository"] or r["metered_for"] or "",
+                             r["project_id"]))
+    summary = {status: sum(1 for r in rows if r["status"] == status) for status in COVERAGE_STATUSES}
+    return {"repository": slug, "governed": (slug in active) if slug else None,
+            "enroll_command": enroll.get(slug) if slug else None, "providers_checked": ["vercel"],
+            "summary": summary, "projects": rows, "errors": errors}
+
+
 def issue_grant(body, now=None):
     """An owner grant past a budget or for production: one action, optional repository, bounded uses and time."""
     now = time.time() if now is None else now
@@ -5283,6 +5392,7 @@ ENDPOINTS = {
     "GET /internal/security/incidents/<id>": "one incident with its full timeline (admin)",
     "GET /internal/security/audit-chain": "verify the tamper-evident audit chain (admin)",
     "GET /internal/budget": "today's metered use against every limit",
+    "GET /internal/coverage": "live Vercel projects matched to governed, metered repositories (?owner=&name= for one)",
     "GET /internal/documents/<policy|callers|budget>": "the current signed document and its stored version (admin)",
     "POST /internal/documents": "store the next version of a signed document; takes effect without a redeploy (admin)",
     "POST /internal/budget/grant": "issue an owner grant past a budget or for production (administrative credential)",
@@ -5473,6 +5583,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return client_status(first("version"), first("sha256"))
         if route == "/internal/budget":
             return budget_view()
+        if route == "/internal/coverage":
+            caller = caller_for(self)
+            if first("owner") or first("name"):
+                require_caller_covers(caller, first("owner"), first("name"))
+            elif not self.admin and (caller or {}).get("kind") not in ("owner", "coordinator"):
+                raise TargetError(403, "CALLER_NOT_PERMITTED",
+                                  "The full coverage audit is for the coordinator or the owner.",
+                                  remedy="Name your repository: GET /internal/coverage?owner=OWNER&name=NAME.")
+            return coverage_view(first("owner") or None, first("name") or None)
         if route.startswith("/internal/documents/"):
             return document_view(route.rsplit("/", 1)[1], self)
         if route == "/internal/posture":

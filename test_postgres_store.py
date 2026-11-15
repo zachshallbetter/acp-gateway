@@ -152,7 +152,36 @@ class PostgresStoreTests(unittest.TestCase):
                 "ref": "refs/heads/feature", "sha": sha, "caller_kind": "lane", "caller_id": "lane-a",
                 "reason": "synthetic budget test", "reason_code": "WITHIN_BUDGET", "counted": True,
                 "budget_day": time.strftime("%Y-%m-%d", time.gmtime(now)), "grant_id": None,
-                "evidence_digest": None, "created_at": now}
+                "evidence_digest": None, "created_at": now, "project": None}
+
+    def test_project_queries_pace_and_budget_one_project(self):
+        now = time.time()
+        day = time.strftime("%Y-%m-%d", time.gmtime(now))
+        yesterday = time.strftime("%Y-%m-%d", time.gmtime(now - 86400))
+        project, owner = f"prj_{uuid.uuid4().hex[:12]}", f"proj-{uuid.uuid4().hex[:8]}"
+        rows = [(now - 4000, day, "1"), (now - 60, day, "2"), (now - 86400, yesterday, "3")]
+        with postgres_store.transaction() as store:
+            for at, budget_day, sha in rows:
+                store.ledger_insert({**self._ledger_row(uuid.uuid4().hex + uuid.uuid4().hex, sha * 40, at),
+                                     "budget_day": budget_day, "project": project, "resource_owner": owner})
+            store.ledger_insert({**self._ledger_row(uuid.uuid4().hex + uuid.uuid4().hex, "2" * 40, now - 30),
+                                 "project": project, "resource_owner": owner, "ref": "refs/heads/other",
+                                 "reason_code": "PRIORITY_GRANTED"})
+        with postgres_store.transaction() as store:
+            self.assertEqual(store.ledger_count(day, ["hosted_build"], provider="vercel", project=project), 3)
+            self.assertEqual(store.ledger_count(day, ["hosted_build"], project=project,
+                                                reason_code="PRIORITY_GRANTED"), 1)
+            recent = store.ledger_recent(["hosted_build"], "vercel", project, now - 3600)
+            self.assertEqual([round(t) for t in recent], [round(now - 60), round(now - 30)])
+            self.assertEqual(store.ledger_project_days(["hosted_build"], "vercel", project, [yesterday]),
+                             {yesterday: 1})
+            self.assertEqual(store.ledger_sha_refs(["hosted_build"], owner, "metered", "2" * 40),
+                             ["refs/heads/feature", "refs/heads/other"])
+            self.assertEqual(store.ledger_repositories(day, ["hosted_build"], project=project),
+                             [{"repository": f"{owner}/metered", "used": 3}])
+            self.assertEqual(store.ledger_get(store.connection.execute(
+                "SELECT record_key FROM spend_ledger WHERE project = %s LIMIT 1", (project,)).fetchone()
+                ["record_key"])["project"], project)
 
     def test_metered_record_is_written_once_and_counted(self):
         now = time.time()
@@ -261,16 +290,16 @@ class PostgresStoreTests(unittest.TestCase):
     def test_runtime_accepts_only_additive_newer_migrations(self):
         with psycopg.connect(DSN) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
-                               "VALUES (7, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+                               "VALUES (8, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
         try:
             postgres_store.validate_schema()             # a newer, additive migration: still runs
             with psycopg.connect(DSN) as connection:
-                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 7")
+                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 8")
             with self.assertRaises(postgres_store.StorageError):
                 postgres_store.validate_schema()         # not additive: refuses
         finally:
             with psycopg.connect(DSN) as connection:
-                connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+                connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         postgres_store.validate_schema()
 
     def test_applied_migration_records_whether_it_is_additive(self):
@@ -375,7 +404,7 @@ class PostgresStoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5, 6])
+        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5, 6, 7])
         postgres_store.validate_schema()
 
 
