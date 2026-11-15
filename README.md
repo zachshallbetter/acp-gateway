@@ -637,7 +637,14 @@ event to report, not to fix.
 ### Persistence format
 
 `ACP_SECURITY_STATE_FILE` holds one JSON object keyed by
-`resource:<owner>/<name>` and `actor:<actor id>`:
+`resource:<owner>/<name>` and `actor:<actor id>`. It is replaced whole (temp
+file, fsync, rename) under one in-process lock, so a crash leaves the old state
+or the new one. Counters and incident correlation create `resource:`/`actor:`
+rows only for a resource an ACTIVE policy governs. A caller-supplied
+`incident_id` must be 1-64 characters of letters, digits, `_`, `.`, `:`, `-`.
+The file holds at most 5000 rows (the PostgreSQL scan bound); past that a new
+incident is refused with `503 SECURITY_STATE_FULL` while existing rows stay
+readable and writable:
 
 ```json
 {"resource:example-org/example-repo": {
@@ -851,7 +858,7 @@ Admin-credentialed reads (`X-ACP-Admin-Authorization`), never the agent bearer:
 | `GET /internal/security/events?…` | filtered, paginated history |
 | `GET /internal/security/incidents` | incidents, newest first |
 | `GET /internal/security/incidents/<id>` | one incident with its full timeline |
-| `GET /internal/security/audit-chain` | chain verification result |
+| `GET /internal/security/audit-chain` | chain verification result; in file mode the ring is a window, verified from its first retained record (`anchored`, `anchor_hash`) |
 
 Events filter on `actor`, `agent`, `resource`, `severity`, `event_type`,
 `incident_id`, `decision`, `state` and `period`, and page with `limit`

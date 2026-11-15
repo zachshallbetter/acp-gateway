@@ -846,6 +846,147 @@ def test_ready_memoizes_the_strict_policy_check_for_a_short_ttl():
                 "a changed document is seen at once, not after the TTL"
 
 
+# ---- security-state persistence, bounds and the file-mode chain --------------
+def test_state_is_replaced_atomically_and_a_good_write_clears_a_write_failure():
+    with tempfile.TemporaryDirectory() as directory:
+        store = os.path.join(directory, "s.json")
+        fresh(store)
+        with contained_env(ACP_SECURITY_STATE_FILE=store):
+            gateway.write_security(["resource:a/b"], 1.0, attempts=1)
+            before = Path(store).read_text()
+            with patch("gateway.os.replace", side_effect=OSError("disk full")):
+                gateway.write_security(["resource:a/b"], 2.0, attempts=2)
+            assert gateway.security_degraded().startswith(gateway.STATE_WRITE_FAILED)
+            assert Path(store).read_text() == before, "a failed write leaves the old state intact"
+            assert [n for n in os.listdir(directory) if n != "s.json"] == [], "no temp file is left behind"
+            gateway.write_security(["resource:a/b"], 3.0, attempts=3)
+            assert gateway.security_degraded() is None, "a successful write clears the write failure"
+            assert json.loads(Path(store).read_text())["resource:a/b"]["attempts"] == 3
+
+
+def test_a_read_failure_is_not_cleared_by_a_later_write():
+    with tempfile.TemporaryDirectory() as directory:
+        store = os.path.join(directory, "s.json")
+        Path(store).write_text("{not json")
+        fresh(store)
+        gateway._SECURITY.update(loaded=False)
+        with contained_env(ACP_SECURITY_STATE_FILE=store):
+            assert gateway.security_degraded()
+            gateway.persist_security()
+            assert gateway.security_degraded(), "only a write failure is cleared by a write"
+
+
+def test_concurrent_state_writes_leave_a_whole_file():
+    import threading
+    with tempfile.TemporaryDirectory() as directory:
+        store = os.path.join(directory, "s.json")
+        fresh(store)
+        with contained_env(ACP_SECURITY_STATE_FILE=store):
+            def work(n):
+                for i in range(25):
+                    gateway.write_security([f"resource:o/r{n}-{i}"], 1.0, attempts=i)
+            threads = [threading.Thread(target=work, args=(n,)) for n in range(6)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+            assert len(json.loads(Path(store).read_text())) == 150
+            assert gateway.security_degraded() is None
+
+
+def test_a_caller_incident_id_is_bounded_and_file_state_is_capped():
+    fresh()
+    with contained_env():
+        for bad in ("x" * 65, "a b", "../etc", "inc\n1", 5, ["a"]):
+            try:
+                gateway.report_event(report(incident_id=bad))
+            except gateway.TargetError as exc:
+                assert exc.status == 400 and exc.code == "INVALID_REQUEST", bad
+            else:
+                raise AssertionError(f"{bad!r} was accepted")
+        assert not [k for k in gateway.security_store() if k.startswith("incident:")]
+    fresh("unused")
+    with contained_env(), patch.object(gateway, "MAX_STATE_ROWS", 3), \
+            patch.dict(os.environ, {"ACP_SECURITY_STATE_FILE": ""}):
+        for n in range(3):
+            gateway.touch_incident(f"inc_{n}", 1.0)
+        gateway.touch_incident("inc_0", 2.0)                    # an existing row stays writable
+        try:
+            gateway.touch_incident("inc_new", 3.0)
+        except gateway.UpstreamError as exc:
+            assert exc.code == "SECURITY_STATE_FULL"
+        else:
+            raise AssertionError("a new row past the cap was created")
+        assert gateway.get_incident("inc_0")["related_event_count"] == 2, "existing state stays readable"
+
+
+def test_ungoverned_names_never_become_state_rows():
+    fresh()
+    with contained_env():
+        assert gateway.bump_counter(["resource:evil/other", "actor:a:1"], "policy_tamper_count", 1.0) == {}
+        gateway.correlate_incident("a:1", "evil/other", 1.0, "HIGH", "X",
+                                   ["resource:evil/other", "actor:a:1"])
+        assert not [k for k in gateway.security_store() if k.startswith(("resource:", "actor:"))]
+        governed = [f"resource:{RESOURCE}", "actor:a:1"]
+        assert gateway.bump_counter(governed, "policy_tamper_count", 1.0)["policy_tamper_count"] == 1
+        rows = {k for k in gateway.security_store() if not k.startswith("incident:")}
+        assert rows == set(governed), "actor rows ride along a governed resource"
+
+
+def test_incident_actor_keys_use_a_targeted_query_in_postgres():
+    calls = []
+
+    class Store:
+        def actor_keys_for_incidents(self, ids):
+            calls.append(sorted(ids))
+            return ["actor:z:9"]
+
+        def prefetch(self, keys):
+            pass
+
+    fresh()
+    with patch.object(gateway.postgres_store, "enabled", return_value=True), \
+            patch.object(gateway.postgres_store, "current", return_value=Store()), \
+            patch.object(gateway, "security_store",
+                         return_value={f"resource:{RESOURCE}": {"incident_id": "inc_1"}}):
+        keys = gateway.incident_actor_keys([f"resource:{RESOURCE}"])
+    assert calls == [["inc_1"]] and keys == [f"resource:{RESOURCE}", "actor:z:9"], (calls, keys)
+
+
+def test_a_partial_ring_anchors_at_its_first_record_and_a_real_break_still_fails():
+    with tempfile.TemporaryDirectory() as directory:
+        store, log = os.path.join(directory, "s.json"), os.path.join(directory, "audit.jsonl")
+        fresh(store)
+        with contained_env(ACP_AUDIT_HASH_CHAIN="1", ACP_SECURITY_STATE_FILE=store, ACP_AUDIT_LOG=log):
+            gateway._CHAIN["head"] = None
+            for n in range(6):
+                gateway.emit_event("NOTICE_LOOKUP", resource_id=f"o/r{n}")
+            ring = [dict(r) for r in gateway.AUDIT][2:]
+            assert gateway.verify_audit_chain(ring)["reason"] == "PREVIOUS_HASH_MISMATCH"
+            ok = gateway.verify_audit_chain(ring, windowed=True)
+            assert ok["valid"] is True and ok["anchored"] is True
+            assert ok["anchor_hash"] == ring[0]["previous_hash"] and ok["length"] == 4, ok
+            ring[2]["resource_id"] = "tampered"
+            bad = gateway.verify_audit_chain(ring, windowed=True)
+            assert bad["valid"] is False and bad["broken_at"] == 2, bad
+            ring = [dict(r) for r in gateway.AUDIT][2:]
+            del ring[1]
+            assert gateway.verify_audit_chain(ring, windowed=True)["valid"] is False
+
+
+def test_concurrent_file_mode_events_do_not_fork_the_chain():
+    import threading
+    with tempfile.TemporaryDirectory() as directory:
+        store, log = os.path.join(directory, "s.json"), os.path.join(directory, "audit.jsonl")
+        fresh(store)
+        with contained_env(ACP_AUDIT_HASH_CHAIN="1", ACP_SECURITY_STATE_FILE=store, ACP_AUDIT_LOG=log):
+            gateway._CHAIN["head"] = None
+            threads = [threading.Thread(target=lambda: [gateway.emit_event("NOTICE_LOOKUP")
+                                                        for _ in range(20)]) for _ in range(6)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+            result = gateway.verify_audit_chain(list(gateway.AUDIT))
+            assert result["valid"] is True and result["length"] == 120, result
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

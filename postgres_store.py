@@ -356,6 +356,20 @@ class PostgresStore:
             self._cache.setdefault(key, self._decode_incident(row))
         return [(key, self._cache[key]) for key in keys]
 
+    def actor_keys_for_incidents(self, incident_ids):
+        """Actor keys bound to the given incidents, by the incident_id index rather than a table scan."""
+        incident_ids = sorted({item for item in incident_ids if item})
+        if not incident_ids:
+            return []
+        rows = self.connection.execute(
+            "SELECT * FROM security_state WHERE subject_kind = 'actor' AND incident_id = ANY(%s::text[]) "
+            "ORDER BY subject_id LIMIT %s", (incident_ids, MAX_STATE_ROWS + 1)
+        ).fetchall()
+        if len(rows) > MAX_STATE_ROWS:
+            raise StorageError("incident actor lookup exceeds the configured bound")
+        self._load_subject_rows(rows)
+        return [f"actor:{row['subject_id']}" for row in rows]
+
     def prefetch(self, keys):
         missing = []
         for key in keys:

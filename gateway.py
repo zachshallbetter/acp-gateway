@@ -17,7 +17,8 @@ Three design rules shape the whole file:
      is allowed -- it never disables enforcement. See authorize().
 """
 from __future__ import annotations
-import base64, hashlib, hmac, http.server, json, logging, os, re, subprocess, sys, tempfile, threading, time
+import base64, hashlib, hmac, http.server, json, logging, os, re, stat, subprocess, sys, tempfile, threading, time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
@@ -1348,6 +1349,54 @@ TRUST_CODES = {"VERIFIED": "T0", "SELF_REPORTED": "T1", "UNVERIFIED": "T2", "QUA
 RECOVERY_OPERATION = "protected_ref.recover"
 
 _SECURITY = {"loaded": False, "records": {}, "degraded": None}
+# One lock serializes every file-mode mutation of the security state, the audit
+# chain head and the event ring with the write that persists them. Re-entrant:
+# mutators call persist_security() and emit_event() while holding it.
+_STATE_LOCK = threading.RLock()
+STATE_WRITE_FAILED = "the security state file could not be written"
+MAX_STATE_ROWS = postgres_store.MAX_STATE_ROWS
+INCIDENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+
+
+def state_lock():
+    """File mode serializes in-process; Postgres serializes in the database."""
+    return nullcontext() if postgres_store.enabled() else _STATE_LOCK
+
+
+def valid_incident_id(value, field="incident_id"):
+    """A caller-named incident id is stored as a permanent row key: bound its shape."""
+    if not isinstance(value, str) or not INCIDENT_ID_RE.match(value):
+        raise TargetError(400, "INVALID_REQUEST",
+                          f"`{field}` must be 1-64 characters of letters, digits, `_`, `.`, `:` or `-`.",
+                          remedy="Omit it to have ACP correlate the event, or pass an id ACP returned.",
+                          field=field)
+    return value
+
+
+def state_row_available(key):
+    """File-mode state is capped like the Postgres scan bound. An existing row
+    stays writable; only a new caller-driven row is refused once the cap is hit."""
+    return postgres_store.enabled() or key in security_store() or len(security_store()) < MAX_STATE_ROWS
+
+
+def governed_resource_key(key):
+    """True for a `resource:` key that an ACTIVE policy governs."""
+    if not key.startswith("resource:") or "/" not in key:
+        return False
+    owner, _, name = key[len("resource:"):].partition("/")
+    registry = policy_registry()
+    if registry["error"]:
+        return False
+    record = match_policy(registry, {"owner": owner, "name": name})
+    return bool(record and record["state"] == "ACTIVE")
+
+
+def creatable_keys(keys):
+    """Rows a caller-driven write may create: governed resources, and actors
+    only alongside one. Ungoverned names must not become permanent rows."""
+    governed = any(governed_resource_key(key) for key in keys)
+    return [key for key in keys if security_store().get(key) is not None
+            or (governed_resource_key(key) if key.startswith("resource:") else governed)]
 
 
 def security_store():
@@ -1393,7 +1442,9 @@ def security_state_path():
 
 def persist_security():
     """A state change that cannot be written down would vanish on restart, so a
-    failed write degrades the deployment instead of being forgotten."""
+    failed write degrades the deployment instead of being forgotten. The file is
+    replaced whole, never truncated in place: a reader or a crash sees the old
+    state or the new one."""
     if postgres_store.enabled():
         postgres_store.current().flush()
         _SECURITY["degraded"] = None
@@ -1401,11 +1452,32 @@ def persist_security():
     path = security_state_path()
     if not path:
         return
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(_SECURITY["records"], handle)
-    except OSError as exc:
-        _SECURITY["degraded"] = f"the security state file could not be written: {str(exc)[:120]}"
+    with _STATE_LOCK:
+        temp = None
+        try:
+            directory = os.path.dirname(os.path.abspath(path))
+            descriptor, temp = tempfile.mkstemp(prefix=".acp-state-", dir=directory)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(_SECURITY["records"], handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(temp, stat.S_IMODE(os.stat(path).st_mode))
+            except OSError:
+                pass                                    # a new file keeps mkstemp's owner-only mode
+            os.replace(temp, path)
+            temp = None
+        except (OSError, ValueError, TypeError) as exc:
+            _SECURITY["degraded"] = f"{STATE_WRITE_FAILED}: {str(exc)[:120]}"
+            return
+        finally:
+            if temp:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+        if (_SECURITY["degraded"] or "").startswith(STATE_WRITE_FAILED):
+            _SECURITY["degraded"] = None                # the write that failed has now succeeded
 
 
 def resource_key(owner, name):
@@ -1447,9 +1519,12 @@ def incident_actor_keys(keys):
     incidents = {(security_store().get(key) or {}).get("incident_id") for key in keys}
     incidents.discard(None)
     expanded = list(keys)
-    for key, entry in security_store().items():
-        if key.startswith("actor:") and entry.get("incident_id") in incidents and key not in expanded:
-            expanded.append(key)
+    if postgres_store.enabled():
+        found = postgres_store.current().actor_keys_for_incidents(incidents)
+    else:
+        found = [key for key, entry in list(security_store().items())
+                 if key.startswith("actor:") and entry.get("incident_id") in incidents]
+    expanded.extend(key for key in found if key not in expanded)
     return expanded
 
 
@@ -1463,26 +1538,28 @@ def write_security(keys, now, **fields):
     if postgres_store.enabled():
         postgres_store.current().prefetch(keys)
     written = None
-    for key in keys:
-        entry = security_store().setdefault(key, {"key": key, "opened_at": now, "security_version": 0,
-                                                  "violations": 0, "attempts": 0,
-                                                  "authorization_state": "NORMAL"})
-        entry.update(fields)
-        entry["updated_at"] = now
-        written = entry
-    persist_security()
+    with state_lock():
+        for key in keys:
+            entry = security_store().setdefault(key, {"key": key, "opened_at": now, "security_version": 0,
+                                                      "violations": 0, "attempts": 0,
+                                                      "authorization_state": "NORMAL"})
+            entry.update(fields)
+            entry["updated_at"] = now
+            written = entry
+        persist_security()
     return written or {}
 
 
 def note_event(keys, now, event, **detail):
-    for key in keys:
-        entry = security_store().get(key)
-        if entry is None:
-            continue
-        history = entry.setdefault("history", [])
-        history.append({"at": iso(now), "event": event, **detail})
-        del history[:-50]
-    persist_security()
+    with state_lock():
+        for key in keys:
+            entry = security_store().get(key)
+            if entry is None:
+                continue
+            history = entry.setdefault("history", [])
+            history.append({"at": iso(now), "event": event, **detail})
+            del history[:-50]
+        persist_security()
     emit_event(event, now=now, keys=list(keys),
                resource_id=next((key[len("resource:"):] for key in keys
                                  if key.startswith("resource:")), None),
@@ -1952,15 +2029,24 @@ def event_hash(record, previous):
     return hashlib.sha256(canonical_bytes(body) + previous.encode()).hexdigest()
 
 
-def verify_audit_chain(records):
-    """Recompute the chain. Any edited or removed record breaks it from there on."""
+def verify_audit_chain(records, windowed=False):
+    """Recompute the chain. Any edited or removed record breaks it from there on.
+
+    `windowed` verifies a bounded slice of the chain (the file-mode ring, which
+    evicts its oldest records): it anchors at the first retained chained record,
+    whose predecessor is no longer held, and still checks every link after it.
+    """
     previous = ""
     length = 0
+    anchor = None
     for record in records:
         index = length
         length += 1
         if "event_hash" not in record:
             continue
+        if windowed and anchor is None:
+            anchor = record.get("previous_hash", "")
+            previous = anchor
         if record.get("previous_hash", "") != previous:
             return {"valid": False, "broken_at": index, "event_id": record.get("event_id"),
                     "reason": "PREVIOUS_HASH_MISMATCH", "length": length}
@@ -1968,7 +2054,10 @@ def verify_audit_chain(records):
             return {"valid": False, "broken_at": index, "event_id": record.get("event_id"),
                     "reason": "EVENT_HASH_MISMATCH", "length": length}
         previous = record["event_hash"]
-    return {"valid": True, "length": length, "head": previous or None}
+    result = {"valid": True, "length": length, "head": previous or None}
+    if windowed and anchor:
+        result.update(anchored=True, anchor_hash=anchor)
+    return result
 
 
 def event_ring_limit():
@@ -2010,21 +2099,22 @@ def emit_event(event_type, now=None, severity=None, **fields):
               "severity": severity if severity in SEVERITIES else EVENT_SEVERITY.get(event_type, "INFO")}
     record.update({key: value for key, value in fields.items() if value is not None})
     record = redact_record(record)
-    if hash_chain_enabled():
-        previous = (postgres_store.current().audit_head(lock=True)[1]
-                    if postgres_store.enabled() else chain_head())
-        record["previous_hash"] = previous
-        record["event_hash"] = event_hash(record, previous)
-        _CHAIN["head"] = record["event_hash"]
-        if postgres_store.enabled():
+    with state_lock():
+        if hash_chain_enabled():
+            previous = (postgres_store.current().audit_head(lock=True)[1]
+                        if postgres_store.enabled() else chain_head())
+            record["previous_hash"] = previous
+            record["event_hash"] = event_hash(record, previous)
+            _CHAIN["head"] = record["event_hash"]
+            if postgres_store.enabled():
+                postgres_store.current().append_audit(record)
+            elif os.getenv("ACP_SECURITY_STATE_FILE", "").strip() or os.getenv("ACP_INCIDENT_STATE_FILE", "").strip():
+                security_store()["chain:head"] = {"hash": record["event_hash"]}
+                persist_security()
+        elif postgres_store.enabled():
             postgres_store.current().append_audit(record)
-        elif os.getenv("ACP_SECURITY_STATE_FILE", "").strip() or os.getenv("ACP_INCIDENT_STATE_FILE", "").strip():
-            security_store()["chain:head"] = {"hash": record["event_hash"]}
-            persist_security()
-    elif postgres_store.enabled():
-        postgres_store.current().append_audit(record)
-    AUDIT.append(record)
-    del AUDIT[:-event_ring_limit()]
+        AUDIT.append(record)
+        del AUDIT[:-event_ring_limit()]
     line = json.dumps(record, sort_keys=True, separators=(",", ":"))
     path = "" if postgres_store.enabled() else os.getenv("ACP_AUDIT_LOG", "").strip()
     if not postgres_store.enabled():
@@ -2172,24 +2262,29 @@ def touch_incident(incident_id, now, **fields):
     """Create or advance one incident. Resolved incidents are kept, not deleted."""
     if not incident_id:
         return None
-    entry = security_store().setdefault(incident_store_key(incident_id),
-                                        {"incident_id": incident_id, "status": "OPEN",
-                                         "severity": "NOTICE", "opened_at": iso(now),
-                                         "related_event_count": 0})
-    for key, value in fields.items():
-        if value is None:
-            continue
-        if key == "severity" and SEVERITY_RANK.get(value, 0) <= SEVERITY_RANK.get(entry.get("severity"), 0):
-            continue                                    # an incident's severity ratchets up, never down
-        entry[key] = value
-    entry["last_event_at"] = iso(now)
-    entry["related_event_count"] = entry.get("related_event_count", 0) + 1
-    persist_security()
+    with state_lock():
+        if not state_row_available(incident_store_key(incident_id)):
+            raise UpstreamError(503, "SECURITY_STATE_FULL",
+                                "The security state holds the most incidents it will keep.",
+                                remedy="Resolve and archive old incidents before opening new ones.")
+        entry = security_store().setdefault(incident_store_key(incident_id),
+                                            {"incident_id": incident_id, "status": "OPEN",
+                                             "severity": "NOTICE", "opened_at": iso(now),
+                                             "related_event_count": 0})
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if key == "severity" and SEVERITY_RANK.get(value, 0) <= SEVERITY_RANK.get(entry.get("severity"), 0):
+                continue                                # an incident's severity ratchets up, never down
+            entry[key] = value
+        entry["last_event_at"] = iso(now)
+        entry["related_event_count"] = entry.get("related_event_count", 0) + 1
+        persist_security()
     return entry
 
 
 def open_incidents():
-    return [entry for key, entry in security_store().items()
+    return [entry for key, entry in list(security_store().items())
             if key.startswith("incident:") and entry.get("status") != "RESOLVED"]
 
 
@@ -2211,7 +2306,10 @@ def correlate_incident(actor_id, resource_id, now, severity, reason, keys=()):
     touch_incident(incident_id, now, status="OPEN", severity=severity, actor_id=actor_id,
                    resource_id=resource_id, primary_reason=reason)
     if keys:
-        write_security(list(keys), now, incident_id=incident_id)
+        # An ungoverned name still gets an incident, but never a permanent state row.
+        stamp = creatable_keys(list(keys))
+        if stamp:
+            write_security(stamp, now, incident_id=incident_id)
     return incident_id
 
 
@@ -2219,15 +2317,18 @@ def bump_counter(keys, name, now, amount=1):
     if name not in COUNTERS or not keys:
         return {}
     counters = {}
-    for key in keys:
-        entry = security_store().get(key)
-        if entry is None:
-            entry = security_store().setdefault(key, {"key": key, "opened_at": now,
-                                                      "security_version": 0, "violations": 0,
-                                                      "attempts": 0, "authorization_state": "NORMAL"})
-        counters = entry.setdefault("counters", {})
-        counters[name] = counters.get(name, 0) + amount
-    persist_security()
+    with state_lock():
+        for key in creatable_keys(list(keys)):
+            entry = security_store().get(key)
+            if entry is None:
+                if not state_row_available(key):
+                    continue                            # a counter is observation; it never grows a full store
+                entry = security_store().setdefault(key, {"key": key, "opened_at": now,
+                                                          "security_version": 0, "violations": 0,
+                                                          "attempts": 0, "authorization_state": "NORMAL"})
+            counters = entry.setdefault("counters", {})
+            counters[name] = counters.get(name, 0) + amount
+        persist_security()
     return counters
 
 
@@ -3590,6 +3691,8 @@ def report_event(body, now=None, caller=None):
     resource_id = f"{owner}/{name}".lower() if owner and name else resource.get("resource_id")
 
     severity = EVENT_SEVERITY.get(event_type, "NOTICE")
+    if body.get("incident_id") not in (None, ""):
+        valid_incident_id(body["incident_id"])
     incident_id = body.get("incident_id") or contained.get("incident_id") or \
         correlate_incident(principal.get("actor_id"), resource_id, now, severity, event_type,
                            resource_keys)
@@ -5342,8 +5445,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if tail.startswith("incidents/"):
                 return incident_detail(tail[len("incidents/"):])
             if tail == "audit-chain":
-                return verify_audit_chain(postgres_store.current().audit_chain_batches()
-                                          if postgres_store.enabled() else list(AUDIT))
+                if postgres_store.enabled():
+                    return verify_audit_chain(postgres_store.current().audit_chain_batches())
+                with _STATE_LOCK:
+                    ring = list(AUDIT)
+                return verify_audit_chain(ring, windowed=True)
             if tail == "integrity":
                 owner, name = first("owner"), first("name")
                 if not (owner and name):
