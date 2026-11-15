@@ -5106,6 +5106,15 @@ def issue_grant(body, now=None):
     if bool(owner) != bool(name) or (owner and not REPO_PATTERN_RE.match(f"{owner}/{name}")):
         raise TargetError(400, "INVALID_REQUEST", "owner and name come together, as a real repository.",
                           remedy="Omit both for a deployment-wide grant.")
+    if owner:
+        registry = policy_registry()
+        governed = None if registry["error"] else match_policy(registry, {"owner": owner, "name": name})
+        if not governed or governed["state"] != "ACTIVE":
+            # A grant for a repository ACP does not govern could never be used: refuse it rather than store it.
+            raise TargetError(404, "REPOSITORY_NOT_GOVERNED",
+                              f"No active ACP policy governs {owner}/{name}, so a grant for it could never apply.",
+                              remedy="Check the spelling, enroll the repository (scripts/policy-admin.py enroll), "
+                                     "or omit --repo for a deployment-wide grant.", field="name")
     uses, minutes = body.get("uses"), body.get("expires_minutes")
     if not isinstance(uses, int) or isinstance(uses, bool) or not 1 <= uses <= 50:
         raise TargetError(400, "INVALID_REQUEST", "uses must be 1..50.", field="uses")

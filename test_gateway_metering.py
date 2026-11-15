@@ -158,6 +158,15 @@ def test_repository_budget_past_limit_asks_the_owner_with_a_grant_command():
         assert over["decision"] == "AUTH_REQUIRED" and over["reason"] == "BUDGET_EXCEEDED", over
         assert "budget-grant --action hosted_build --repo Example-Org/Widget" in over["remedy"]
         assert over["budget"]["exceeded"]["limit"] == 2
+        grant = over["grant_request"]
+        assert grant["repository"] == "Example-Org/Widget" and grant["reason"] == "ship the feature branch preview"
+        assert grant["command"] in over["remedy"] and "<" not in grant["command"], "no placeholder to fill in"
+        assert grant["command"].startswith(metering.GRANT_COMMAND_PREFIX)
+        assert "--reason 'ship the feature branch preview' --apply" in grant["command"]
+        with patch.dict(os.environ, {"ACP_GRANT_COMMAND_PREFIX": "python3 /opt/acp/policy-admin.py"}):
+            assert metering.grant_command("hosted_build", OWNER, REPO, "x").startswith(
+                "python3 /opt/acp/policy-admin.py budget-grant --action hosted_build")
+        assert "approve one hosted_build" in metering.grant_command("hosted_build", OWNER, REPO, "")
 
 
 def test_owner_grant_lets_one_more_through_and_is_used_up():
@@ -254,6 +263,21 @@ def test_a_repeated_grant_request_returns_the_grant_it_made():
     assert first["existing"] is False and again["existing"] is True, (first, again)
     assert again["grant_id"] == first["grant_id"] and again["expires_at"] == first["expires_at"]
     assert other["grant_id"] != first["grant_id"] and len(ledger.grants) == 2
+
+
+def test_a_grant_for_a_repository_acp_does_not_govern_is_refused():
+    ledger = metering.MemoryLedger()
+    body = {"action": "hosted_build", "owner": "OWNER", "name": "NAME", "uses": 1, "expires_minutes": 120,
+            "reason": "<what and why>", "request_id": "req-0123456789"}
+    with env(), patch.object(gateway, "store_ledger", return_value=ledger):
+        fresh()
+        try:
+            gateway.issue_grant(dict(body), now=NOW)
+            raise AssertionError("granted a repository nothing governs")
+        except gateway.TargetError as exc:
+            assert exc.status == 404 and exc.code == "REPOSITORY_NOT_GOVERNED", exc
+        anywhere = gateway.issue_grant({k: v for k, v in body.items() if k not in ("owner", "name")}, now=NOW)
+    assert anywhere["repository"] is None and len(ledger.grants) == 1
 
 
 def test_manual_ci_is_coordinator_only_and_capped():

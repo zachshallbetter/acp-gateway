@@ -66,6 +66,7 @@ The standard decision envelope, plus:
 | Field | When | Meaning |
 |---|---|---|
 | `remedy` | every refusal | The next step. Show it to the agent as written. |
+| `grant_request` | a refusal an owner grant would clear | `{action, repository, uses, expires, reason, command}`: `command` is complete and runnable as is, with the request's reason. Show it to the owner. |
 | `builds` | repository actions | `[{provider, project, would_build, why}]` for each connected provider and workflow. |
 | `budget` | repository actions | `{day, usage: [{scope, used, limit}], exceeded?}` |
 | `authorized_action` | `ALLOW` | `{action, ref, new_sha, trigger, workflow?, run_id?}`. Proceed with exactly this. |

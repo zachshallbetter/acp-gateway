@@ -341,7 +341,12 @@ The owner is asked only past a budget or for production, through a grant:
 --uses 1 --expires 2h --reason "…" --apply`. A grant is bounded in uses and
 time and takes effect at once, without a deployment. Repeating the same grant
 command within ten minutes answers with the grant it already issued, and how many
-uses it has left; a later run issues a new one.
+uses it has left; a later run issues a new one. A grant names a repository ACP governs
+or none at all (`REPOSITORY_NOT_GOVERNED` otherwise). Every refusal a grant would clear
+carries `grant_request`: the grant's fields and the complete command that issues it, with
+the request's own reason filled in. The command starts with `ACP_GRANT_COMMAND_PREFIX`,
+by default `latchkey run --env-file ~/Projects/acp-gateway/.env.local -- python3
+~/Projects/acp-gateway/scripts/policy-admin.py`.
 
 **Fail closed.** No budget policy, unreadable provider evidence, a provider
 response that does not match the expected fields, an unknown action, an

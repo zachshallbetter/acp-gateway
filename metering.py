@@ -341,10 +341,30 @@ def budget_day(now):
     return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
 
 
-def grant_command(action, owner=None, name=None):
-    repo = f" --repo {owner}/{name}" if owner and name else ""
-    return (f"python3 scripts/policy-admin.py budget-grant --action {action}{repo} --uses 1 --expires 2h "
-            f"--reason \"<why>\" --apply")
+# How the owner runs policy-admin on their machine. A deployment whose operator checkout lives elsewhere
+# sets ACP_GRANT_COMMAND_PREFIX; the default is the acp-gateway checkout under latchkey.
+GRANT_COMMAND_PREFIX = ("latchkey run --env-file ~/Projects/acp-gateway/.env.local -- "
+                        "python3 ~/Projects/acp-gateway/scripts/policy-admin.py")
+
+
+def grant_request(action, owner=None, name=None, reason=None):
+    """The one-use owner grant that would let this request through: its fields, and the exact command
+    that issues it, complete and ready to run (no placeholders), with the request's own reason."""
+    import os
+    import shlex
+    why = " ".join(str(reason or "").split())[:200]
+    if len(why) < 8:
+        why = f"approve one {action}" + (f" for {owner}/{name}" if owner and name else "")
+    prefix = os.environ.get("ACP_GRANT_COMMAND_PREFIX", "").strip() or GRANT_COMMAND_PREFIX
+    repo = f" --repo {shlex.quote(f'{owner}/{name}')}" if owner and name else ""
+    return {"action": action, "repository": f"{owner}/{name}" if owner and name else None, "uses": 1,
+            "expires": "2h", "reason": why,
+            "command": f"{prefix} budget-grant --action {action}{repo} --uses 1 --expires 2h "
+                       f"--reason {shlex.quote(why)} --apply"}
+
+
+def grant_command(action, owner=None, name=None, reason=None):
+    return grant_request(action, owner, name, reason)["command"]
 
 
 class Outcome:
@@ -416,8 +436,9 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                        f"This deploys production ({branch}). It is already authorized for another caller, and that "
                        f"authorization is not transferable; this caller is a {caller['kind']} caller.",
                        f"Leave it to the caller that holds the authorization, or ask the owner for a grant: "
-                       f"{grant_command(action, owner, name)}",
-                       builds=evidence["builds"], caller_kind=caller["kind"])
+                       f"{grant_command(action, owner, name, context.get('reason'))}",
+                       builds=evidence["builds"], caller_kind=caller["kind"],
+                       grant_request=grant_request(action, owner, name, context.get("reason")))
     if all(prior):
         return Outcome("ALLOW", prior[0]["reason_code"],
                        "Already authorized for this exact commit; the earlier record stands and is not counted again.",
@@ -458,8 +479,9 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                            f"caller is a {caller['kind']} caller.",
                            f"Hand the {'merge' if action == 'production_merge' else 'push'} to your coordinator, "
                            f"or ask the owner for a one-use grant: "
-                           f"{grant_command(action, owner, name)}",
-                           builds=evidence["builds"], caller_kind=caller["kind"])
+                           f"{grant_command(action, owner, name, context.get('reason'))}",
+                           builds=evidence["builds"], caller_kind=caller["kind"],
+                           grant_request=grant_request(action, owner, name, context.get("reason")))
 
     day = budget_day(now)
     usage, exceeded = _usage(ledger, action, limits, metered, owner, name, building, day)
@@ -482,8 +504,9 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                            f"Today's {exceeded['scope']} budget for {action} is used up "
                            f"({exceeded['used']} of {exceeded['limit']}).",
                            f"Batch this with later work and push once the budget resets at 00:00 UTC, or ask the "
-                           f"owner for a grant: {grant_command(action, owner, name)}",
-                           budget={"day": day, "usage": usage, "exceeded": exceeded}, builds=evidence["builds"])
+                           f"owner for a grant: {grant_command(action, owner, name, context.get('reason'))}",
+                           budget={"day": day, "usage": usage, "exceeded": exceeded}, builds=evidence["builds"],
+                           grant_request=grant_request(action, owner, name, context.get("reason")))
     _record(ledger, keys, action, grant, claim, context, caller, now, request_id, True, evidence)
     reason = "GRANT_APPLIED" if grant else "WITHIN_BUDGET"
     return Outcome("ALLOW", reason,
