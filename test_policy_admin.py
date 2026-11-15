@@ -290,7 +290,7 @@ class EnrollTests(unittest.TestCase):
                 patch.multiple(admin, **fake.patches()), patch.object(admin, "vercel_projects_by_repo", return_value=linked), \
                 patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), redirect_stdout(io.StringIO()):
             args = argparse.Namespace(repositories=["o/a", "o/b"], vercel=[], vercel_team=None, railway_project=None,
-                                      railway_service=[], production_branch=[], apply=True)
+                                      railway_service=[], railway_map=None, production_branch=[], apply=True)
             self.assertEqual(admin.cmd_enroll(args), 0)
         self.assertEqual(fake.writes, [("policy", 7)])
         by_id = {p["policy_id"]: p for p in fake.patched}
@@ -301,6 +301,41 @@ class EnrollTests(unittest.TestCase):
         states = rp.validate(fake.patched, KEY, admin.KEY_ID)
         self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
 
+    def test_a_railway_map_adds_services_and_keeps_the_vercel_projects_metered(self):
+        metered = signed({"policy_id": "o-site", "version": 2, "status": "active",
+                          "repository": {"owner": "o", "name": "site"},
+                          "protected_actions": ["hosted_build", "manual_ci", "production_merge"],
+                          "metered": {"production_branches": ["main"], "providers": {
+                              "vercel": {"project_ids": ["prj_cli"], "team_id": "team_One"}}}})
+        fake = FakeStore([metered, *existing()])
+        with tempfile.TemporaryDirectory() as tmp:
+            mapping = Path(tmp) / "railway.json"
+            mapping.write_text(json.dumps({"o/site": {"project_id": "11111111-1111-4111-8111-111111111111", "service_ids": ["33333333-3333-4333-8333-333333333333", "22222222-2222-4222-8222-222222222222"]}}))
+            with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                    patch.object(admin, "vercel_projects_by_repo", return_value={}), \
+                    patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), redirect_stdout(io.StringIO()) as out:
+                args = argparse.Namespace(repositories=["o/site", "o/a"], vercel=[], vercel_team=None,
+                                          railway_project=None, railway_service=[], railway_map=str(mapping),
+                                          production_branch=[], apply=True)
+                self.assertEqual(admin.cmd_enroll(args), 0)
+        site = next(p for p in fake.patched if p["policy_id"] == "o-site")
+        self.assertEqual(site["version"], 3)
+        self.assertEqual(site["metered"]["providers"], {
+            "vercel": {"project_ids": ["prj_cli"], "team_id": "team_One"},
+            "railway": {"project_id": "11111111-1111-4111-8111-111111111111", "service_ids": ["22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"]}})
+
+    def test_an_unchanged_repository_is_left_at_its_version(self):
+        metered = signed({"policy_id": "o-a", "version": 4, "status": "active", "repository": {"owner": "o", "name": "a"},
+                          "protected_actions": ["hosted_build", "manual_ci", "production_merge"],
+                          "metered": {"production_branches": ["main"], "providers": {}}})
+        fake = FakeStore([metered])
+        with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                patch.object(admin, "vercel_projects_by_repo", return_value={}), redirect_stdout(io.StringIO()) as out:
+            args = argparse.Namespace(repositories=["o/a"], vercel=[], vercel_team=None, railway_project=None,
+                                      railway_service=[], railway_map=None, production_branch=[], apply=False)
+            self.assertEqual(admin.cmd_enroll(args), 0)
+        self.assertIn("unchanged o-a v4", out.getvalue())
+
     def test_vercel_output_after_a_hint_line_still_parses(self):
         printed = subprocess.CompletedProcess([], 0, '<claude-code-hint v="1" />\n{"teams": [{"id": "team_A"}]}\n', "")
         with patch.object(admin.subprocess, "run", return_value=printed):
@@ -308,7 +343,8 @@ class EnrollTests(unittest.TestCase):
 
     def test_explicit_projects_name_one_repository(self):
         args = argparse.Namespace(repositories=["o/a", "o/b"], vercel=["prj_x"], vercel_team=None,
-                                  railway_project=None, railway_service=[], production_branch=[], apply=False)
+                                  railway_project=None, railway_service=[], railway_map=None, production_branch=[],
+                                  apply=False)
         with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **FakeStore(existing()).patches()), \
                 redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "enroll it on its own"):
             admin.cmd_enroll(args)

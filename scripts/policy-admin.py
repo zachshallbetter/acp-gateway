@@ -2,7 +2,7 @@
 """policy-admin.py -- the owner's policy and baseline changes for the Vercel deployment.
 
     .venv/bin/python scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...] [--vercel PRJ ... --vercel-team TEAM]
-                     [--railway-project ID --railway-service ID] [--apply]
+                     [--railway-project ID --railway-service ID | --railway-map FILE] [--apply]
     .venv/bin/python scripts/policy-admin.py register OWNER/NAME [OWNER/NAME ...] [--apply]
     .venv/bin/python scripts/policy-admin.py grant OWNER/NAME --checkout DIR [--ref REF] [--apply]
     .venv/bin/python scripts/policy-admin.py repin OWNER/NAME --checkout DIR [--ref REF] [--apply]
@@ -18,7 +18,9 @@
 enroll    is how a project joins ACP: it registers each repository that isn't governed yet and meters
           it with the Vercel projects linked to it on GitHub across every team the signed-in Vercel
           account belongs to (or the projects and Railway service named with --vercel/--railway-*,
-          for a site deployed from the CLI), all as one stored version.
+          for a site deployed from the CLI), all as one stored version. --railway-map names Railway
+          services for many repositories at once. A provider not named or discovered keeps what the
+          policy already meters, and a repository whose providers don't change is left as it is.
 
 register  puts repositories under an ACP policy. It reads production's ACP_POLICY from
           Vercel, checks that the Keychain signing key reproduces every existing signature,
@@ -498,8 +500,13 @@ def cmd_enroll(args) -> int:
                          f"{bad}. Nothing was changed.")
     explicit = explicit_providers(args)
     if explicit and len(args.repositories) != 1:
-        raise SystemExit("error: --vercel and --railway-* name one repository's projects; enroll it on its own")
-    linked = {} if explicit else vercel_projects_by_repo()
+        raise SystemExit("error: --vercel and --railway-* name one repository's projects; enroll it on its own, "
+                         "or name Railway services for many with --railway-map")
+    railway_map = {}
+    if args.railway_map:
+        raw = json.loads(Path(args.railway_map).read_text(encoding="utf-8"))
+        railway_map = {repo.lower(): block for repo, block in raw.items()}
+    linked = {} if "vercel" in explicit else vercel_projects_by_repo()
     for spec in args.repositories:
         owner, _, name = spec.partition("/")
         if not owner or not name:
@@ -510,16 +517,30 @@ def cmd_enroll(args) -> int:
                                                        policy_id=None, board=[], actions=None))
             policies, _ = rp.merge(policies, rp.sign(built, key, KEY_ID))
             policy = policies[-1]
-        providers = explicit
-        if not explicit:
+        current = (policy.get("metered") or {}).get("providers") or {}
+        providers = {}
+        # Each provider: named on the command line, else discovered (Vercel) or mapped (Railway), else what the
+        # policy already names, so a site deployed from the CLI keeps the project it was metered with.
+        if "vercel" in explicit:
+            providers["vercel"] = explicit["vercel"]
+        else:
             projects = linked.get(spec.lower(), [])
             teams = sorted({team for team, _ in projects}, key=lambda t: -sum(1 for x, _ in projects if x == t))
             if teams:
-                providers = {"vercel": {"project_ids": sorted(p for t, p in projects if t == teams[0])[:10],
-                                        "team_id": teams[0]}}
+                providers["vercel"] = {"project_ids": sorted(p for t, p in projects if t == teams[0])[:10],
+                                       "team_id": teams[0]}
                 if len(teams) > 1:
                     print(f"note: {spec} has Vercel projects in {len(teams)} teams; metering those in {teams[0]}")
-        signed = metered_policy(policy, providers, args.production_branch, [], rp, key)
+            elif current.get("vercel"):
+                providers["vercel"] = current["vercel"]
+        railway = explicit.get("railway") or railway_map.get(spec.lower()) or current.get("railway")
+        if railway:
+            providers["railway"] = {"project_id": railway["project_id"], "service_ids": sorted(railway["service_ids"])}
+        if policy.get("metered") and providers == current and not args.production_branch:
+            print(f"unchanged {policy['policy_id']} v{policy['version']} for {owner}/{name}")
+            continue
+        signed = metered_policy(policy, providers, args.production_branch or
+                                (policy.get("metered") or {}).get("production_branches"), [], rp, key)
         policies = [signed if p is policy else p for p in policies]
         print(f"enroll {signed['policy_id']} v{signed['version']} for {owner}/{name}: "
               f"providers {sorted(providers) or 'none (GitHub Actions only)'}")
@@ -659,6 +680,8 @@ def main() -> int:
     enroll.add_argument("--vercel-team")
     enroll.add_argument("--railway-project")
     enroll.add_argument("--railway-service", action="append", default=[])
+    enroll.add_argument("--railway-map", metavar="FILE",
+                        help='JSON {"OWNER/NAME": {"project_id": ID, "service_ids": [ID, ...]}} for many repositories')
     enroll.add_argument("--production-branch", action="append", default=[])
     enroll.add_argument("--apply", action="store_true")
     caller = sub.add_parser("caller", help="issue a lane or coordinator credential")
