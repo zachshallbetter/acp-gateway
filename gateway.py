@@ -127,6 +127,39 @@ def document_errors(name, text):
     return f"policies do not verify: {', '.join(invalid)}" if invalid else None
 
 
+def document_rollback(name, text):
+    """Why storing this signed document would roll back what is in force, or None.
+
+    A signature proves the owner signed a document once, not that it is the
+    newest one, so an older signed copy must not replace a newer one. Callers
+    and budget documents carry one version that must increase; each policy
+    keeps its own, which may not go back and must increase when it changes.
+    """
+    row = postgres_store.latest_document(name)
+    current = row["document"] if row else os.getenv(DOCUMENT_SEEDS[name], "").strip()
+    if not current:
+        return None
+    if name in ("callers", "budget"):
+        try:
+            old, new = json.loads(current).get("version"), json.loads(text).get("version")
+        except (ValueError, AttributeError):
+            return None
+        if isinstance(old, int) and not (isinstance(new, int) and new > old):
+            return f"its version {new!r} is not newer than the version {old} in force"
+        return None
+    before = load_policies(current, "current")["policies"]
+    for policy_id, record in load_policies(text, "candidate")["policies"].items():
+        prior = before.get(policy_id)
+        if prior is None:
+            continue
+        old, new = prior["policy"].get("version"), record["policy"].get("version")
+        if not (isinstance(old, int) and isinstance(new, int)):
+            continue
+        if new < old or (new == old and record["digest"] != prior["digest"]):
+            return f"policy {policy_id} version {new} does not supersede version {old} in force"
+    return None
+
+
 def store_document(body, handler):
     """POST /internal/documents: verify and store the next version of a signed document (admin only)."""
     if not admin_authorized(handler):
@@ -149,6 +182,12 @@ def store_document(body, handler):
     if error:
         raise TargetError(422, "DOCUMENT_INVALID", f"The {name} document does not verify: {error[:200]}.",
                           remedy="Re-sign it with the deployment's signing key; nothing was stored.")
+    rollback = document_rollback(name, text)
+    if rollback:
+        raise TargetError(409, "DOCUMENT_ROLLBACK",
+                          f"The {name} document would replace a newer one: {rollback[:200]}.",
+                          remedy=f"Read GET /internal/documents/{name}, apply the change to it, raise its "
+                                 "version, and sign again; nothing was stored.")
     digest = hashlib.sha256(text.encode()).hexdigest()
     stored = postgres_store.current().document_insert(name, expected, digest, text, "owner")
     if stored is None:

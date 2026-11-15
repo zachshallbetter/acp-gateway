@@ -416,7 +416,10 @@ are the source on file storage; `ACP_POLICY_FILE` overrides the policy source.
 `scripts/policy-admin.py` writes through `POST /internal/documents`
 (administrative credential): the gateway verifies the document with its own key
 and loaders before storing it, and refuses one signed on a stale version
-(`STALE_DOCUMENT_VERSION`). `GET /internal/documents/<policy|callers|budget>`
+(`STALE_DOCUMENT_VERSION`). It also refuses a document that would roll back
+the one in force (`DOCUMENT_ROLLBACK`): a callers or budget document must carry a
+higher `version`, and a policy already in force may not go back a version or
+change without raising it. `GET /internal/documents/<policy|callers|budget>`
 returns the current document and its stored version. A stored row grants
 nothing by itself: every signature is still checked against
 `ACP_POLICY_SIGNING_KEY`.

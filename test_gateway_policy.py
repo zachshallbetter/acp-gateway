@@ -532,6 +532,57 @@ def test_a_single_use_recovery_authorization_is_spent_once_whoever_presents_it()
         assert out["decision"] == "DENY" and "already been used" in out["detail"], out
 
 
+class _DocumentStore:
+    """The shared document table, in memory: append-only versions per name."""
+
+    def __init__(self):
+        self.rows = {}
+
+    def latest(self, name):
+        versions = self.rows.get(name) or []
+        return versions[-1] if versions else None
+
+    def document_insert(self, name, expected, digest, text, written_by):
+        versions = self.rows.setdefault(name, [])
+        if len(versions) != expected:
+            return None
+        versions.append({"version": expected + 1, "document": text, "digest": digest})
+        return versions[-1]
+
+
+def test_an_older_signed_document_cannot_replace_a_newer_one():
+    fresh()
+    store = _DocumentStore()
+    admin = type("H", (), {"headers": {"X-ACP-Admin-Authorization": "Bearer admin-token-long-enough"}})()
+
+    def put(name, expected, document):
+        return gateway.store_document({"name": name, "expected_version": expected, "document": document}, admin)
+
+    def callers(version, digest):
+        return signed({"callers_id": "acp-callers", "version": version,
+                       "callers": [{"caller_id": "lane-a", "kind": "lane", "repos": [f"{OWNER}/{REPO}"],
+                                    "token_sha256": digest * 64}]})
+    v1, v2 = signed(policy()), signed(policy(version=2, protected_actions=["production.deploy"]))
+    with env(ACP_POLICY_ADMIN_TOKEN="admin-token-long-enough", ACP_POLICY="", ACP_CALLERS=""), \
+            patch.object(gateway.postgres_store, "enabled", return_value=True), \
+            patch.object(gateway.postgres_store, "current", return_value=store), \
+            patch.object(gateway.postgres_store, "latest_document", side_effect=store.latest), \
+            patch.object(gateway, "emit_event"):
+        assert put("callers", 0, callers(1, "a"))["version"] == 1
+        assert put("callers", 1, callers(2, "b"))["version"] == 2
+        assert put("policy", 0, [v1])["version"] == 1
+        assert put("policy", 1, [v2])["version"] == 2
+        for name, expected, document in (("callers", 2, callers(1, "a")),          # revoked token returns
+                                         ("callers", 2, callers(2, "c")),          # same version, new content
+                                         ("policy", 2, [v1])):                     # weaker policy returns
+            try:
+                put(name, expected, document)
+                raise AssertionError(f"an older {name} document replaced a newer one")
+            except gateway.TargetError as exc:
+                assert exc.status == 409 and exc.code == "DOCUMENT_ROLLBACK", exc
+        assert put("callers", 2, callers(3, "a"))["version"] == 3, "a newer version is still accepted"
+
+
 def test_a_recovery_authorization_cannot_reach_another_ref_or_sha():
     fresh()
     with env(ACP_RECOVERY_AUTHORIZATIONS=json.dumps(RECOVERY)):
