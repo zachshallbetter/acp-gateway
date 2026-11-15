@@ -91,7 +91,7 @@ process_item() {
   ISSUE_REPO="$(printf '%s' "$REC" | jget '.repository')"
   ISSUE_PACKET=""
   if [ -n "$NUMBER" ] && [ -n "$OWNER" ]; then
-    ISSUE_PACKET="$(gh issue view "$NUMBER" --repo "$ISSUE_REPO" --json body,comments,labels,milestone,assignees 2>/dev/null | jq -c '{body,comments:[.comments[-5:][]?|{author:.author.login,body}],labels:[.labels[].name],milestone:.milestone.title,assignees:[.assignees[].login]}')"
+    ISSUE_PACKET="$(gh issue view "$NUMBER" --repo "$ISSUE_REPO" --json body,comments,labels,milestone,assignees 2>/dev/null | jq -c '[.comments[]?|select(.authorAssociation=="OWNER" or .authorAssociation=="MEMBER" or .authorAssociation=="COLLABORATOR")] as $trusted | {body,comments:[$trusted[-5:][]?|{author:.author.login,body}],comments_dropped:((.comments|length)-($trusted|length)),labels:[.labels[].name],milestone:.milestone.title,assignees:[.assignees[].login]}')"
   fi
   CORPUS="$(corpus_preflight 2>/dev/null || true)"
   rp="$REPO_PATH"; on="$REPO"; cr="$CRATE"
@@ -112,6 +112,13 @@ process_item() {
   if [ -z "$rp" ] || [ -z "$on" ]; then
     res="$("$SCRIPT_DIR/repo-map.sh" resolve "$REPOS" 2>/dev/null)"
     [ -n "$res" ] && { [ -z "$rp" ] && rp="$(printf '%s' "$res" | cut -f1)"; [ -z "$on" ] && on="$(printf '%s' "$res" | cut -f2)"; [ -z "$cr" ] && cr="$(printf '%s' "$res" | cut -f3)"; }
+  fi
+  # The resolved target must be the repository that owns the issue: a Repos hint on the board
+  # must not redirect the worktree, push and PR to another repository. An explicit --repo is the
+  # operator's own choice and is not second-guessed.
+  if [ -z "$REPO" ] && [ -n "$ISSUE_REPO" ] && [ -n "$on" ] \
+     && [ "$(printf '%s' "$on" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$ISSUE_REPO" | tr '[:upper:]' '[:lower:]')" ]; then
+    echo "  STOP: Repos hint resolved to $on, but the issue belongs to $ISSUE_REPO"; return 0
   fi
   if [ -z "$ISSUE_PACKET" ] || ! printf '%s' "$ISSUE_PACKET" | jq -e '.body | test("## (Authorized paths|Exclusions|Acceptance criteria|Evidence requirements|Definition of done)"; "i")' >/dev/null 2>&1; then
     echo "  STOP: issue packet lacks required scope, acceptance, evidence, or completion sections"; return 0

@@ -65,10 +65,16 @@ resolve() {
     [ -n "$row" ] && { printf '%s' "$row" | cut -f2-4; return 0; }
   fi
   # 2) an explicit path inside the hint
+  # A hint word is a path relative to the fleet root: absolute paths and `..` components are
+  # refused, and the repository it lands in must itself sit inside the root.
+  local root_real; root_real="$(cd "$ROOT" 2>/dev/null && pwd -P)"
   for cand in $(printf '%s' "$hint" | tr ',()' '   '); do
+    case "$cand" in /*|..|../*|*/..|*/../*) continue;; esac
     [ -n "$cand" ] && [ -d "$ROOT/$cand" ] || continue
     rp="$(git -C "$ROOT/$cand" rev-parse --show-toplevel 2>/dev/null)"
-    [ -n "$rp" ] && { printf '%s\t%s\t%s\n' "$rp" "$(owner_name "$rp")" ""; return 0; }
+    [ -n "$rp" ] && rp="$(cd "$rp" 2>/dev/null && pwd -P)"
+    case "$rp" in "$root_real"|"$root_real"/*) ;; *) continue;; esac
+    printf '%s\t%s\t%s\n' "$rp" "$(owner_name "$rp")" ""; return 0
   done
   # 3) token match; prefer a key whose row carries a crate (more specific)
   for cand in $(printf '%s' "$hint" | tr ',()/ ' '\n' | grep -v '^$' | sort -u); do
