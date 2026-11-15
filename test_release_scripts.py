@@ -151,21 +151,29 @@ class HarnessTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def write_guard(self, held=None, approved=False):
-        Path(self.home.name, "guard_common.py").write_text(
-            f"def held():\n    return {held!r}\n\ndef approved(scope, repo):\n    return {approved!r}\n")
-
     def test_without_the_harness_acp_is_the_only_gate(self):
-        self.assertIn("ACP is the only gate", acp_ops.harness_gate("repo"))
+        with patch.dict(os.environ, {"HARNESS_HOME": str(Path(self.home.name, "absent"))}):
+            self.assertIn("ACP is the only gate", acp_ops.harness_gate("repo"))
 
     def test_the_hold_refuses(self):
-        self.write_guard(held="incident")
+        Path(self.home.name, "HOLD").write_text("incident\n")
         with self.assertRaisesRegex(Stop, "on hold \\(incident\\)"):
             acp_ops.harness_gate("repo")
 
+    def test_an_empty_hold_file_still_refuses(self):
+        Path(self.home.name, "HOLD").write_text("")
+        with self.assertRaisesRegex(Stop, "on hold"):
+            acp_ops.harness_gate("repo")
+
     def test_no_approval_window_is_needed(self):
-        self.write_guard(approved=False)
         self.assertEqual(acp_ops.harness_gate("repo"), "not on hold")
+
+    def test_harness_code_is_never_executed(self):
+        marker = Path(self.home.name, "ran")
+        Path(self.home.name, "guard_common.py").write_text(
+            f"open({str(marker)!r}, 'w').write('x')\ndef held():\n    return None\n")
+        acp_ops.harness_gate("repo")
+        self.assertFalse(marker.exists())
 
 
 class BearerTests(unittest.TestCase):

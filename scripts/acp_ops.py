@@ -11,7 +11,6 @@ Database connection strings stay in the environment of the process that uses the
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -70,18 +69,23 @@ def bearer(account: str) -> str:
 
 
 def harness_gate(repo_name: str) -> str:
-    """Refuse while the machine is on hold, read with the harness's own reader. Returns a short note."""
+    """Refuse while the machine is on hold. Returns a short note.
+
+    The hold is the owner's HOLD file in the harness directory: its text is the reason, or a default
+    when empty. It is read as a plain file; nothing from the harness directory is executed here, since
+    this process holds release secrets."""
     home = Path(os.path.expanduser(os.environ.get("HARNESS_HOME", "~/.claude/hooks")))
-    source = home / "guard_common.py"
-    if not source.is_file():
+    if not home.is_dir():
         return "no owner harness on this machine; ACP is the only gate"
-    spec = importlib.util.spec_from_file_location("acp_harness_guard_common", source)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    hold = module.held()
-    if hold:
-        raise Stop(f"the machine is on hold ({hold}); nothing was pushed or deployed for {repo_name}")
-    return "not on hold"
+    hold_file = home / "HOLD"
+    if not hold_file.exists():
+        return "not on hold"
+    try:
+        reason = hold_file.read_text().strip()
+    except OSError:
+        reason = ""
+    raise Stop(f"the machine is on hold ({reason or 'the owner put the machine on hold'}); "
+               f"nothing was pushed or deployed for {repo_name}")
 
 
 def authorize(token: str, owner: str, name: str, action: str, head_sha: str, context: dict, summary: str,
