@@ -366,14 +366,22 @@ class CredentialTests(unittest.TestCase):
 class CallerTokenTests(unittest.TestCase):
     def test_the_token_reaches_the_keychain_on_stdin_never_on_argv(self):
         fake = FakeStore(None, version=0, name="callers")
-        completed = subprocess.CompletedProcess([], 0, "", "")
+        keychain = {}
+
+        def security(argv, **kwargs):
+            if argv == ["security", "-i"]:
+                keychain["token"] = kwargs["input"].rsplit("-w ", 1)[1].strip().strip('"')
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, keychain.get("token", "") + "\n", "")
         args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True)
         with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
-                patch.object(subprocess, "run", return_value=completed) as ran, redirect_stdout(io.StringIO()):
+                patch.object(subprocess, "run", side_effect=security) as ran, redirect_stdout(io.StringIO()):
             self.assertEqual(admin.cmd_caller(args), 0)
-        argv = ran.call_args.args[0]
+        argv = ran.call_args_list[0].args[0]
         self.assertEqual(argv, ["security", "-i"])
-        sent = ran.call_args.kwargs["input"]
+        for call in ran.call_args_list:
+            self.assertNotIn(keychain["token"], " ".join(call.args[0]))
+        sent = ran.call_args_list[0].kwargs["input"]
         self.assertTrue(sent.startswith("add-generic-password -U -s "))
         token = sent.rsplit("-w ", 1)[1].strip().strip('"')
         self.assertGreaterEqual(len(token), 32)
@@ -386,6 +394,16 @@ class CallerTokenTests(unittest.TestCase):
         args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True)
         with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
                 patch.object(subprocess, "run", return_value=failed), redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(SystemExit, "Keychain"):
+            admin.cmd_caller(args)
+        self.assertEqual(fake.writes, [])
+
+    def test_a_silent_keychain_failure_is_caught_by_reading_the_item_back(self):
+        fake = FakeStore(None, version=0, name="callers")
+        silent = subprocess.CompletedProcess([], 0, "", "")             # exit 0, nothing stored
+        args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True)
+        with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                patch.object(subprocess, "run", return_value=silent), redirect_stdout(io.StringIO()), \
                 self.assertRaisesRegex(SystemExit, "Keychain"):
             admin.cmd_caller(args)
         self.assertEqual(fake.writes, [])

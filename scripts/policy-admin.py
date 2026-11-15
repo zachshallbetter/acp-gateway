@@ -619,7 +619,10 @@ def cmd_caller(args) -> int:
     quoted = [json.dumps(v) for v in (KEYCHAIN_SERVICE, account, token)]
     stored = subprocess.run(["security", "-i"], capture_output=True, text=True,
                             input=f"add-generic-password -U -s {quoted[0]} -a {quoted[1]} -w {quoted[2]}\n")
-    if stored.returncode != 0:
+    # `security -i` can exit 0 when the command it read failed, so read the item back (on stdout, not argv).
+    readback = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
+                              capture_output=True, text=True)
+    if stored.returncode != 0 or readback.returncode != 0 or readback.stdout.strip() != token:
         raise SystemExit("error: could not store the token in the Keychain; nothing was stored in ACP")
     write_signed("callers", stored_version, signed)
     print(f"the caller's client reads it with keychainAccount {account} in its endpoint registry")
