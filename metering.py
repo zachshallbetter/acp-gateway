@@ -32,6 +32,9 @@ BRANCH_INDEPENDENT_TRIGGERS = frozenset({"cli_deploy", "railway_up"})
 TRIGGER_PROVIDER = {"cli_deploy": "vercel", "railway_up": "railway"}
 # Each request with these triggers starts a new paid run of the same commit.
 INVOCATION_TRIGGERS = frozenset({"cli_deploy", "railway_up", "workflow_dispatch"})
+# Daily counts that record and report for the coordinator and the owner instead of refusing.
+# Hosted builds and manual CI cost money per run and stay enforced.
+AWARE_BUDGETS = frozenset({"production_merge"})
 CALLER_KINDS = ("shared", "lane", "coordinator", "owner")
 PRODUCTION_CALLERS = frozenset({"coordinator", "owner"})
 HEAVY_MODEL = re.compile(r"opus|fable", re.I)
@@ -328,6 +331,18 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
 
     day = budget_day(now)
     usage, exceeded = _usage(ledger, action, limits, metered, owner, name, building, day)
+    if exceeded and grant is None and action in AWARE_BUDGETS and _caller_may_reach_production(caller):
+        # A merge costs nothing by itself (the builds it starts are metered as hosted_build), so
+        # for the coordinator or the owner its daily count is awareness, not a gate: counted,
+        # reported and flagged, never refused.
+        _record(ledger, keys, action, None, claim, context, caller, now, request_id, True, evidence)
+        return Outcome("ALLOW", "OVER_BUDGET_NOTED",
+                       f"Allowed and counted past today's {exceeded['scope']} count for {action} "
+                       f"({exceeded['used']} of {exceeded['limit']}). The count is shown in GET /internal/budget; "
+                       "nothing is refused for it.",
+                       budget={"day": day, "usage": _usage(ledger, action, limits, metered, owner, name, building,
+                                                           day)[0], "exceeded": exceeded},
+                       builds=evidence["builds"])
     if exceeded and grant is None:
         grant = ledger.grant_take(action, owner, name, now)
         if grant is None:
@@ -461,7 +476,9 @@ class MemoryLedger:
         return len({r["sha"] for r in rows}) if distinct_sha else len(rows)
 
     def grant_issue(self, row):
-        self.grants[row["grant_id"]] = dict(row)
+        created = row["grant_id"] not in self.grants
+        self.grants.setdefault(row["grant_id"], dict(row))
+        return {**self.grants[row["grant_id"]], "created": created}
 
     def grant_take(self, action, owner, name, now):
         for grant_id in sorted(self.grants):

@@ -5114,15 +5114,20 @@ def issue_grant(body, now=None):
                           remedy="Send the grant to the ACP endpoint that runs on PostgreSQL.")
     grant_id = "g-" + metering.record_key("grant", action, (owner or "").lower(), (name or "").lower(),
                                           request_id)[:16]
-    ledger.grant_issue({"grant_id": grant_id, "action": action,
-                        "resource_owner": (owner or "").lower() or None, "resource_name": (name or "").lower() or None,
-                        "uses_total": uses, "uses_left": uses, "issued_at": now, "expires_at": now + minutes * 60,
-                        "issued_by": "owner", "reason": reason.strip()})
-    emit_event("BUDGET_GRANT_ISSUED", now=now, action=action,
-               resource_id=f"{owner}/{name}".lower() if owner else None,
-               detail=f"{uses} use(s) for {minutes} minutes: {reason.strip()}")
+    stored = ledger.grant_issue({"grant_id": grant_id, "action": action,
+                                 "resource_owner": (owner or "").lower() or None,
+                                 "resource_name": (name or "").lower() or None,
+                                 "uses_total": uses, "uses_left": uses, "issued_at": now,
+                                 "expires_at": now + minutes * 60, "issued_by": "owner", "reason": reason.strip()})
+    # The same request_id is the same grant: a retry answers with it instead of failing.
+    existing = not stored["created"]
+    if not existing:
+        emit_event("BUDGET_GRANT_ISSUED", now=now, action=action,
+                   resource_id=f"{owner}/{name}".lower() if owner else None,
+                   detail=f"{uses} use(s) for {minutes} minutes: {reason.strip()}")
     return {"grant_id": grant_id, "action": action, "repository": f"{owner}/{name}" if owner else None,
-            "uses": uses, "expires_at": iso(now + minutes * 60)}
+            "uses": stored["uses_total"], "uses_left": stored["uses_left"],
+            "expires_at": iso(float(stored["expires_at"])), "existing": existing}
 
 
 def release_lease(body, now=None):

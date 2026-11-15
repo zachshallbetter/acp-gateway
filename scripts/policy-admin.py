@@ -76,6 +76,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -585,7 +586,8 @@ def cmd_budget_grant(args) -> int:
     owner, _, name = (args.repo or "").partition("/")
     body = {"action": args.action, "uses": args.uses, "expires_minutes": _duration_minutes(args.expires),
             "reason": args.reason, "request_id": hashlib.sha256(
-                f"{args.action}|{args.repo}|{args.uses}|{args.expires}|{args.reason}".encode()).hexdigest()[:32]}
+                f"{args.action}|{args.repo}|{args.uses}|{args.expires}|{args.reason}|{int(time.time()) // 600}"
+                .encode()).hexdigest()[:32]}
     if args.repo:
         body.update(owner=owner, name=name)
     print(f"grant {args.action} for {args.repo or 'any repository'}: {args.uses} use(s), {args.expires}")
@@ -594,7 +596,11 @@ def cmd_budget_grant(args) -> int:
         return 0
     result = gateway_call("/internal/budget/grant", keychain("ACP_GATEWAY_TOKEN"),
                           keychain("ACP_POLICY_ADMIN_TOKEN"), body)
-    print(f"issued {result['grant_id']}, expires {result['expires_at']}")
+    if result.get("existing"):
+        print(f"already issued {result['grant_id']} ({result['uses_left']} of {result['uses']} use(s) left), "
+              f"expires {result['expires_at']}")
+    else:
+        print(f"issued {result['grant_id']}, expires {result['expires_at']}")
     return 0
 
 

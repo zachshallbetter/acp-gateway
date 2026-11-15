@@ -217,7 +217,7 @@ def test_push_to_production_branch_is_production_too():
         assert result["reason"] == "OWNER_REQUIRED"
 
 
-def test_coordinator_merges_within_five_a_day():
+def test_coordinator_merges_past_five_a_day_are_counted_not_refused():
     with env():
         fresh()
         ledger = metering.MemoryLedger()
@@ -226,7 +226,34 @@ def test_coordinator_merges_within_five_a_day():
                             caller=COORDINATOR)
             assert result["decision"] == "ALLOW", result
         sixth = decide(request("production_merge", ref="refs/heads/main", sha="9" * 40), ledger, caller=COORDINATOR)
-        assert sixth["decision"] == "AUTH_REQUIRED" and sixth["reason"] == "BUDGET_EXCEEDED"
+        assert sixth["decision"] == "ALLOW" and sixth["reason"] == "OVER_BUDGET_NOTED", sixth
+        assert sixth["budget"]["exceeded"]["limit"] == 5 and sixth["capability_token"]
+        assert ledger.ledger_count(metering.budget_day(NOW), ["production_merge"]) == 6, "still counted"
+        lane = decide(request("production_merge", ref="refs/heads/main", sha="8" * 40), ledger, caller=LANE)
+        assert lane["decision"] == "AUTH_REQUIRED", "a lane still needs a grant for production"
+
+
+def test_hosted_builds_past_budget_are_still_refused():
+    with env(limits={"hosted_build": {"per_repo_per_day": 1}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        assert decide(request(ref="refs/heads/main", sha="1" * 40), ledger, caller=COORDINATOR)["decision"] == "ALLOW"
+        over = decide(request(ref="refs/heads/main", sha="2" * 40), ledger, caller=COORDINATOR)
+        assert over["decision"] == "AUTH_REQUIRED" and over["reason"] == "BUDGET_EXCEEDED", over
+
+
+def test_a_repeated_grant_request_returns_the_grant_it_made():
+    ledger = metering.MemoryLedger()
+    body = {"action": "production_merge", "owner": OWNER, "name": REPO, "uses": 1, "expires_minutes": 120,
+            "reason": "merge the sites table wiring", "request_id": "req-0123456789"}
+    with env(), patch.object(gateway, "store_ledger", return_value=ledger):
+        fresh()
+        first = gateway.issue_grant(dict(body), now=NOW)
+        again = gateway.issue_grant(dict(body), now=NOW + 30)
+        other = gateway.issue_grant({**body, "request_id": "req-9876543210"}, now=NOW + 60)
+    assert first["existing"] is False and again["existing"] is True, (first, again)
+    assert again["grant_id"] == first["grant_id"] and again["expires_at"] == first["expires_at"]
+    assert other["grant_id"] != first["grant_id"] and len(ledger.grants) == 2
 
 
 def test_manual_ci_is_coordinator_only_and_capped():

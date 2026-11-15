@@ -209,9 +209,18 @@ class PostgresStoreTests(unittest.TestCase):
         now = time.time()
         grant_id = "g-" + uuid.uuid4().hex[:16]
         with postgres_store.transaction() as store:
-            store.grant_issue({"grant_id": grant_id, "action": "production_merge", "resource_owner": "synthetic",
-                               "resource_name": "granted", "uses_total": 1, "uses_left": 1, "issued_at": now,
-                               "expires_at": now + 600, "issued_by": "owner", "reason": "synthetic release"})
+            first = store.grant_issue({"grant_id": grant_id, "action": "production_merge",
+                                       "resource_owner": "synthetic", "resource_name": "granted", "uses_total": 1,
+                                       "uses_left": 1, "issued_at": now, "expires_at": now + 600,
+                                       "issued_by": "owner", "reason": "synthetic release"})
+            self.assertTrue(first["created"])
+        with postgres_store.transaction() as store:
+            again = store.grant_issue({"grant_id": grant_id, "action": "production_merge",
+                                       "resource_owner": "synthetic", "resource_name": "granted", "uses_total": 1,
+                                       "uses_left": 1, "issued_at": now + 5, "expires_at": now + 605,
+                                       "issued_by": "owner", "reason": "synthetic release"})
+            self.assertFalse(again["created"])
+            self.assertAlmostEqual(again["expires_at"], now + 600, places=3)
         with postgres_store.transaction() as store:
             self.assertEqual(store.grant_take("production_merge", "Synthetic", "Granted", now), grant_id)
         with postgres_store.transaction() as store:

@@ -915,12 +915,20 @@ class PostgresStore:
                 for row in rows]
 
     def grant_issue(self, row):
-        self.connection.execute(
+        """Store a grant, or return the one already stored under its id (a retried request)."""
+        created = self.connection.execute(
             "INSERT INTO budget_grants (grant_id, action, resource_owner, resource_name, uses_total, uses_left, "
-            "issued_at, expires_at, issued_by, reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "issued_at, expires_at, issued_by, reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (grant_id) DO NOTHING RETURNING grant_id",
             (row["grant_id"], row["action"], row["resource_owner"], row["resource_name"], row["uses_total"],
              row["uses_left"], _timestamp(row["issued_at"]), _timestamp(row["expires_at"]), row["issued_by"],
-             row["reason"]))
+             row["reason"])).fetchone() is not None
+        stored = self.connection.execute(
+            "SELECT grant_id, action, resource_owner, resource_name, uses_total, uses_left, "
+            "EXTRACT(EPOCH FROM issued_at) AS issued_at, EXTRACT(EPOCH FROM expires_at) AS expires_at "
+            "FROM budget_grants WHERE grant_id=%s", (row["grant_id"],)).fetchone()
+        return {**dict(stored), "issued_at": float(stored["issued_at"]), "expires_at": float(stored["expires_at"]),
+                "created": created}
 
     def grant_take(self, action, owner, name, now):
         row = self.connection.execute(

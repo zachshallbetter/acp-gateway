@@ -247,7 +247,7 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `CIRCUMVENTION_SUSPECTED`, `POLICY_MODIFICATION_FORBIDDEN`,
 `CREDENTIAL_MODIFICATION_FORBIDDEN`, `ADMINISTRATIVELY_AUTHORIZED`,
 `VERIFIED_AND_PERMITTED`. Metered actions add `WITHIN_BUDGET`, `GRANT_APPLIED`,
-`NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `BUDGET_EXCEEDED`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
+`NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `OVER_BUDGET_NOTED`, `BUDGET_EXCEEDED`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
 `SUBAGENT_LIMIT_REACHED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
 `CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
 `PROVIDER_RESPONSE_DIVERGED`, `BUDGET_LEDGER_UNAVAILABLE` and
@@ -329,10 +329,18 @@ Vercel 40, Railway 10 and Actions 30; 5 production merges per repository; 10
 manual CI runs; 6 concurrent heavy subagents per session. A policy's `metered`
 block may lower or raise a repository's own hosted-build and merge limits.
 
+A production merge costs nothing by itself (its builds are metered as hosted
+builds), so for the coordinator and the owner the daily merge count is awareness,
+not a gate: past it a merge is allowed, counted and flagged `OVER_BUDGET_NOTED`
+with the count in the answer and in `GET /internal/budget`. Hosted builds and
+manual CI stay enforced.
+
 The owner is asked only past a budget or for production, through a grant:
 `scripts/policy-admin.py budget-grant --action hosted_build --repo OWNER/NAME
 --uses 1 --expires 2h --reason "…" --apply`. A grant is bounded in uses and
-time and takes effect at once, without a deployment.
+time and takes effect at once, without a deployment. Repeating the same grant
+command within ten minutes answers with the grant it already issued, and how many
+uses it has left; a later run issues a new one.
 
 **Fail closed.** No budget policy, unreadable provider evidence, a provider
 response that does not match the expected fields, an unknown action, an
