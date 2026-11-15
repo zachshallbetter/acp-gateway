@@ -32,6 +32,7 @@ TIMEOUT_SECONDS = 8
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_WORKFLOW_FILES = 40
 MAX_DEPLOYMENT_PAGES = 5
+MAX_PROJECT_PAGES = 25       # 500 projects per team
 SETTINGS_TTL = 600
 CAPACITY_TTL = 30            # live build activity: fresh enough to pace by, without a read per request
 RAILWAY_GRAPHQL = "https://backboard.railway.com/graphql/v2"
@@ -293,9 +294,11 @@ def vercel_team_projects(team_id, now=None, fetch=_fetch):
     now = time.time() if now is None else now
 
     def load():
+        # A project object carries its whole build configuration, so a page of 100 can pass the 1 MiB
+        # response cap; 20 at a time stays well inside it.
         projects, after = [], None
-        for _ in range(MAX_DEPLOYMENT_PAGES * 2):
-            query = {"limit": 100}
+        for _ in range(MAX_PROJECT_PAGES):
+            query = {"limit": 20}
             if after:
                 query["from"] = after
             raw = fetch("vercel", _vercel_url("/v9/projects", team_id, **query),

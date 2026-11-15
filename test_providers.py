@@ -527,6 +527,19 @@ def test_build_evidence_names_each_provider_project():
                    "github_actions": ".github/workflows/ci.yml"}, ids
 
 
+def test_team_projects_are_read_in_small_pages():
+    first = {"projects": [{"id": "prj_a", "name": "a"}], "pagination": {"next": 111}}
+    second = {"projects": [{"id": "prj_b", "name": "b"}], "pagination": {"next": None}}
+
+    def fetch(provider, url, token, body=None):
+        assert "limit=20" in url
+        return second if "from=111" in url else first
+    with creds():
+        fresh()
+        seen = providers.vercel_team_projects("team_abc", NOW, fetch)
+    assert [p["id"] for p in seen] == ["prj_a", "prj_b"]
+
+
 def test_team_projects_carry_their_git_link():
     with creds():
         fresh()
