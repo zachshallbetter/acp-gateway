@@ -1,4 +1,4 @@
-"""scripts/policy-admin.py with the Keychain, Vercel and the gateway replaced by fakes."""
+"""scripts/policy-admin.py with the Keychain, ACP's document store and the gateway replaced by fakes."""
 from __future__ import annotations
 
 import argparse
@@ -23,28 +23,30 @@ rp = admin.load_register_policy()
 
 KEY = "test-signing-key"
 
-# Railway is the second host; no test may reach the real CLI. Every write is recorded here.
-RAILWAY_WRITES = []
-admin.write_railway = lambda key, text: RAILWAY_WRITES.append((key, text))
-
-
 def signed(policy):
     return rp.sign(policy, KEY, admin.KEY_ID)
 
 
-class FakeVercel:
-    def __init__(self, document):
-        self.document, self.patched = document, None
+class FakeStore:
+    """ACP's signed-document store: one document per name at a stored version."""
 
-    def __call__(self, path, method="GET", body=None):
-        if path.endswith("/env") and method == "GET":
-            return {"envs": [{"key": "ACP_POLICY", "id": "env1", "target": ["production"]}]}
-        if path.endswith("/env/env1") and method == "GET":
-            return {"value": json.dumps(self.document)}
-        if path.endswith("/env/env1") and method == "PATCH":
-            self.patched = json.loads(body["value"])
-            return {}
-        raise AssertionError(f"unexpected Vercel call {method} {path}")
+    def __init__(self, document, version=7, name="policy"):
+        self.documents = {name: (version, document)}
+        self.patched, self.writes = None, []
+
+    def read(self, name):
+        return self.documents.get(name, (0, None))
+
+    def write(self, name, version, document):
+        current = self.documents.get(name, (0, None))[0]
+        assert version == current, f"signed on v{version}, store holds v{current}"
+        self.documents[name] = (version + 1, document)
+        self.patched = document
+        self.writes.append((name, version))
+        return {"name": name, "version": version + 1}
+
+    def patches(self):
+        return {"read_document": self.read, "write_signed": self.write}
 
 
 def existing():
@@ -55,11 +57,11 @@ def existing():
 
 class RegisterTests(unittest.TestCase):
     def run_register(self, document, *repositories, apply=False, key=KEY):
-        fake = FakeVercel(document)
+        fake = FakeStore(document)
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(admin, "keychain", return_value=key), \
-                patch.object(admin, "vercel_api", fake), \
+                patch.multiple(admin, **fake.patches()), \
                 patch.object(admin, "POLICY_FILE", Path(tmp) / "production.json"), redirect_stdout(out):
             args = argparse.Namespace(repositories=list(repositories), board=[], apply=apply)
             try:
@@ -77,7 +79,7 @@ class RegisterTests(unittest.TestCase):
         self.assertIn("add snackstudio-erosion-lab v1", out)
         self.assertIn("accepts all 2 policies", out)
 
-    def test_apply_writes_vercel_and_the_repository_copy_identically(self):
+    def test_apply_stores_the_document_and_the_repository_copy_identically(self):
         code, fake, written, _ = self.run_register(existing(), "SnackStudio/erosion-lab", "o/b", apply=True)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(written), fake.patched)
@@ -87,28 +89,27 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual(sorted(states), ["o-a", "o-b", "snackstudio-erosion-lab"])
         self.assertNotIn("artifact_manifest", fake.patched[-1])
 
-    def test_apply_writes_railway_the_same_bytes_as_vercel(self):
-        RAILWAY_WRITES.clear()
+    def test_apply_is_one_store_write_signed_on_the_version_read(self):
         code, fake, written, _ = self.run_register(existing(), "o/b", apply=True)
         self.assertEqual(code, 0)
-        self.assertEqual(RAILWAY_WRITES, [("ACP_POLICY", written.rstrip("\n"))])
+        self.assertEqual(fake.writes, [("policy", 7)])
 
-    def test_dry_run_writes_neither_host(self):
-        RAILWAY_WRITES.clear()
-        self.run_register(existing(), "o/b")
-        self.assertEqual(RAILWAY_WRITES, [])
+    def test_dry_run_stores_nothing(self):
+        code, fake, written, _ = self.run_register(existing(), "o/b")
+        self.assertEqual((fake.writes, written), ([], None))
 
-    def test_railway_refusing_after_vercel_fails_loudly_with_the_fix(self):
-        refused = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="unauthorized")
-        with patch.object(admin.subprocess, "run", return_value=refused):
-            spec2 = importlib.util.spec_from_file_location("policy_admin_real", ROOT / "scripts/policy-admin.py")
-            real = importlib.util.module_from_spec(spec2)
-            spec2.loader.exec_module(real)
-            with patch.object(real.subprocess, "run", return_value=refused):
-                with self.assertRaises(SystemExit) as stop:
-                    real.write_railway("ACP_POLICY", "{}")
-        self.assertIn("hosts now differ", str(stop.exception))
-        self.assertIn("railway variable set ACP_POLICY --stdin", str(stop.exception))
+    def test_the_document_goes_to_the_gateway_route_with_both_credentials(self):
+        calls = []
+
+        def gateway(path, bearer, admin_token=None, body=None):
+            calls.append((path, bearer, admin_token, body))
+            return {"name": "policy", "version": 4}
+
+        with patch.object(admin, "keychain", side_effect=lambda account: f"<{account}>"), \
+                patch.object(admin, "gateway_call", gateway), redirect_stdout(io.StringIO()):
+            admin.write_signed("policy", 3, ["doc"])
+        self.assertEqual(calls, [("/internal/documents", "<ACP_GATEWAY_TOKEN>", "<ACP_POLICY_ADMIN_TOKEN>",
+                                  {"name": "policy", "expected_version": 3, "document": ["doc"]})])
 
     def test_registering_an_unchanged_repository_again_changes_nothing(self):
         code, fake, written, _ = self.run_register(existing(), "o/b", apply=True)
@@ -159,7 +160,7 @@ class GrantTests(unittest.TestCase):
             out = io.StringIO()
             with patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": str(releases)}), \
                     patch.object(admin, "keychain", return_value="secret"), \
-                    patch.object(admin, "vercel_api", FakeVercel([policy])), \
+                    patch.multiple(admin, **FakeStore([policy]).patches()), \
                     patch.object(admin, "gateway_call", gateway), redirect_stdout(out):
                 args = argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", authorized_by="owner",
                                           reason="upgrade", apply=True)
@@ -202,7 +203,7 @@ class GrantReleaseTests(unittest.TestCase):
             out = io.StringIO()
             with patch.dict(os.environ, {"ACP_CLIENT_RELEASES_FILE": str(releases)}), \
                     patch.object(admin, "keychain", return_value="secret"), \
-                    patch.object(admin, "vercel_api", FakeVercel([policy])), \
+                    patch.multiple(admin, **FakeStore([policy]).patches()), \
                     patch.object(admin, "gateway_call", gateway), redirect_stdout(out):
                 args = argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", authorized_by="owner",
                                           reason="upgrade", apply=True)
@@ -237,9 +238,9 @@ class RepinUnregisterTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "-f", "-A", "."], check=True)
             subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                             "-c", "commit.gpgSign=false", "commit", "-q", "-m", "x"], check=True)
-            fake = FakeVercel([self.pinned()])
+            fake = FakeStore([self.pinned()])
             out = io.StringIO()
-            with patch.object(admin, "keychain", return_value=KEY), patch.object(admin, "vercel_api", fake), \
+            with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
                     patch.object(admin, "POLICY_FILE", Path(tmp) / "production.json"), redirect_stdout(out):
                 code = admin.cmd_repin(argparse.Namespace(repository="o/a", checkout=str(repo), ref="HEAD", apply=True))
             self.assertEqual(code, 0, out.getvalue())
@@ -253,13 +254,59 @@ class RepinUnregisterTests(unittest.TestCase):
             self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
 
     def test_unregister_removes_only_that_policy(self):
-        fake = FakeVercel([self.pinned(), *existing()[:0], signed({"policy_id": "o-b", "version": 1, "status": "active",
-                                                                    "repository": {"owner": "o", "name": "b"}})])
+        fake = FakeStore([self.pinned(), signed({"policy_id": "o-b", "version": 1, "status": "active",
+                                                 "repository": {"owner": "o", "name": "b"}})])
         with tempfile.TemporaryDirectory() as tmp, patch.object(admin, "keychain", return_value=KEY), \
-                patch.object(admin, "vercel_api", fake), patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), \
+                patch.multiple(admin, **fake.patches()), patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), \
                 redirect_stdout(io.StringIO()):
             self.assertEqual(admin.cmd_unregister(argparse.Namespace(repository="o/a", apply=True)), 0)
         self.assertEqual([p["policy_id"] for p in fake.patched], ["o-b"])
+
+
+class DeploymentDocumentTests(unittest.TestCase):
+    def test_budget_policy_is_signed_verified_and_stored_on_the_version_read(self):
+        fake = FakeStore(None, version=0, name="budget")
+        with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(admin.cmd_budget_policy(argparse.Namespace(limits=None, apply=True)), 0)
+        self.assertEqual(fake.writes, [("budget", 0)])
+        with patch.dict(os.environ, {"ACP_POLICY_SIGNING_KEY": KEY}):
+            text = json.dumps(fake.patched, separators=(",", ":"), sort_keys=True)
+            self.assertIsNone(rp.gateway.document_errors("budget", text))
+
+    def test_a_document_that_does_not_verify_is_never_sent(self):
+        fake = FakeStore(None, version=0, name="callers")
+        with patch.object(rp.gateway, "document_errors", return_value="signature does not verify"), \
+                self.assertRaisesRegex(SystemExit, "does not verify"):
+            admin.signed_document({"callers_id": "acp-callers", "version": 1, "callers": []}, KEY, "callers", rp)
+        self.assertEqual(fake.writes, [])
+
+
+class EnrollTests(unittest.TestCase):
+    def test_enroll_registers_and_meters_with_discovered_vercel_projects_in_one_write(self):
+        fake = FakeStore(existing())
+        linked = {"o/b": [("team_Two", "prj_b1"), ("team_Two", "prj_b2")]}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(admin, "keychain", return_value=KEY), \
+                patch.multiple(admin, **fake.patches()), patch.object(admin, "vercel_projects_by_repo", return_value=linked), \
+                patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), redirect_stdout(io.StringIO()):
+            args = argparse.Namespace(repositories=["o/a", "o/b"], vercel=[], vercel_team=None, railway_project=None,
+                                      railway_service=[], production_branch=[], apply=True)
+            self.assertEqual(admin.cmd_enroll(args), 0)
+        self.assertEqual(fake.writes, [("policy", 7)])
+        by_id = {p["policy_id"]: p for p in fake.patched}
+        self.assertEqual(by_id["o-a"]["metered"]["providers"], {})
+        self.assertEqual(by_id["o-b"]["metered"]["providers"],
+                         {"vercel": {"project_ids": ["prj_b1", "prj_b2"], "team_id": "team_Two"}})
+        self.assertIn("hosted_build", by_id["o-b"]["protected_actions"])
+        states = rp.validate(fake.patched, KEY, admin.KEY_ID)
+        self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
+
+    def test_explicit_projects_name_one_repository(self):
+        args = argparse.Namespace(repositories=["o/a", "o/b"], vercel=["prj_x"], vercel_team=None,
+                                  railway_project=None, railway_service=[], production_branch=[], apply=False)
+        with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **FakeStore(existing()).patches()), \
+                redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "enroll it on its own"):
+            admin.cmd_enroll(args)
 
 
 class CredentialTests(unittest.TestCase):

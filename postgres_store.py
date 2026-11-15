@@ -141,6 +141,38 @@ def validate_schema() -> None:
         raise StorageError("database schema validation failed" + detail) from exc
 
 
+DOCUMENT_NAMES = ("policy", "callers", "budget")
+_DOCUMENT_COLUMNS = "version, digest, document, written_by, written_at"
+
+
+def _document_row(row):
+    return None if row is None else {"version": row["version"], "digest": row["digest"],
+                                     "document": row["document"], "written_by": row["written_by"],
+                                     "written_at": _iso(row["written_at"])}
+
+
+def latest_document(name: str) -> dict | None:
+    """The newest stored version of a signed document, or None when none is stored yet.
+
+    Works inside a request transaction (its own connection) and outside one (readiness, startup):
+    a stored version is immutable, so reading it needs no request isolation.
+    """
+    if name not in DOCUMENT_NAMES:
+        raise StorageError("unsupported signed document")
+    query = (f"SELECT {_DOCUMENT_COLUMNS} FROM signed_documents WHERE name = %s "
+             "ORDER BY version DESC LIMIT 1")
+    active = _ACTIVE.get()
+    try:
+        if active is not None:
+            return _document_row(active.connection.execute(query, (name,)).fetchone())
+        with _pool().connection(timeout=5) as connection:
+            _set_transaction_limits(connection)
+            return _document_row(connection.execute(query, (name,)).fetchone())
+    except (psycopg.Error, OSError) as exc:
+        state = getattr(exc, "sqlstate", None)
+        raise StorageError("signed document read failed" + (f" SQLSTATE {state}" if state else "")) from exc
+
+
 def close_pool() -> None:
     global _POOL
     if _POOL is not None:
@@ -916,6 +948,22 @@ class PostgresStore:
             "SELECT body, fetched_at FROM provider_snapshots WHERE provider=%s AND subject=%s "
             "ORDER BY fetched_at DESC, digest LIMIT 1", (provider, subject)).fetchone()
         return (row["body"], _epoch(row["fetched_at"])) if row else (None, None)
+
+    # ---------------------------------------------------------- signed documents
+
+    def document_insert(self, name, expected_version, digest, document, written_by):
+        """Store the next version of a signed document. Refuses when another write got there first."""
+        if name not in DOCUMENT_NAMES:
+            raise StorageError("unsupported signed document")
+        row = self.connection.execute(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM signed_documents WHERE name = %s", (name,)).fetchone()
+        if row["version"] != expected_version:
+            return None
+        inserted = self.connection.execute(
+            f"INSERT INTO signed_documents (name, version, digest, document, written_by) "
+            f"VALUES (%s, %s, %s, %s, %s) RETURNING {_DOCUMENT_COLUMNS}",
+            (name, expected_version + 1, digest, document, written_by)).fetchone()
+        return _document_row(inserted)
 
     def _save_audit_chain_head(self, record):
         raise StorageError("audit-chain head is written atomically with its event")

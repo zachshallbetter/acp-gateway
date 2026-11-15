@@ -400,8 +400,24 @@ GitHub App, on its own, never does: that is `REVERIFY_REQUIRED`.
 
 ### Policy configuration and signing
 
-A policy is a JSON object (or a list of them, or `{"policies": [...]}`) supplied
-in `ACP_POLICY` or `ACP_POLICY_FILE`:
+A policy is a JSON object (or a list of them, or `{"policies": [...]}`). The
+deployment's policies, its caller registry and its budget policy are each one
+signed document, stored versioned and append-only in the shared PostgreSQL
+database (`signed_documents`, migration 0005). Both production hosts read the
+newest version, at most every `ACP_DOCUMENT_TTL_SECONDS` (default 15), so a
+change takes effect within seconds and is not bound by a host's
+environment-variable size limit. `ACP_POLICY`, `ACP_CALLERS` and
+`ACP_BUDGET_POLICY` only seed a deployment until its first stored version, and
+are the source on file storage; `ACP_POLICY_FILE` overrides the policy source.
+`scripts/policy-admin.py` writes through `POST /internal/documents`
+(administrative credential): the gateway verifies the document with its own key
+and loaders before storing it, and refuses one signed on a stale version
+(`STALE_DOCUMENT_VERSION`). `GET /internal/documents/<policy|callers|budget>`
+returns the current document and its stored version. A stored row grants
+nothing by itself: every signature is still checked against
+`ACP_POLICY_SIGNING_KEY`.
+
+A policy looks like this:
 
 ```json
 {
@@ -1191,8 +1207,9 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_GITHUB_INSTALLATION_ID` | no | Legacy single installation. Used as a fallback if the installation list can't be fetched, or when a call names no owner. |
 | `ACP_GITHUB_TOKEN_<OWNER>` | for user boards | A classic PAT with `read:project` for one owner, e.g. `ACP_GITHUB_TOKEN_ZACHSHALLBETTER`. Takes precedence over the App for that owner. Required for **user-owned** boards — see below. |
 | `PORT` | no | Defaults to `8080`. |
-| `ACP_POLICY` | for policy | The policy document as literal JSON. |
-| `ACP_POLICY_FILE` | for policy | Path to the same, if you prefer a mounted file. Takes precedence over `ACP_POLICY`. |
+| `ACP_POLICY` | for policy | The policy document as literal JSON. Seeds the shared database until its first stored version; the source on file storage. |
+| `ACP_POLICY_FILE` | for policy | Path to the same, if you prefer a mounted file. Takes precedence over the database and `ACP_POLICY`. |
+| `ACP_DOCUMENT_TTL_SECONDS` | no | How long a host keeps the signed documents it read from the database (default 15, at most 300). |
 | `ACP_POLICY_SIGNING_KEY` | recommended | HMAC-SHA256 key for policy signatures. Set it and every policy must carry a valid `signature`. |
 | `ACP_REQUIRE_PRODUCTION_CONTROLS` | no | `1`/`true`/`yes` makes startup fail unless policy signing, capability signing, durable security state, audit logging, and audit hash chaining are enabled. |
 | `ACP_POLICY_SIGNING_KEY_ID` | no | Published key identifier. Defaults to `acp-policy-hmac-sha256`. |
@@ -1222,8 +1239,8 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_SNAPSHOT_MAX_BODY_BYTES` | no | Body cap for an integrity snapshot. Default `131072`. |
 | `ACP_PATH_CASE_SENSITIVE` | no | `1` to compare protected paths case-sensitively. Default: case-insensitive matching, with the difference reported. |
 | `ACP_BOARD_READ_GATE` | no | `locked` (default), `contained`, or `off`. Only has an effect once a policy declares `boards`. |
-| `ACP_BUDGET_POLICY` | for metered actions | Signed deployment-wide limits. Without it every metered action is refused (`BUDGET_POLICY_UNAVAILABLE`). |
-| `ACP_CALLERS` | no | Signed per-caller credentials: lane and coordinator token hashes, each scoped to repositories. Unset: every caller is the shared bearer. |
+| `ACP_BUDGET_POLICY` | for metered actions | Signed deployment-wide limits. Without it, or a stored version, every metered action is refused (`BUDGET_POLICY_UNAVAILABLE`). Seeds the database like `ACP_POLICY`. |
+| `ACP_CALLERS` | no | Signed per-caller credentials: lane and coordinator token hashes, each scoped to repositories. Unset and not stored: every caller is the shared bearer. Seeds the database like `ACP_POLICY`. |
 | `ACP_VERCEL_TOKEN` | for Vercel evidence | Vercel token ACP reads projects and deployments with. Only GETs are sent. |
 | `ACP_VERCEL_TEAM_ID` | no | Default Vercel team. A policy's `metered.providers.vercel.team_id` names the team its projects belong to and takes precedence, so projects in several teams can be metered. The token must reach every such team. |
 | `ACP_RAILWAY_TOKEN` | for Railway evidence | Railway token for the fixed read-only project and usage-limit queries. |
@@ -1473,100 +1490,50 @@ gateway rather than guess: the two discovery endpoints above answer it, and any
 refusal already names what's missing. Surface the error body to the operator
 verbatim — it is written to be actionable.
 
-## Onboarding a new project
+## Enrolling a project
 
-`scripts/onboard-project.sh <repo> [--owner O --project N] [--govern [--apply]]`
-wires a repository to this gateway and then proves the wiring works. It is idempotent — re-running
-it reports what is already in place and changes nothing.
+A project is governed once ACP holds a signed policy naming its repository, and metered once that
+policy names the providers that build it. Until then a protected action is refused with
+`POLICY_NOT_FOUND` inside `ACP_POLICY_SCOPE`, and answered `ALLOW` / `OUT_OF_POLICY_SCOPE`
+(`policy_effect: NOT_GOVERNED`) outside it; the harness guards let such a repository push only when
+nothing would build.
 
-```sh
-scripts/onboard-project.sh ../draft-smarter --owner zachshallbetter --project 39
-scripts/onboard-project.sh ../some-repo --dry-run     # show the plan, write nothing
-```
-
-It does four things:
-
-1. **Vendors the `github-projects` skill** into `<repo>/.agents/skills/`, from
-   this repository's own copy. That copy is the source of truth: the skill's
-   `tests/test_acp_context.sh` pins *this* gateway's error contract, so the
-   client and the contract it asserts now live together.
-2. **Un-ignores `.agents/`** in the repo's `.gitignore`.
-3. **Writes `ACP_GATEWAY_URL` / `ACP_GATEWAY_TOKEN`** into `<repo>/.env.local`,
-   read from Railway (`railway variable list --service acp-gateway --environment
-   production`). The token is never printed.
-4. **Binds the board**, when `--owner`/`--project` are given, by writing
-   `.agents/board.env` — after which the skill's scripts need no flags anywhere
-   inside that repo.
-
-Then it verifies, because configuration is not proof: `/health`, an
-authenticated read of the owner's boards, and — if a board was named — that the
-gateway reports it as `allowed=true`. A refusal is printed with the gateway's
-own `error`/`detail`/`remedy`, not as an exit code.
-
-### Governing the repository, not just wiring it
-
-Wiring proves the gateway answers. It does not make the gateway *govern* the
-repository: that takes a policy naming it. Without one, a protected action is
-refused with `POLICY_NOT_FOUND` inside `ACP_POLICY_SCOPE`, and answered
-`ALLOW` / `OUT_OF_POLICY_SCOPE` (`policy_effect: NOT_GOVERNED`) outside it.
+The owner enrolls a repository with one command, run through Latchkey so the signing key and
+administrative credential stay out of the shell:
 
 ```sh
-scripts/onboard-project.sh ../my-project --govern            # show the policy it would register
-scripts/onboard-project.sh ../my-project --govern --apply    # register it (redeploys the gateway)
-scripts/register-policy.py --owner O --name N --board O:3    # the same, directly
+ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file .env.local -- \
+  .venv/bin/python scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...]          # dry run
+ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file .env.local -- \
+  .venv/bin/python scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...] --apply
 ```
 
-`scripts/register-policy.py` reads the deployment's `ACP_POLICY`, replaces any
-policy for the same repository at the next version (keeping boards, notice,
-artifact manifest and recovery grants it was not told to change), signs it when
-the deployment holds `ACP_POLICY_SIGNING_KEY` (`--sign-all` when a key is first
-introduced, since a keyed deployment refuses unsigned policy), validates the
-whole registry with this gateway's own loader, and prints the summary. Nothing
-is written without `--apply`. `--local FILE` edits a file instead of Railway.
+`enroll` registers each repository that isn't governed yet (default protected actions, no pinned
+artifacts), turns on the metered actions, and names the Vercel projects linked to the repository on
+GitHub, across every team the signed-in Vercel account belongs to. A site deployed from the CLI has
+no GitHub link: name its project (and a Railway service) explicitly, one repository at a time, with
+`--vercel PRJ --vercel-team TEAM` and `--railway-project ID --railway-service ID`. All repositories
+go into one signed version of the policy document, which both hosts load within seconds; nothing is
+written without `--apply`.
 
-### formal-project-bootstrap projects
+What else a project needs, and where it comes from:
 
-A project initialized from formal-project-bootstrap ≥ 0.6.0 carries
-`scripts/acp.py` (the client) and `scripts/acp-check.py`. `onboard-project.sh`
-detects one by its `PROJECT_PROFILE.json`, runs its `acp-check.py` after the
-gateway checks, and with `--govern` registers the candidate policy the project
-emits (`acp.py policy`: repository, bound board, and an artifact manifest of the
-project's control files). The project's side of the contract lives in its own
-`docs/ACP_INTEGRATION.md`.
+| Requirement | Where |
+| --- | --- |
+| ACP's GitHub App installed on the repository's account | `GET /internal/app-probe?owner=OWNER`; see `docs/GITHUB_APP.md` |
+| The harness guards on every machine that works on it | formal-project-bootstrap `harness/install.py`; they ask ACP before a push, deploy, CI run or merge |
+| A caller credential for agents (`coordinator` or `lane`) | `scripts/policy-admin.py caller`; the token lives in the Keychain or Latchkey and the machine endpoint registry names it, never a repository file |
+| The project's own ACP client and checks | formal-project-bootstrap (`.agents/acp`, `acp-check`), which reports an ungoverned repository that builds as a failure with this command |
+| A board binding, if the project uses one | `.agents/board.env` in the project |
 
-### Two failure modes it exists to prevent
-
-**A global gitignore swallows the skill silently.** A `core.excludesFile` that
-excludes `.agents/` — a common scaffolding default — makes `git add` report
-success while staging nothing. The skill then lives on one machine and
-disappears on the next clone. A global ignore cannot be overridden from
-anywhere except the repo's own `.gitignore`, which is why step 2 exists and why
-it writes there rather than anywhere more tasteful.
-
-**A bearer token in a tracked file.** `ACP_GATEWAY_TOKEN` authenticates to a
-service that mints GitHub App installation tokens. The script refuses to write
-it unless `git check-ignore` says `.env.local` is actually ignored — asked of
-git rather than read from `.gitignore`, because only git knows the answer once
-a global excludesfile is involved. That check runs in preflight, so a refusal
-leaves the repository untouched rather than half-configured.
-
-### What ends up committed, and what does not
-
-| Path | Committed | Why |
-| --- | --- | --- |
-| `.agents/skills/github-projects/` | yes | the client, and the tests that pin this gateway's contract |
-| `.agents/board.env` | yes | which board this repo belongs to — not a secret |
-| `.env.local` | **no** | the bearer token |
+`scripts/register-policy.py --local FILE` builds, signs and validates a policy in a local file, for
+review or a self-hosted deployment; `policy-admin.py` reuses it for production.
 
 ### If the board is refused
 
 `allowed=false` means the board is outside `ACP_PROJECT_ALLOWLIST` on this
-service. That is a deployment change, not a client one:
-
-```sh
-railway variable set 'ACP_PROJECT_ALLOWLIST=zachshallbetter:*,AcmeProductCo:*' \
-  --service acp-gateway --environment production
-```
+service. That is a deployment change on both production hosts, not a client one: set
+`ACP_PROJECT_ALLOWLIST` (for example `zachshallbetter:*,AcmeProductCo:*`) on Vercel and Railway.
 
 An `<owner>:*` entry admits every board that owner holds, which is what keeps a
 newly created board from needing a gateway edit before it can be read.

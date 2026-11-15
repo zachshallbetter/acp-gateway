@@ -13,7 +13,7 @@ The gateway supports an explicit fail-closed production profile. The transition 
    - `ACP_AUDIT_HASH_CHAIN=1`
    - `ACP_REQUIRE_PRODUCTION_CONTROLS=1`
 
-4. Before enabling the strict flag, use `scripts/register-policy.py --sign-all --apply` to replace every active policy with a signed version. Confirm the returned registry summary and deployment health.
+4. Before enabling the strict flag, make sure every active policy is signed: `scripts/register-policy.py --local FILE --sign-all` re-signs a copy for review, and `scripts/policy-admin.py` stores signed versions. Confirm the returned registry summary and deployment health.
 5. Run `python3 scripts/validate-deployment.py --url "$ACP_GATEWAY_URL" --require-security`. The command prints only sanitized control status.
 6. Verify restart continuity: record the authenticated app-status and security summary, redeploy/restart once, then confirm the persisted containment and audit-chain state remains available.
 

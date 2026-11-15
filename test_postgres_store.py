@@ -209,16 +209,16 @@ class PostgresStoreTests(unittest.TestCase):
     def test_runtime_accepts_only_additive_newer_migrations(self):
         with psycopg.connect(DSN) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
-                               "VALUES (5, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+                               "VALUES (6, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
         try:
             postgres_store.validate_schema()             # a newer, additive migration: still runs
             with psycopg.connect(DSN) as connection:
-                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 5")
+                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 6")
             with self.assertRaises(postgres_store.StorageError):
                 postgres_store.validate_schema()         # not additive: refuses
         finally:
             with psycopg.connect(DSN) as connection:
-                connection.execute("DELETE FROM schema_migrations WHERE version = 5")
+                connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         postgres_store.validate_schema()
 
     def test_applied_migration_records_whether_it_is_additive(self):
@@ -226,7 +226,73 @@ class PostgresStoreTests(unittest.TestCase):
             rows = {r["version"]: r["additive"] for r in
                     connection.execute("SELECT version, additive FROM schema_migrations").fetchall()}
         self.assertTrue(rows[4])
+        self.assertTrue(rows[5])
         self.assertFalse(rows[1])
+
+    def test_signed_documents_are_versioned_and_read_from_the_database(self):
+        def signed(caller_id):
+            doc = {"callers_id": "acp-callers", "version": 1, "callers": [
+                {"caller_id": caller_id, "kind": "lane", "repos": ["synthetic/*"], "token_sha256": "a" * 64}]}
+            return {**doc, "signature": gateway.policy_signature(gateway.policy_digest(doc))}
+
+        saved = {k: os.environ.get(k) for k in ("ACP_POLICY_SIGNING_KEY", "ACP_POLICY_ADMIN_TOKEN", "ACP_CALLERS",
+                                                "ACP_DOCUMENT_TTL_SECONDS")}
+        os.environ.update(ACP_POLICY_SIGNING_KEY="synthetic-policy-key", ACP_POLICY_ADMIN_TOKEN="synthetic-admin",
+                          ACP_DOCUMENT_TTL_SECONDS="0")
+        os.environ["ACP_CALLERS"] = json.dumps(signed("lane-seed"))
+        gateway._DOCUMENTS.clear()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        def call(method, path, body=None, admin=True):
+            from urllib.request import Request
+            headers = {"Authorization": "Bearer synthetic-test-bearer", "Content-Type": "application/json"}
+            if admin:
+                headers["X-ACP-Admin-Authorization"] = "Bearer synthetic-admin"
+            request = Request(base + path, method=method, headers=headers,
+                              data=json.dumps(body).encode() if body is not None else None)
+            try:
+                with urlopen(request, timeout=10) as response:
+                    return response.status, json.load(response)
+            except HTTPError as exc:
+                return exc.code, json.load(exc)
+
+        try:
+            with postgres_store.transaction():
+                self.assertEqual([c["caller_id"] for c in gateway.callers_registry()["callers"]], ["lane-seed"])
+            self.assertEqual(call("GET", "/internal/documents/callers")[1]["source"], "env:ACP_CALLERS")
+            status, stored = call("POST", "/internal/documents",
+                                  {"name": "callers", "expected_version": 0, "document": signed("lane-db")})
+            self.assertEqual((status, stored["version"], stored["source"]), (200, 1, "db:callers@v1"))
+            with postgres_store.transaction():
+                self.assertEqual([c["caller_id"] for c in gateway.callers_registry()["callers"]], ["lane-db"])
+            status, view = call("GET", "/internal/documents/callers")
+            self.assertEqual((view["version"], view["document"]["callers"][0]["caller_id"]), (1, "lane-db"))
+            status, stale = call("POST", "/internal/documents",
+                                 {"name": "callers", "expected_version": 0, "document": signed("lane-late")})
+            self.assertEqual((status, stale["error"]), (409, "STALE_DOCUMENT_VERSION"))
+            forged = {**signed("lane-forged"), "signature": "0" * 64}
+            status, invalid = call("POST", "/internal/documents",
+                                   {"name": "callers", "expected_version": 1, "document": forged})
+            self.assertEqual((status, invalid["error"]), (422, "DOCUMENT_INVALID"))
+            status, denied = call("POST", "/internal/documents",
+                                  {"name": "callers", "expected_version": 1, "document": signed("x")}, admin=False)
+            self.assertEqual((status, denied["error"]), (403, "ADMIN_REQUIRED"))
+            self.assertEqual(postgres_store.latest_document("callers")["version"], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            with psycopg.connect(DSN) as connection:
+                connection.execute("DELETE FROM signed_documents")
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            gateway._DOCUMENTS.clear()
 
     def test_readiness_refuses_missing_schema_without_losing_liveness(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
@@ -253,7 +319,7 @@ class PostgresStoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4])
+        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5])
         postgres_store.validate_schema()
 
 

@@ -75,19 +75,126 @@ CALLER_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,63}\Z")
 REPO_PATTERN_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?:\*|[A-Za-z0-9._-]{1,100})\Z")
 _CALLERS = {"key": None, "value": None}
 
+DOCUMENT_SEEDS = {"policy": "ACP_POLICY", "callers": "ACP_CALLERS", "budget": "ACP_BUDGET_POLICY"}
+DOCUMENT_MAX_BYTES = 2 * 1024 * 1024
+_DOCUMENTS = {}
+
+
+def document_ttl():
+    try:
+        return max(0.0, min(300.0, float(os.getenv("ACP_DOCUMENT_TTL_SECONDS", "15"))))
+    except ValueError:
+        return 15.0
+
+
+def signed_document_text(name):
+    """(text, source) of the current signed document: the newest version in the shared database, else the
+    deployment variable that seeds it (DOCUMENT_SEEDS) until the first version is stored. One resolver for
+    the policy, caller and budget documents; each loader still verifies the signature itself.
+
+    A stored version is read at most every ACP_DOCUMENT_TTL_SECONDS (default 15) per process. If the
+    database can't be read, the last text read stays in use; with none, the read fails closed.
+    """
+    seed_variable = DOCUMENT_SEEDS[name]
+    seed = os.getenv(seed_variable, "").strip()
+    if not postgres_store.enabled():
+        return seed, f"env:{seed_variable}"
+    now = time.monotonic()
+    cached = _DOCUMENTS.get(name)
+    if cached and now - cached["at"] < document_ttl():
+        return cached["value"]
+    try:
+        row = postgres_store.latest_document(name)
+    except postgres_store.StorageError:
+        if cached:
+            return cached["value"]
+        raise
+    value = (row["document"], f"db:{name}@v{row['version']}") if row else (seed, f"env:{seed_variable}")
+    _DOCUMENTS[name] = {"at": now, "value": value}
+    return value
+
+
+def document_errors(name, text):
+    """Why this signed document's text must not be stored, or None. Uses the gateway's own loaders."""
+    if name == "callers":
+        return load_callers(text)["error"]
+    if name == "budget":
+        return load_budget(text)["error"]
+    registry = load_policies(text, "candidate")
+    if registry["error"]:
+        return registry["error"]
+    invalid = sorted(pid for pid, record in registry["policies"].items() if record["state"] == "INVALID")
+    return f"policies do not verify: {', '.join(invalid)}" if invalid else None
+
+
+def store_document(body, handler):
+    """POST /internal/documents: verify and store the next version of a signed document (admin only)."""
+    if not admin_authorized(handler):
+        raise TargetError(403, "ADMIN_REQUIRED", "Storing a signed document needs the administrative credential.",
+                          remedy="The owner runs scripts/policy-admin.py, which sends it.")
+    if not postgres_store.enabled():
+        raise TargetError(409, "DOCUMENT_STORE_UNAVAILABLE",
+                          "This deployment keeps its documents in deployment variables, not the shared database.",
+                          remedy="Set the deployment variable instead, or run with ACP_STORAGE_BACKEND=postgres.")
+    if not isinstance(body, dict) or set(body) != {"name", "expected_version", "document"}:
+        raise TargetError(400, "INVALID_REQUEST", "Send {name, expected_version, document}.")
+    name, expected = body["name"], body["expected_version"]
+    if name not in DOCUMENT_SEEDS:
+        raise TargetError(400, "INVALID_REQUEST", "name must be policy, callers or budget.", field="name")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+        raise TargetError(400, "INVALID_REQUEST", "expected_version must be the stored version you signed on.",
+                          field="expected_version")
+    text = json.dumps(body["document"], separators=(",", ":"), sort_keys=True)
+    error = document_errors(name, text)
+    if error:
+        raise TargetError(422, "DOCUMENT_INVALID", f"The {name} document does not verify: {error[:200]}.",
+                          remedy="Re-sign it with the deployment's signing key; nothing was stored.")
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    stored = postgres_store.current().document_insert(name, expected, digest, text, "owner")
+    if stored is None:
+        raise TargetError(409, "STALE_DOCUMENT_VERSION",
+                          f"Another {name} version was stored after version {expected}.",
+                          remedy=f"Read GET /internal/documents/{name}, apply the change to it, and sign again.")
+    _DOCUMENTS.pop(name, None)
+    emit_event("SIGNED_DOCUMENT_STORED", document=name, version=stored["version"], digest=digest)
+    return {"name": name, "version": stored["version"], "digest": digest, "source": f"db:{name}@v{stored['version']}"}
+
+
+def document_view(name, handler):
+    """GET /internal/documents/<name>: the current signed document and its stored version (admin only)."""
+    if not admin_authorized(handler):
+        raise TargetError(403, "ADMIN_REQUIRED", "Reading a signed document needs the administrative credential.")
+    if name not in DOCUMENT_SEEDS:
+        raise TargetError(404, "NOT_FOUND", "Documents are policy, callers and budget.")
+    row = postgres_store.latest_document(name) if postgres_store.enabled() else None
+    if row:
+        return {"name": name, "version": row["version"], "digest": row["digest"], "source": f"db:{name}@v{row['version']}",
+                "written_at": row["written_at"], "document": json.loads(row["document"])}
+    seed = os.getenv(DOCUMENT_SEEDS[name], "").strip()
+    return {"name": name, "version": 0, "digest": hashlib.sha256(seed.encode()).hexdigest() if seed else None,
+            "source": f"env:{DOCUMENT_SEEDS[name]}", "written_at": None,
+            "document": json.loads(seed) if seed else None}
+
 
 def callers_registry():
-    """Per-caller credentials from ACP_CALLERS, verified, or why there are none.
+    """Per-caller credentials from the current signed caller document (signed_document_text), verified.
 
     `{"callers_id": ..., "version": n, "callers": [{"caller_id", "kind": "lane"|"coordinator",
     "repos": ["owner/*" | "owner/name"], "token_sha256"}], "signature": ...}`, signed like a
     policy, so holding the shared bearer is not enough to add a coordinator. Only token hashes
     live here; each caller keeps its own token. Unset means every caller is the shared bearer.
     """
-    raw = os.getenv("ACP_CALLERS", "").strip()
+    raw = signed_document_text("callers")[0]
     key = hashlib.sha256((raw + "\0" + os.getenv("ACP_POLICY_SIGNING_KEY", "")).encode()).hexdigest()
     if _CALLERS["key"] == key:
         return _CALLERS["value"]
+    value = load_callers(raw)
+    _CALLERS.update(key=key, value=value)
+    return value
+
+
+def load_callers(raw):
+    """Verify one caller document's text: {"callers": [...], "error", "configured"}."""
     value = {"callers": [], "error": None, "configured": bool(raw)}
     if raw:
         try:
@@ -115,7 +222,6 @@ def callers_registry():
                 value["callers"].append(dict(entry))
         except (ValueError, TypeError) as exc:
             value = {"callers": [], "error": str(exc)[:200], "configured": True}
-    _CALLERS.update(key=key, value=value)
     return value
 
 
@@ -922,43 +1028,22 @@ def policy_registry(strict=False):
     whole design exists to prevent. `strict=True` (startup) raises instead.
     """
     path = os.getenv("ACP_POLICY_FILE", "").strip()
-    inline = os.getenv("ACP_POLICY", "").strip()
+    inline, source = ("", f"file:{path}") if path else signed_document_text("policy")
     key = (path, inline, os.getenv("ACP_POLICY_SIGNING_KEY", ""), signing_key_id())
     if _REGISTRY["key"] == key and not strict:
         return _REGISTRY["value"]
 
-    registry = {"policies": {}, "error": None, "source": f"file:{path}" if path else "env:ACP_POLICY"}
-    text = inline
+    text, read_error = inline, None
     if path:
         try:
             with open(path, encoding="utf-8") as handle:
                 text = handle.read()
         except OSError as exc:
-            registry["error"] = f"ACP_POLICY_FILE: cannot read {path}: {exc}"
+            read_error = f"ACP_POLICY_FILE: cannot read {path}: {exc}"
             text = ""
-    if not registry["error"]:
-        if not text:
-            registry["error"] = None if not (path or inline) else "policy configuration is empty"
-        else:
-            try:
-                document = json.loads(text)
-            except ValueError as exc:
-                registry["error"] = f"policy configuration is not valid JSON: {exc}"
-                document = None
-            if document is not None:
-                entries = document.get("policies") if isinstance(document, dict) else document
-                if isinstance(document, dict) and "policies" not in document:
-                    entries = [document]                      # a single policy object is allowed
-                if not isinstance(entries, list):
-                    registry["error"] = "policy configuration must be a policy object or a list of them"
-                    entries = []
-                for entry in entries:
-                    try:
-                        policy = validated_policy(entry)
-                    except ValueError as exc:
-                        registry["error"] = f"invalid policy: {exc}"
-                        continue
-                    registry["policies"][policy["policy_id"]] = _policy_record(policy, entry)
+    registry = load_policies(text, source, configured=bool(path or inline))
+    if read_error:
+        registry["error"] = read_error
     if strict:
         if registry["error"]:
             raise ValueError(registry["error"])
@@ -966,6 +1051,34 @@ def policy_registry(strict=False):
             if record["state"] == "INVALID":
                 raise ValueError(f"{record['policy']['policy_id']}: {record['error']}")
     _REGISTRY.update(key=key, value=registry)
+    return registry
+
+
+def load_policies(text, source, configured=True):
+    """Parse and verify one policy document's text: {"policies": {id: record}, "error", "source"}."""
+    registry = {"policies": {}, "error": None, "source": source}
+    if not text:
+        registry["error"] = None if not configured else "policy configuration is empty"
+    else:
+        try:
+            document = json.loads(text)
+        except ValueError as exc:
+            registry["error"] = f"policy configuration is not valid JSON: {exc}"
+            document = None
+        if document is not None:
+            entries = document.get("policies") if isinstance(document, dict) else document
+            if isinstance(document, dict) and "policies" not in document:
+                entries = [document]                      # a single policy object is allowed
+            if not isinstance(entries, list):
+                registry["error"] = "policy configuration must be a policy object or a list of them"
+                entries = []
+            for entry in entries:
+                try:
+                    policy = validated_policy(entry)
+                except ValueError as exc:
+                    registry["error"] = f"invalid policy: {exc}"
+                    continue
+                registry["policies"][policy["policy_id"]] = _policy_record(policy, entry)
     return registry
 
 
@@ -978,10 +1091,17 @@ def budget_policy():
     `{"budget_policy_id", "version", "limits": {...}, "signature"}`, signed like a policy. Limits it
     leaves out take metering.DEFAULT_LIMITS. Missing or unverified means no paid build is authorized.
     """
-    raw = os.getenv("ACP_BUDGET_POLICY", "").strip()
+    raw = signed_document_text("budget")[0]
     key = hashlib.sha256((raw + "\0" + os.getenv("ACP_POLICY_SIGNING_KEY", "")).encode()).hexdigest()
     if _BUDGETS["key"] == key:
         return _BUDGETS["value"]
+    value = load_budget(raw)
+    _BUDGETS.update(key=key, value=value)
+    return value
+
+
+def load_budget(raw):
+    """Verify one budget document's text: {"limits", "error", "budget_policy_id", "version", "digest"}."""
     value = {"limits": None, "error": "ACP_BUDGET_POLICY is not set", "budget_policy_id": None,
              "version": None, "digest": None}
     if raw:
@@ -1003,7 +1123,6 @@ def budget_policy():
                      "budget_policy_id": doc["budget_policy_id"], "version": version, "digest": digest}
         except (ValueError, TypeError) as exc:
             value = {**value, "error": str(exc)[:200]}
-    _BUDGETS.update(key=key, value=value)
     return value
 
 
@@ -4798,6 +4917,8 @@ ENDPOINTS = {
     "GET /internal/security/incidents/<id>": "one incident with its full timeline (admin)",
     "GET /internal/security/audit-chain": "verify the tamper-evident audit chain (admin)",
     "GET /internal/budget": "today's metered use against every limit",
+    "GET /internal/documents/<policy|callers|budget>": "the current signed document and its stored version (admin)",
+    "POST /internal/documents": "store the next version of a signed document; takes effect without a redeploy (admin)",
     "POST /internal/budget/grant": "issue an owner grant past a budget or for production (administrative credential)",
     "POST /internal/subagent/release": "release a heavy_subagent lease when the subagent stops",
     "GET /internal/posture": "every governed repository's build behaviour and risky settings, ranked, with fixes",
@@ -4920,6 +5041,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return client_status(first("version"), first("sha256"))
         if route == "/internal/budget":
             return budget_view()
+        if route.startswith("/internal/documents/"):
+            return document_view(route.rsplit("/", 1)[1], self)
         if route == "/internal/posture":
             return posture_view()
         if route == "/internal/policy":
@@ -4979,7 +5102,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route in ("/internal/authorize", "/internal/recover", "/internal/recovery/complete",
                      "/internal/verify-capability", "/internal/report",
                      "/internal/integrity/snapshot", "/internal/subagent/release", "/internal/budget/grant",
-                     "/internal/posture/refresh"):
+                     "/internal/posture/refresh", "/internal/documents"):
             raise TargetError(405, "METHOD_NOT_ALLOWED", f"{route} is a POST.",
                               remedy="POST /internal/authorize with Content-Type: application/json and a body of "
                                      "{\"action\": ..., \"repository_claim\": {...}, \"context\": {...}}.")
@@ -5006,6 +5129,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if route == "/internal/subagent/release":
                 self.reply(200, release_lease(self.json_body()))
+                return
+            if route == "/internal/documents":
+                self.reply(200, store_document(self.json_body(maximum=DOCUMENT_MAX_BYTES), self))
                 return
             if route == "/internal/budget/grant":
                 if not admin_authorized(self):

@@ -74,8 +74,9 @@ deploys.
    deployment answered 503 until the new one was promoted. From migration 0004 on, a migration whose
    first line is `-- acp-migration: additive` is recorded as such, and a running release keeps serving
    on a database that is ahead of it only by additive migrations; see "Migrations" in the README.
-2. **Budget policy.** `scripts/policy-admin.py budget-policy --apply` signs the default limits into
-   `ACP_BUDGET_POLICY` on both hosts. Every `policy-admin.py` write goes to Vercel and Railway together.
+2. **Budget policy.** `scripts/policy-admin.py budget-policy --apply` signs the default limits and stores
+   them. Every `policy-admin.py` write is one signed document in the shared database, which both hosts load
+   within seconds (README, "Policy configuration and signing").
 3. **Provider credentials.** Set `ACP_VERCEL_TOKEN` (scoped to every team that holds a metered project),
    `ACP_RAILWAY_TOKEN` and, optionally, a default `ACP_VERCEL_TEAM_ID` on the deployment. The GitHub App needs read access to Actions and Checks for run counts. Organization
    billing reads need the organization's Administration (read) permission. Personal-account Actions

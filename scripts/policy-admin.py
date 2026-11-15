@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """policy-admin.py -- the owner's policy and baseline changes for the Vercel deployment.
 
+    .venv/bin/python scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...] [--vercel PRJ ... --vercel-team TEAM]
+                     [--railway-project ID --railway-service ID] [--apply]
     .venv/bin/python scripts/policy-admin.py register OWNER/NAME [OWNER/NAME ...] [--apply]
     .venv/bin/python scripts/policy-admin.py grant OWNER/NAME --checkout DIR [--ref REF] [--apply]
     .venv/bin/python scripts/policy-admin.py repin OWNER/NAME --checkout DIR [--ref REF] [--apply]
@@ -13,12 +15,17 @@
     .venv/bin/python scripts/policy-admin.py caller CALLER_ID --kind lane|coordinator --repo OWNER/NAME|OWNER/*
                      [--repo ...] [--apply]
 
+enroll    is how a project joins ACP: it registers each repository that isn't governed yet and meters
+          it with the Vercel projects linked to it on GitHub across every team the signed-in Vercel
+          account belongs to (or the projects and Railway service named with --vercel/--railway-*,
+          for a site deployed from the CLI), all as one stored version.
+
 register  puts repositories under an ACP policy. It reads production's ACP_POLICY from
           Vercel, checks that the Keychain signing key reproduces every existing signature,
           adds or replaces one policy per repository (default protected actions, no pinned
           artifacts), signs it, loads the whole document with the gateway's own loader, and
-          only with --apply writes ACP_POLICY on Vercel and policies/production.json here.
-          The new policy takes effect on the next production deployment.
+          only with --apply stores it in ACP and mirrors it to policies/production.json here.
+          Both hosts load it within seconds.
 
 grant     authorizes the pinned-artifact changes a checkout's REF (default HEAD) makes for a governed
           repository whose policy has an artifact manifest. For every protected path whose
@@ -47,9 +54,10 @@ caller    issues a per-caller credential for a lane or a coordinator: a new toke
           Keychain under ACP_GATEWAY_TOKEN_<CALLER_ID>, and only its SHA-256 goes into the signed
           ACP_CALLERS. The token is never printed.
 
-Every write goes to both production hosts: Vercel (loaded on its next production deployment)
-and Railway (which restarts and loads it). If Railway refuses after Vercel accepted, the
-command fails and prints how to finish, because the hosts would otherwise differ.
+Every write is one signed document stored in ACP's shared database through
+POST /internal/documents (administrative credential). The gateway verifies it with its own key and
+loaders before storing it, refuses a write signed on a stale version, and both production hosts load
+the new version within ACP_DOCUMENT_TTL_SECONDS (default 15): no redeploy, no deployment variables.
 
 Owner credentials (ACP_POLICY_SIGNING_KEY, ACP_POLICY_ADMIN_TOKEN, ACP_GATEWAY_TOKEN) come from the
 environment, as `latchkey run --env-file .env.local -- ...` supplies them, else the macOS Keychain
@@ -70,16 +78,11 @@ import urllib.error
 import urllib.request
 
 HERE = Path(__file__).resolve().parent.parent
-PROJECT = "prj_DDyafzBJvYfVi85dFzgEYxosxDMn"
-TEAM = "team_8mC0mXDMIpioyO8cMRjLwb4H"
 GATEWAY = os.environ.get("ACP_GATEWAY_URL", "https://acp-gateway.vercel.app").rstrip("/")
 KEYCHAIN_SERVICE = "ACP Gateway Production"
 KEY_ID = "acp-policy-hmac-sha256"
 POLICY_FILE = HERE / "policies/production.json"
 # The second production host. Every signed document ACP loads goes to both, or the hosts drift.
-RAILWAY_PROJECT = "a3dbbfc5-3fe7-4365-a754-9a7856766f05"
-RAILWAY_SERVICE = "b2f28e52-a113-41c5-b29f-6dcb6a54d3aa"
-RAILWAY_ENVIRONMENT = "dac18c6b-a1ce-485b-b3a4-a8949dc5ad6e"
 RAILWAY_URL = "https://acp-gateway-production.up.railway.app"
 
 
@@ -101,22 +104,6 @@ def keychain(account: str) -> str:
 
 def fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:8]
-
-
-def vercel_api(path: str, method: str = "GET", body: dict | None = None) -> dict:
-    cmd = ["vercel", "api", f"{path}{'&' if '?' in path else '?'}teamId={TEAM}", "--raw"]
-    if method != "GET":
-        cmd += ["-X", method, "--input", "-"]
-    result = subprocess.run(cmd, cwd=HERE, input=json.dumps(body) if body is not None else None,
-                            capture_output=True, text=True)
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise SystemExit(f"error: Vercel API {method} {path} returned no JSON (exit {result.returncode}); "
-                         "run `vercel login` and retry")
-    if isinstance(data, dict) and data.get("error"):
-        raise SystemExit(f"error: Vercel API {method} {path}: {data['error'].get('message', data['error'])}")
-    return data
 
 
 def gateway_call(path: str, bearer: str, admin: str | None = None, body: dict | None = None) -> dict:
@@ -157,19 +144,32 @@ def load_register_policy():
     return module
 
 
-def production_policy_env() -> tuple[dict, list]:
-    envs = vercel_api(f"/v10/projects/{PROJECT}/env")["envs"]
-    entry = next((e for e in envs if e["key"] == "ACP_POLICY" and e.get("target") == ["production"]), None)
-    if entry is None:
-        raise SystemExit("error: production ACP_POLICY is not set on Vercel")
-    value = vercel_api(f"/v1/projects/{PROJECT}/env/{entry['id']}")["value"]
-    return entry, json.loads(value)
+def read_document(name: str) -> tuple[int, object]:
+    """(stored version, document) of one signed document as ACP holds it; version 0 means the deployment
+    variable that seeds it, before the first stored version."""
+    view = gateway_call(f"/internal/documents/{name}", keychain("ACP_GATEWAY_TOKEN"), keychain("ACP_POLICY_ADMIN_TOKEN"))
+    return int(view["version"]), view["document"]
+
+
+def write_signed(name: str, version: int, document) -> dict:
+    """Store the next version of a signed document, signed on `version`. Both hosts load it within seconds."""
+    stored = gateway_call("/internal/documents", keychain("ACP_GATEWAY_TOKEN"), keychain("ACP_POLICY_ADMIN_TOKEN"),
+                          {"name": name, "expected_version": version, "document": document})
+    print(f"stored {name} v{stored['version']} in ACP; both hosts load it within seconds")
+    return stored
+
+
+def production_policy() -> tuple[int, object]:
+    version, document = read_document("policy")
+    if document is None:
+        raise SystemExit("error: ACP holds no policy document yet")
+    return version, document
 
 
 def cmd_register(args) -> int:
     rp = load_register_policy()
     key = keychain("ACP_POLICY_SIGNING_KEY")
-    entry, document = production_policy_env()
+    version, document = production_policy()
     existing = document["policies"] if isinstance(document, dict) else document
     try:
         states = rp.validate(document, key, KEY_ID)
@@ -212,9 +212,9 @@ def cmd_register(args) -> int:
         print("nothing to change")
         return 0
     if not args.apply:
-        print("dry run: pass --apply to write ACP_POLICY on Vercel, Railway and policies/production.json")
+        print("dry run: pass --apply to store it in ACP and mirror it to policies/production.json")
         return 0
-    write_document(entry, updated)
+    write_document(version, updated)
     return 0
 
 
@@ -253,7 +253,7 @@ def cmd_grant(args) -> int:
     if not head:
         raise SystemExit(f"error: {args.ref} is not a commit in {checkout}")
     bearer, admin = keychain("ACP_GATEWAY_TOKEN"), keychain("ACP_POLICY_ADMIN_TOKEN")
-    _, document = production_policy_env()
+    _, document = production_policy()
     policies = document["policies"] if isinstance(document, dict) else document
     policy = next((p for p in policies if (p.get("repository") or {}).get("owner", "").lower() == owner.lower()
                    and (p.get("repository") or {}).get("name", "").lower() == name.lower()), None)
@@ -307,7 +307,7 @@ def cmd_repin(args) -> int:
     if not head:
         raise SystemExit(f"error: {args.ref} is not a commit in {checkout}")
     key = keychain("ACP_POLICY_SIGNING_KEY")
-    entry, document = production_policy_env()
+    version, document = production_policy()
     policies = list(document["policies"] if isinstance(document, dict) else document)
     policy = find_policy(policies, owner, name)
     if policy is None:
@@ -354,7 +354,7 @@ def cmd_repin(args) -> int:
     if not args.apply:
         print("dry run: pass --apply to write it")
         return 0
-    write_document(entry, updated)
+    write_document(version, updated)
     return 0
 
 
@@ -362,7 +362,7 @@ def cmd_unregister(args) -> int:
     rp = load_register_policy()
     owner, _, name = args.repository.partition("/")
     key = keychain("ACP_POLICY_SIGNING_KEY")
-    entry, document = production_policy_env()
+    version, document = production_policy()
     policies = list(document["policies"] if isinstance(document, dict) else document)
     policy = find_policy(policies, owner, name)
     if policy is None:
@@ -381,94 +381,38 @@ def cmd_unregister(args) -> int:
     if not args.apply:
         print("dry run: pass --apply to write it")
         return 0
-    write_document(entry, updated)
+    write_document(version, updated)
     return 0
 
 
-def env_entry(key: str):
-    envs = vercel_api(f"/v10/projects/{PROJECT}/env")["envs"]
-    return next((e for e in envs if e["key"] == key and e.get("target") == ["production"]), None)
-
-
-def write_railway(key: str, text: str) -> None:
-    """Set one variable on the Railway host from stdin, so the value never reaches a process list.
-
-    Setting a variable restarts the Railway service, which then loads it.
-    """
-    result = subprocess.run(["railway", "variable", "set", key, "--stdin", "-p", RAILWAY_PROJECT,
-                             "-s", RAILWAY_SERVICE, "-e", RAILWAY_ENVIRONMENT],
-                            input=text, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise SystemExit(f"error: Vercel has the new {key} but Railway refused it, so the hosts now differ. "
-                         f"Re-run this command, or set it by hand: railway variable set {key} --stdin "
-                         f"-p {RAILWAY_PROJECT} -s {RAILWAY_SERVICE} -e {RAILWAY_ENVIRONMENT}")
-    print(f"wrote {key} on Railway; the service restarts and loads it")
-
-
-def write_env(key: str, text: str) -> None:
-    """Create or replace one encrypted production variable on both hosts. Its value is never printed."""
-    entry = env_entry(key)
-    if entry is None:
-        vercel_api(f"/v10/projects/{PROJECT}/env", "POST",
-                   {"key": key, "value": text, "type": "encrypted", "target": ["production"]})
-    else:
-        vercel_api(f"/v9/projects/{PROJECT}/env/{entry['id']}", "PATCH", {"value": text})
-    print(f"wrote production {key} on Vercel; the next production deployment loads it")
-    write_railway(key, text)
-
-
-def signed_document(document: dict, key: str, loader_variable: str, rp) -> dict:
-    """Sign a deployment document and load it with the gateway's own loader before anything is written."""
+def signed_document(document: dict, key: str, name: str, rp) -> dict:
+    """Sign a callers or budget document and verify it with the gateway's own check before anything is sent."""
     signed = rp.sign(document, key, KEY_ID)
-    overrides = {loader_variable: json.dumps(signed), "ACP_POLICY_SIGNING_KEY": key}
-    saved = {name: os.environ.get(name) for name in overrides}
-    os.environ.update(overrides)
+    saved = os.environ.get("ACP_POLICY_SIGNING_KEY")
+    os.environ["ACP_POLICY_SIGNING_KEY"] = key
     try:
-        loaded = rp.gateway.budget_policy() if loader_variable == "ACP_BUDGET_POLICY"             else rp.gateway.callers_registry()
+        error = rp.gateway.document_errors(name, json.dumps(signed, separators=(",", ":"), sort_keys=True))
     finally:
-        for name, value in saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-    if loaded.get("error"):
-        raise SystemExit(f"error: the signed {loader_variable} does not load: {loaded['error']}. "
-                         "Nothing was changed.")
+        if saved is None:
+            os.environ.pop("ACP_POLICY_SIGNING_KEY", None)
+        else:
+            os.environ["ACP_POLICY_SIGNING_KEY"] = saved
+    if error:
+        raise SystemExit(f"error: the signed {name} document does not verify: {error}. Nothing was changed.")
     return signed
-
-
-def current_env_document(key: str):
-    entry = env_entry(key)
-    if entry is None:
-        return None
-    return json.loads(vercel_api(f"/v1/projects/{PROJECT}/env/{entry['id']}")["value"])
 
 
 def cmd_meter(args) -> int:
     rp = load_register_policy()
     owner, _, name = args.repository.partition("/")
     key = keychain("ACP_POLICY_SIGNING_KEY")
-    entry, document = production_policy_env()
+    version, document = production_policy()
     policies = list(document["policies"] if isinstance(document, dict) else document)
     policy = find_policy(policies, owner, name)
     if policy is None:
         raise SystemExit(f"error: no production policy governs {owner}/{name}; register it first")
-    providers = {}
-    if args.vercel:
-        providers["vercel"] = {"project_ids": args.vercel, **({"team_id": args.vercel_team} if args.vercel_team else {})}
-    if args.railway_project:
-        providers["railway"] = {"project_id": args.railway_project, "service_ids": args.railway_service}
-    updated_policy = {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id")}
-    actions = list(updated_policy.get("protected_actions") or rp.gateway.DEFAULT_PROTECTED_ACTIONS)
-    for action in ("hosted_build", "production_merge", "manual_ci", *args.protect):
-        if not rp.gateway.ACTION_RE.match(action):
-            raise SystemExit(f"error: {action!r} is not an action name")
-        if action not in actions:
-            actions.append(action)
-    updated_policy.update(protected_actions=sorted(actions), version=int(policy["version"]) + 1,
-                          metered={"production_branches": args.production_branch or ["main"],
-                                   "providers": providers})
-    signed = rp.sign(updated_policy, key, KEY_ID)
+    providers = explicit_providers(args)
+    signed = metered_policy(policy, providers, args.production_branch, args.protect, rp, key)
     remaining = [signed if p is policy else p for p in policies]
     updated = {**document, "policies": remaining} if isinstance(document, dict) else remaining
     states = rp.validate(updated, key, KEY_ID)
@@ -480,7 +424,109 @@ def cmd_meter(args) -> int:
     if not args.apply:
         print("dry run: pass --apply to write it")
         return 0
-    write_document(entry, updated)
+    write_document(version, updated)
+    return 0
+
+
+def explicit_providers(args) -> dict:
+    providers = {}
+    if args.vercel:
+        providers["vercel"] = {"project_ids": args.vercel, **({"team_id": args.vercel_team} if args.vercel_team else {})}
+    if args.railway_project:
+        providers["railway"] = {"project_id": args.railway_project, "service_ids": args.railway_service}
+    return providers
+
+
+def metered_policy(policy: dict, providers: dict, branches: list, protect: list, rp, key: str) -> dict:
+    """The policy at version+1 with metered actions on and these providers named, signed."""
+    updated = {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id")}
+    actions = list(updated.get("protected_actions") or rp.gateway.DEFAULT_PROTECTED_ACTIONS)
+    for action in ("hosted_build", "production_merge", "manual_ci", *protect):
+        if not rp.gateway.ACTION_RE.match(action):
+            raise SystemExit(f"error: {action!r} is not an action name")
+        if action not in actions:
+            actions.append(action)
+    updated.update(protected_actions=sorted(actions), version=int(policy["version"]) + 1,
+                   metered={"production_branches": branches or ["main"], "providers": providers})
+    return rp.sign(updated, key, KEY_ID)
+
+
+def vercel_get(path: str) -> dict:
+    """One read-only Vercel API call through the signed-in CLI."""
+    result = subprocess.run(["vercel", "api", path, "--raw"], capture_output=True, text=True, cwd=HERE)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(f"error: Vercel API GET {path.split('?')[0]} returned no JSON; run `vercel login` and retry")
+
+
+def vercel_projects_by_repo() -> dict:
+    """{owner/name (lowercase): [(team id, project id), ...]} for every Vercel project linked to a GitHub repo,
+    across every team the signed-in Vercel account belongs to."""
+    found = {}
+    teams = vercel_get("/v2/teams?limit=100").get("teams") or []
+    for team in teams:
+        until = None
+        while True:
+            page = vercel_get(f"/v9/projects?teamId={team['id']}&limit=100" + (f"&until={until}" if until else ""))
+            for project in page.get("projects") or []:
+                link = project.get("link") or {}
+                if link.get("type") == "github" and link.get("org") and link.get("repo"):
+                    found.setdefault(f"{link['org']}/{link['repo']}".lower(), []).append((team["id"], project["id"]))
+            until = (page.get("pagination") or {}).get("next")
+            if not until:
+                break
+    return found
+
+
+def cmd_enroll(args) -> int:
+    """Register each repository (when it isn't yet) and meter it with the providers that build it, in one write."""
+    rp = load_register_policy()
+    key = keychain("ACP_POLICY_SIGNING_KEY")
+    version, document = production_policy()
+    policies = list(document["policies"] if isinstance(document, dict) else document)
+    states = rp.validate(policies, key, KEY_ID)
+    bad = {pid: r["state"] for pid, r in states.items() if r["state"] != "ACTIVE"}
+    if bad:
+        raise SystemExit(f"error: the signing key (fingerprint {fingerprint(key)}) does not verify ACP's policies: "
+                         f"{bad}. Nothing was changed.")
+    explicit = explicit_providers(args)
+    if explicit and len(args.repositories) != 1:
+        raise SystemExit("error: --vercel and --railway-* name one repository's projects; enroll it on its own")
+    linked = {} if explicit else vercel_projects_by_repo()
+    for spec in args.repositories:
+        owner, _, name = spec.partition("/")
+        if not owner or not name:
+            raise SystemExit(f"error: repositories are OWNER/NAME, not {spec!r}")
+        policy = find_policy(policies, owner, name)
+        if policy is None:
+            built = rp.build_policy(argparse.Namespace(source=None, owner=owner, name=name, remote=None,
+                                                       policy_id=None, board=[], actions=None))
+            policies, _ = rp.merge(policies, rp.sign(built, key, KEY_ID))
+            policy = policies[-1]
+        providers = explicit
+        if not explicit:
+            projects = linked.get(spec.lower(), [])
+            teams = sorted({team for team, _ in projects}, key=lambda t: -sum(1 for x, _ in projects if x == t))
+            if teams:
+                providers = {"vercel": {"project_ids": sorted(p for t, p in projects if t == teams[0])[:10],
+                                        "team_id": teams[0]}}
+                if len(teams) > 1:
+                    print(f"note: {spec} has Vercel projects in {len(teams)} teams; metering those in {teams[0]}")
+        signed = metered_policy(policy, providers, args.production_branch, [], rp, key)
+        policies = [signed if p is policy else p for p in policies]
+        print(f"enroll {signed['policy_id']} v{signed['version']} for {owner}/{name}: "
+              f"providers {sorted(providers) or 'none (GitHub Actions only)'}")
+    updated = {**document, "policies": policies} if isinstance(document, dict) else policies
+    states = rp.validate(updated, key, KEY_ID)
+    bad = {pid: r["state"] for pid, r in states.items() if r["state"] != "ACTIVE"}
+    if bad:
+        raise SystemExit(f"error: the new document does not load cleanly: {bad}. Nothing was changed.")
+    print(f"the gateway loader accepts all {len(states)} policies")
+    if not args.apply:
+        print("dry run: pass --apply to store it in ACP")
+        return 0
+    write_document(version, updated)
     return 0
 
 
@@ -488,16 +534,16 @@ def cmd_budget_policy(args) -> int:
     rp = load_register_policy()
     key = keychain("ACP_POLICY_SIGNING_KEY")
     limits = json.loads(Path(args.limits).read_text(encoding="utf-8")) if args.limits else {}
-    current = current_env_document("ACP_BUDGET_POLICY")
+    stored_version, current = read_document("budget")
     version = int((current or {}).get("version", 0)) + 1
     document = {"budget_policy_id": "acp-budgets", "version": version, "limits": limits}
-    signed = signed_document(document, key, "ACP_BUDGET_POLICY", rp)
+    signed = signed_document(document, key, "budget", rp)
     effective = rp.gateway.metering.validated_limits(limits)
     print(f"budget policy acp-budgets v{version}: {json.dumps(effective, sort_keys=True)}")
     if not args.apply:
-        print("dry run: pass --apply to write ACP_BUDGET_POLICY")
+        print("dry run: pass --apply to store it in ACP")
         return 0
-    write_env("ACP_BUDGET_POLICY", json.dumps(signed, separators=(",", ":"), sort_keys=True))
+    write_signed("budget", stored_version, signed)
     return 0
 
 
@@ -529,35 +575,33 @@ def cmd_caller(args) -> int:
     import secrets
     rp = load_register_policy()
     key = keychain("ACP_POLICY_SIGNING_KEY")
-    current = current_env_document("ACP_CALLERS") or {"callers_id": "acp-callers", "version": 0, "callers": []}
+    stored_version, current = read_document("callers")
+    current = current or {"callers_id": "acp-callers", "version": 0, "callers": []}
     account = "ACP_GATEWAY_TOKEN_" + args.caller_id.upper().replace("-", "_").replace(".", "_")
     print(f"{args.kind} {args.caller_id} for {', '.join(args.repo)}; token in Keychain account {account}")
     if not args.apply:
-        print("dry run: pass --apply to create the token and write ACP_CALLERS")
+        print("dry run: pass --apply to create the token and store the caller list in ACP")
         return 0
     token = secrets.token_urlsafe(32)
     callers = [c for c in current["callers"] if c["caller_id"] != args.caller_id]
     callers.append({"caller_id": args.caller_id, "kind": args.kind, "repos": args.repo,
                     "token_sha256": hashlib.sha256(token.encode()).hexdigest()})
     document = {"callers_id": "acp-callers", "version": int(current.get("version", 0)) + 1, "callers": callers}
-    signed = signed_document(document, key, "ACP_CALLERS", rp)
+    signed = signed_document(document, key, "callers", rp)
     stored = subprocess.run(["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", account,
                              "-w", token], capture_output=True, text=True)
     if stored.returncode != 0:
-        raise SystemExit("error: could not store the token in the Keychain; nothing was written to Vercel")
-    write_env("ACP_CALLERS", json.dumps(signed, separators=(",", ":"), sort_keys=True))
+        raise SystemExit("error: could not store the token in the Keychain; nothing was stored in ACP")
+    write_signed("callers", stored_version, signed)
     print(f"the caller's client reads it with keychainAccount {account} in its endpoint registry")
     return 0
 
 
-def write_document(entry: dict, document) -> None:
-    text = json.dumps(document, separators=(",", ":"), sort_keys=True)
-    vercel_api(f"/v9/projects/{PROJECT}/env/{entry['id']}", "PATCH", {"value": text})
+def write_document(version: int, document) -> None:
+    """Store the policy document signed on `version`, and mirror it to policies/production.json."""
+    write_signed("policy", version, document)
     POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    POLICY_FILE.write_text(text + "\n", encoding="utf-8")
-    print("wrote production ACP_POLICY on Vercel and policies/production.json; "
-          "the next production deployment loads it")
-    write_railway("ACP_POLICY", text)
+    POLICY_FILE.write_text(json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -603,6 +647,14 @@ def main() -> int:
     bgrant.add_argument("--expires", default="2h")
     bgrant.add_argument("--reason", required=True)
     bgrant.add_argument("--apply", action="store_true")
+    enroll = sub.add_parser("enroll", help="register repositories and meter the providers that build them")
+    enroll.add_argument("repositories", nargs="+", metavar="OWNER/NAME")
+    enroll.add_argument("--vercel", action="append", default=[], metavar="PROJECT_ID")
+    enroll.add_argument("--vercel-team")
+    enroll.add_argument("--railway-project")
+    enroll.add_argument("--railway-service", action="append", default=[])
+    enroll.add_argument("--production-branch", action="append", default=[])
+    enroll.add_argument("--apply", action="store_true")
     caller = sub.add_parser("caller", help="issue a lane or coordinator credential")
     caller.add_argument("caller_id")
     caller.add_argument("--kind", required=True, choices=["lane", "coordinator"])
@@ -613,7 +665,7 @@ def main() -> int:
         raise SystemExit("error: run this from an acp-gateway checkout")
     return {"register": cmd_register, "grant": cmd_grant, "repin": cmd_repin,
             "unregister": cmd_unregister, "meter": cmd_meter, "budget-policy": cmd_budget_policy,
-            "budget-grant": cmd_budget_grant, "caller": cmd_caller}[args.command](args)
+            "budget-grant": cmd_budget_grant, "caller": cmd_caller, "enroll": cmd_enroll}[args.command](args)
 
 
 if __name__ == "__main__":

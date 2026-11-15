@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""register-policy.py -- put one repository under an ACP policy.
+"""register-policy.py -- build, sign and validate one repository's ACP policy in a local policy file.
 
-    scripts/register-policy.py --owner O --name N [--board O:N ...] [--apply]
-    scripts/register-policy.py --from candidate.json [--apply]
+    scripts/register-policy.py --local FILE --owner O --name N [--board O:N ...] [--apply]
+    scripts/register-policy.py --local FILE --from candidate.json [--apply]
+
+To register a repository in production use scripts/policy-admin.py register OWNER/NAME --apply,
+which reuses this file's policy building, merging and signing and stores the result in ACP's
+shared database, where both hosts load it within seconds.
 
 Until a policy names a repository, ACP has nothing to enforce there: inside
 ACP_POLICY_SCOPE every protected action is refused with POLICY_NOT_FOUND, and
@@ -11,7 +15,7 @@ declares itself fail-closed is therefore not actually governed until this runs.
 
 What it does:
 
-  1. Reads the deployment's current ACP_POLICY (Railway, or --local FILE).
+  1. Reads the policy document in --local FILE.
   2. Builds the policy for this repository -- or takes the candidate a
      formal-project-bootstrap project emits with `scripts/acp.py policy` --
      and replaces any existing policy for the same repository at version+1.
@@ -21,14 +25,11 @@ What it does:
      written is exactly what `main()` will accept at startup.
   5. Prints the summary. Nothing is written without --apply.
 
-Setting ACP_POLICY on Railway redeploys the service; that is how the new
-policy is loaded. The gateway now runs on Vercel: use scripts/policy-admin.py
-there, which reuses this file's policy building, merging and signing. No secret is ever printed: the signing key is read into
-memory and used there.
+No secret is ever printed: the signing key (ACP_POLICY_SIGNING_KEY) is read into memory and used there.
 """
 from __future__ import annotations
 
-import argparse, copy, hashlib, hmac, json, os, subprocess, sys
+import argparse, copy, hashlib, hmac, json, os, sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,16 +37,6 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 os.environ.setdefault("ACP_GATEWAY_TOKEN", "register-policy-offline")
 import gateway  # noqa: E402
-
-
-def railway_vars(service, environment):
-    out = subprocess.run(["railway", "variable", "list", "--service", service, "--environment", environment,
-                          "--json"], capture_output=True, text=True)
-    if out.returncode != 0:
-        raise SystemExit("error: could not read Railway variables "
-                         f"({service}/{environment}): {out.stderr.strip()[:200]}\n"
-                         "remedy: `railway link` to the agent-control-plane project first")
-    return json.loads(out.stdout)
 
 
 def load_document(text):
@@ -127,13 +118,16 @@ def sign(policy, key, key_id):
 
 def validate(document, key, key_id):
     """Load it exactly as the deployment will, with the deployment's key."""
-    env = {"ACP_POLICY": json.dumps(document), "ACP_POLICY_FILE": "",
-           "ACP_POLICY_SIGNING_KEY": key or ""}
+    env = {"ACP_POLICY_SIGNING_KEY": key or ""}
     if key_id:
         env["ACP_POLICY_SIGNING_KEY_ID"] = key_id
     with patch.dict(os.environ, env):
-        gateway._REGISTRY.update(key=None, value=None)
-        registry = gateway.policy_registry(strict=True)
+        registry = gateway.load_policies(json.dumps(document), "candidate")
+        if registry["error"]:
+            raise ValueError(registry["error"])
+        for record in registry["policies"].values():
+            if record["state"] == "INVALID":
+                raise ValueError(f"{record['policy']['policy_id']}: {record['error']}")
         return {pid: {"version": r["policy"]["version"], "state": r["state"], "digest": r["digest"],
                       "repository": f"{r['policy']['repository']['owner']}/{r['policy']['repository']['name']}",
                       "boards": r["policy"].get("boards", [])}
@@ -149,24 +143,15 @@ def main():
     parser.add_argument("--board", action="append", default=[], help="OWNER:NUMBER; gates the board read")
     parser.add_argument("--actions", help="comma-separated protected actions (default: ACP's defaults)")
     parser.add_argument("--from", dest="source", help="a candidate policy JSON, or - for stdin (e.g. from `acp.py policy`)")
-    parser.add_argument("--local", help="read and write this JSON file instead of Railway")
-    parser.add_argument("--service", default=os.getenv("ACP_RAILWAY_SERVICE", "acp-gateway"))
-    parser.add_argument("--environment", default=os.getenv("ACP_RAILWAY_ENV", "production"))
+    parser.add_argument("--local", required=True, help="the policy JSON file to read and write")
     parser.add_argument("--sign-all", action="store_true",
                         help="re-sign every policy, e.g. when ACP_POLICY_SIGNING_KEY is first introduced")
     parser.add_argument("--apply", action="store_true", help="write it; without this nothing changes")
     args = parser.parse_args()
 
-    if args.local:
-        path = Path(args.local)
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
-        key, key_id = os.getenv("ACP_POLICY_SIGNING_KEY", ""), os.getenv("ACP_POLICY_SIGNING_KEY_ID", "")
-    else:
-        variables = railway_vars(args.service, args.environment)
-        current = variables.get("ACP_POLICY", "")
-        key, key_id = variables.get("ACP_POLICY_SIGNING_KEY", ""), variables.get("ACP_POLICY_SIGNING_KEY_ID", "")
-        if variables.get("ACP_POLICY_FILE"):
-            raise SystemExit("error: this deployment loads ACP_POLICY_FILE, which this tool does not edit")
+    path = Path(args.local)
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    key, key_id = os.getenv("ACP_POLICY_SIGNING_KEY", ""), os.getenv("ACP_POLICY_SIGNING_KEY_ID", "")
 
     try:
         existing = load_document(current)
@@ -184,7 +169,7 @@ def main():
         raise SystemExit(f"error: the result would not load: {exc}")
 
     target = merged[-1]
-    print(json.dumps({"target": f"{args.local or args.service + '/' + args.environment}",
+    print(json.dumps({"target": args.local,
                       "policy_id": target["policy_id"], "version": target["version"],
                       "replaces_version": (replaced or {}).get("version"),
                       "signed": "signature" in target,
@@ -193,14 +178,7 @@ def main():
     if not args.apply:
         print("dry run: nothing written. Re-run with --apply to register it.", file=sys.stderr)
         return 0
-    if args.local:
-        Path(args.local).write_text(document + "\n", encoding="utf-8")
-    else:
-        out = subprocess.run(["railway", "variable", "set", "ACP_POLICY", "--service", args.service,
-                              "--environment", args.environment, "--stdin"],
-                             input=document, capture_output=True, text=True)
-        if out.returncode != 0:
-            raise SystemExit(f"error: railway refused the update: {out.stderr.strip()[:300]}")
+    path.write_text(document + "\n", encoding="utf-8")
     print(f"registered {target['policy_id']} v{target['version']}", file=sys.stderr)
     return 0
 
