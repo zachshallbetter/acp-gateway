@@ -101,7 +101,10 @@ def validate_context(action, context, session_id):
         if trigger not in TRIGGERS[action]:
             raise MeteringError(f"{action} needs context.trigger, one of {', '.join(sorted(TRIGGERS[action]))}.",
                                 "context.trigger", f"Send trigger: {sorted(TRIGGERS[action])[0]} or another listed value.")
-        if not _valid_ref(context.get("ref")):
+        # A CLI deploy targets whatever the linked project deploys, so it may come from a detached
+        # checkout with no branch; a ref, when sent, still has to be a real one.
+        if not (trigger in BRANCH_INDEPENDENT_TRIGGERS and not context.get("ref")) and \
+                not _valid_ref(context.get("ref")):
             raise MeteringError(f"{action} needs context.ref as a full refs/heads/... name.", "context.ref",
                                 "Send the branch the push, merge or run targets, e.g. refs/heads/main.")
         if not FULL_SHA.match(context.get("new_sha") or ""):
@@ -392,7 +395,7 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                        "The owner signs and sets ACP_BUDGET_POLICY (scripts/policy-admin.py budget-policy).")
     owner, name = claim["owner"], claim["name"]
     metered = policy.get("metered") or {"production_branches": ["main"], "providers": {}}
-    branch = context["ref"][len("refs/heads/"):]
+    branch = (context.get("ref") or "")[len("refs/heads/"):] or "no branch: a CLI deploy"
     trigger = context.get("trigger")
     production = action == "production_merge" or branch in metered["production_branches"] \
         or trigger in BRANCH_INDEPENDENT_TRIGGERS
@@ -420,12 +423,12 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
     # A push of one commit builds once, so asking again is a replay. A CLI deploy or a manual
     # dispatch starts a new run each time, so each invocation is its own record.
     invocation = (context.get("tool_use_id") or request_id) if trigger in INVOCATION_TRIGGERS else None
-    keys = {b["provider"]: record_key(action, b["provider"], owner.lower(), name.lower(), context["ref"],
+    keys = {b["provider"]: record_key(action, b["provider"], owner.lower(), name.lower(), context.get("ref"),
                                       context["new_sha"], context.get("workflow"), context.get("run_id"),
                                       *([invocation] if invocation else []))
             for b in building}
     if not building:
-        keys = {"local": record_key(action, "local", owner.lower(), name.lower(), context["ref"],
+        keys = {"local": record_key(action, "local", owner.lower(), name.lower(), context.get("ref"),
                                     context["new_sha"], context.get("workflow"), context.get("run_id"),
                                     *([invocation] if invocation else []))}
     # Replay: the same action asked again is answered from the record, never counted twice.

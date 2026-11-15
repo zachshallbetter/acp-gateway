@@ -27,7 +27,7 @@ feature reaches production.
 
 | Action | Required `context` | Optional |
 |---|---|---|
-| `hosted_build` | `trigger` (`push`, `cli_deploy`, `railway_up`), `ref`, `new_sha`, `reason` | `provider` to count one provider only |
+| `hosted_build` | `trigger` (`push`, `cli_deploy`, `railway_up`), `ref`, `new_sha`, `reason` | `ref` may be left out for `cli_deploy` and `railway_up`, which deploy the linked project from any checkout, detached included |
 | `production_merge` | `trigger` (`merge`, `promote`), `ref` (the production branch), `new_sha` (the merge result), `reason` | |
 | `manual_ci` | `trigger` (`workflow_dispatch`, `rerun`), `workflow` (`.github/workflows/<file>.yml`), `ref`, `new_sha`, `reason`; `run_id` for a rerun | |
 | `local_heavy_build` | `tool_use_id`, `machine_id`, `reason` | `repository_claim` |

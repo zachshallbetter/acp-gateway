@@ -319,6 +319,29 @@ def test_a_cli_deploy_is_production_whatever_ref_it_claims():
         assert out["decision"] == "AUTH_REQUIRED" and out["reason"] == "OWNER_REQUIRED", out
 
 
+def test_a_cli_deploy_from_a_detached_checkout_needs_no_branch():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        lane = decide(request(trigger="cli_deploy", ref=None), ledger, caller=LANE)
+        assert lane["decision"] == "AUTH_REQUIRED" and lane["reason"] == "OWNER_REQUIRED", lane
+        assert lane["grant_request"]["command"] in lane["remedy"]
+        owner = decide(request(trigger="railway_up", ref=None), ledger, caller=COORDINATOR,
+                       provide=evidence(builds=[{"provider": "railway", "project": "api", "would_build": True,
+                                                 "why": "railway up deploys the linked service"}]))
+        assert owner["decision"] == "ALLOW", owner
+        try:
+            gateway.parse_authorization_request(request(trigger="push", ref=""))
+            raise AssertionError("a push without a branch was accepted")
+        except (gateway.TargetError, metering.MeteringError):
+            pass
+        try:
+            gateway.parse_authorization_request(request(trigger="cli_deploy", ref="refs/heads/../x"))
+            raise AssertionError("a malformed ref was accepted because the trigger is a CLI deploy")
+        except (gateway.TargetError, metering.MeteringError):
+            pass
+
+
 def test_each_cli_deploy_and_manual_dispatch_is_counted():
     with env():
         fresh()
