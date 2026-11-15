@@ -15,7 +15,7 @@ os.environ.setdefault("ACP_GATEWAY_TOKEN", "test-token")
 import gateway  # noqa: E402
 from test_gateway_policy import (OWNER, REPO, REMOTE, NOTICE, SIGNING_KEY, claim, env,  # noqa: E402
                                  request, verifier, Served)
-from test_gateway_lockout import ADMIN, GOOD, BAD, MAIN, contained_env, fresh, lock, quarantine, restart
+from test_gateway_lockout import ADMIN, GOOD, BAD, MAIN, contained_env, events, fresh, lock, quarantine, restart
 
 PAT = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0123456789\n-----END RSA PRIVATE KEY-----"
@@ -653,6 +653,197 @@ def test_the_chain_head_survives_a_restart():
             gateway.authorize(request("git.remote.update"), verifier=verifier())
             assert gateway.AUDIT[-1]["previous_hash"] == head, "the chain continues across a restart"
             assert gateway.verify_audit_chain(list(gateway.AUDIT))["valid"] is True
+
+
+# ---- HTTP hardening: timeouts, body before pool slot, coalesced alerts ------
+import contextlib, socket, threading, time
+
+
+class _Ok:
+    def __enter__(self): return self
+    def __exit__(self, *a): return None
+
+
+def _raw(server, data, wait=0.0):
+    sock = socket.create_connection(server.server.server_address, timeout=10)
+    sock.sendall(data)
+    time.sleep(wait)
+    return sock
+
+
+def test_a_stalled_client_is_cut_off_by_the_socket_timeout():
+    assert gateway.Handler.timeout == gateway.socket_timeout() == 15.0
+    with patch.dict(os.environ, {"ACP_HTTP_TIMEOUT_SECONDS": "0"}):
+        assert gateway.socket_timeout() == 1.0
+    with patch.dict(os.environ, {"ACP_HTTP_TIMEOUT_SECONDS": "9999"}):
+        assert gateway.socket_timeout() == 120.0
+    with patch.dict(os.environ, {"ACP_HTTP_TIMEOUT_SECONDS": "soon"}):
+        assert gateway.socket_timeout() == 15.0
+    with patch.object(gateway.Handler, "timeout", 0.3), Served() as served:
+        # unauthenticated POST declaring a body it never sends: discard_body must not block forever
+        sock = _raw(served, b"POST /internal/authorize HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n")
+        sock.settimeout(5)
+        began = time.monotonic()
+        assert sock.recv(4096) == b"", "the server closes without a reply"
+        assert time.monotonic() - began < 4
+        sock.close()
+        # a connection that never finishes its headers is closed too
+        sock = _raw(served, b"GET /health HTTP/1.1\r\nHost: x\r\n")
+        sock.settimeout(5)
+        assert sock.recv(4096) == b""
+        sock.close()
+
+
+def test_the_request_body_is_read_before_a_pool_slot_is_taken():
+    entered = threading.Event()
+    @contextlib.contextmanager
+    def transaction():
+        entered.set()
+        yield object()
+    with patch.object(gateway.postgres_store, "enabled", return_value=True), \
+            patch.object(gateway.postgres_store, "transaction", transaction), \
+            patch("gateway.release_lease", return_value={"released": True}), \
+            Served() as served:
+        body = json.dumps({"lease_id": "x"}).encode()
+        head = (b"POST /internal/subagent/release HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                b"Authorization: Bearer test-token-long-enough-to-scrub\r\n"
+                + b"Content-Length: %d\r\n\r\n" % len(body))
+        with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": "test-token-long-enough-to-scrub"}):
+            sock = _raw(served, head + body[:5], wait=0.4)
+            assert not entered.is_set(), "a stalled body must not hold a database transaction"
+            sock.sendall(body[5:])
+            sock.settimeout(5)
+            reply = b""
+            while b"released" not in reply:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+            sock.close()
+        assert entered.is_set() and b"200" in reply.split(b"\r\n")[0] and b"released" in reply, reply
+
+
+def test_a_non_ascii_credential_is_refused_not_a_server_error():
+    class H:
+        def __init__(self, **h): self.headers = h
+    with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": "t" * 20, "ACP_POLICY_ADMIN_TOKEN": "a" * 20}):
+        assert gateway.caller_for(H(Authorization="Bearer h\u00e9llo")) is None
+        assert gateway.admin_authorized(H(**{"X-ACP-Admin-Authorization": "Bearer \u00fc"})) is False
+        assert gateway.authorized(H(Authorization="Bearer " + "t" * 20)) is True
+    with patch.object(gateway.Handler, "timeout", 5), Served() as served:
+        with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": "t" * 20}):
+            sock = _raw(served, b"POST /internal/authorize HTTP/1.1\r\nHost: x\r\nContent-Length: \xb2\r\n"
+                                b"Authorization: Bearer \xe9\r\n\r\n")
+            sock.settimeout(5)
+            assert b" 401 " in sock.recv(4096).split(b"\r\n")[0]
+            sock.close()
+
+
+def test_content_length_must_be_ascii_digits():
+    class H:
+        headers = {"Content-Type": "application/json", "Content-Length": "\u00b2"}
+        _raw_body = None
+        discard_body = gateway.Handler.discard_body
+        json_body = gateway.Handler.json_body
+        rfile = None
+    try:
+        H().json_body()
+    except gateway.TargetError as exc:
+        assert exc.status == 411
+    else:
+        raise AssertionError("a superscript digit is not a length")
+
+
+def test_installation_tokens_are_minted_once_and_reused_until_near_expiry():
+    fresh()
+    soon = lambda seconds: gateway.iso(time.time() + seconds)
+    minted = []
+    def mint(path, method="GET"):
+        minted.append(path)
+        return {"token": "tok%d" % len(minted), "expires_at": soon(3600 if len(minted) < 3 else 30)}
+    with patch("gateway.app_api", side_effect=mint), \
+            patch("gateway.default_installation", return_value="77"):
+        assert gateway.installation_token()["token"] == "tok1"
+        assert gateway.installation_token()["token"] == "tok1", "reused, not re-minted"
+        gateway._INSTALLATION_TOKENS["77"]["until"] = time.time() - 1       # expiry margin reached
+        assert gateway.installation_token()["token"] == "tok2"
+        gateway._INSTALLATION_TOKENS.clear()
+        assert gateway.installation_token()["token"] == "tok3"
+        assert gateway.installation_token()["token"] == "tok4", "a token too close to expiry is never cached"
+    assert len(minted) == 4
+
+
+def _alerts(events, now_step=1.0, **extra):
+    sent = []
+    def capture(request_object, timeout=None):
+        sent.append(json.loads(request_object.data)); return _Ok()
+    clock = [1000.0]
+    with patch.dict(os.environ, {"ACP_SECURITY_WEBHOOK_URL": "https://alerts.example/hook", **extra}), \
+            patch("gateway.urlopen", side_effect=capture), \
+            patch("gateway.time.time", side_effect=lambda: clock[0]):
+        for record in events:
+            gateway.notify(record)
+            clock[0] += now_step
+    return sent
+
+
+def test_repeated_alerts_are_coalesced_and_the_suppressed_are_counted():
+    fresh()
+    flood = [{"event": "FORGED_AUTHORIZATION_ATTEMPT", "severity": "CRITICAL", "resource_id": RESOURCE,
+              "event_id": "e%d" % i} for i in range(5)]
+    sent = _alerts(flood)
+    assert len(sent) == 1 and "suppressed_duplicates" not in sent[0]
+    fresh()
+    sent = _alerts(flood, now_step=20.0)           # t=0,20,40,60,80: second window opens at 60
+    assert len(sent) == 2 and sent[1]["suppressed_duplicates"] == 2, sent
+
+
+def test_a_client_flood_cannot_suppress_a_containment_alert():
+    fresh()
+    events = [{"event": "FORGED_AUTHORIZATION_ATTEMPT", "resource_id": RESOURCE, "event_id": "f%d" % i}
+              for i in range(10)]
+    events += [{"event": "LOCKED_ENTERED", "resource_id": RESOURCE, "incident_id": "inc_1", "event_id": "l1"},
+               {"event": "QUARANTINE_ENTERED", "resource_id": RESOURCE, "incident_id": "inc_1", "event_id": "q1"},
+               {"event": "LOCKED_ENTERED", "resource_id": RESOURCE, "incident_id": "inc_2", "event_id": "l2"}]
+    sent = _alerts(events, now_step=0.1)
+    assert [a["event_id"] for a in sent] == ["f0", "l1", "q1", "l2"], sent
+    fresh()
+    assert len(_alerts(events, now_step=0.1, ACP_NOTIFY_COALESCE_SECONDS="0")) == len(events)
+
+
+def test_the_notice_lookup_audits_once_per_resource_per_window():
+    fresh()
+    with contained_env():
+        for offset in (0, 1, 2):
+            gateway.notice_lookup(OWNER, REPO, now=5000.0 + offset)
+        first = events("NOTICE_LOOKUP")
+        assert len(first) == 1 and "suppressed_lookups" not in first[0]
+        gateway.notice_lookup(OWNER, REPO, now=5000.0 + 301)
+        after = events("NOTICE_LOOKUP")
+        assert len(after) == 2 and after[1]["suppressed_lookups"] == 2, after
+        gateway.notice_lookup(OWNER, REPO, now=5000.0 + 302)
+        assert len(events("NOTICE_LOOKUP")) == 2
+
+
+def test_ready_memoizes_the_strict_policy_check_for_a_short_ttl():
+    fresh()
+    calls = []
+    real = gateway.policy_registry
+    def counting(strict=False):
+        if strict:
+            calls.append(1)
+        return real(strict=strict)
+    with contained_env(ACP_REQUIRE_PRODUCTION_CONTROLS="1"), \
+            patch("gateway.policy_registry", side_effect=counting), \
+            patch("gateway.production_hardening_error", return_value=None):
+        for _ in range(5):
+            assert gateway.ready_policy_error() is None
+        assert len(calls) == 1
+        gateway._READY_POLICY["at"] -= 11                                     # TTL elapsed
+        assert gateway.ready_policy_error() is None and len(calls) == 2
+        with patch.dict(os.environ, {"ACP_POLICY": "{not json", "ACP_POLICY_FILE": ""}):
+            assert gateway.ready_policy_error() == "production policy registry is invalid", \
+                "a changed document is seen at once, not after the TTL"
 
 
 if __name__ == "__main__":

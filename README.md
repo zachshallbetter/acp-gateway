@@ -1246,6 +1246,10 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_EVENT_RETENTION_DAYS` | no | A number, or `{"INFO":7,"WARNING":30,"HIGH":365,"CRITICAL":365}`. Governs query results, not the append-only log. |
 | `ACP_SECURITY_WEBHOOK_URL` | no | Destination for high-severity control events. |
 | `ACP_SECURITY_WEBHOOK_TOKEN` | no | Sent as `Authorization: Bearer` to that webhook. |
+| `ACP_NOTIFY_COALESCE_SECONDS` | no | At most one webhook delivery per event, resource and incident per window; suppressed repeats are counted in the next delivery's `suppressed_duplicates`. Default `60`; `0` disables. |
+| `ACP_NOTICE_LOOKUP_EVENT_SECONDS` | no | The unauthenticated `/notice` lookup audits one `NOTICE_LOOKUP` per governed resource per window per process (later lookups counted in `suppressed_lookups`). Default `300`; `0` audits every lookup. |
+| `ACP_READY_POLICY_TTL_SECONDS` | no | How long `/ready` reuses its strict policy check when `ACP_REQUIRE_PRODUCTION_CONTROLS` is on. Default `10`; `0` checks every request. |
+| `ACP_HTTP_TIMEOUT_SECONDS` | no | Socket timeout for reading a request's line, headers and body; a stalled client is disconnected. Default `15`, clamped to 1–120. |
 | `ACP_AUDIT_HASH_CHAIN` | no | `1` to hash-chain audit events. |
 | `ACP_STORE_FULL_REQUEST_TEXT` | no | `1` to retain the full request text. Off by default; only the bounded summary and its digest are kept. |
 | `ACP_VERIFY_ACTOR_IDENTITY` | no | `0` to skip the provider lookup that turns `github-user:<id>` into a verified login. |

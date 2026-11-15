@@ -17,7 +17,7 @@ Three design rules shape the whole file:
      is allowed -- it never disables enforcement. See authorize().
 """
 from __future__ import annotations
-import base64, hashlib, hmac, http.server, json, logging, os, re, subprocess, sys, tempfile, time
+import base64, hashlib, hmac, http.server, json, logging, os, re, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
@@ -64,6 +64,14 @@ def configured():
     per owner. ACP_GITHUB_INSTALLATION_ID survives only as a fallback.
     """
     return all(os.getenv(name) for name in ("ACP_GITHUB_APP_ID", "ACP_GITHUB_PRIVATE_KEY"))
+
+
+def same_secret(presented, expected):
+    """Constant-time comparison of two header-derived strings. Compared as bytes:
+    hmac.compare_digest raises TypeError on a non-ASCII str, which would turn a
+    garbage Authorization header into a 502 instead of a refusal."""
+    return hmac.compare_digest(presented.encode("utf-8", "surrogatepass"),
+                               expected.encode("utf-8", "surrogatepass"))
 
 
 def authorized(handler):
@@ -269,7 +277,7 @@ def caller_for(handler):
     header = handler.headers.get("Authorization", "")
     shared = os.getenv("ACP_GATEWAY_TOKEN", "")
     caller = None
-    if shared and hmac.compare_digest(header, "Bearer " + shared):
+    if shared and same_secret(header, "Bearer " + shared):
         caller = {"kind": "shared", "id": "shared", "repos": None}
     elif header.startswith("Bearer ") and len(header) > 7:
         presented = hashlib.sha256(header[7:].encode()).hexdigest()
@@ -315,7 +323,7 @@ def admin_authorized(handler):
     it must not amount to permission to rewrite the policy that binds the agent.
     """
     expected = os.getenv("ACP_POLICY_ADMIN_TOKEN", "")
-    return bool(expected) and hmac.compare_digest(
+    return bool(expected) and same_secret(
         handler.headers.get("X-ACP-Admin-Authorization", ""), "Bearer " + expected)
 
 
@@ -552,10 +560,32 @@ def default_installation():
                       owners_available=[e["login"] for e in known if e["login"]])
 
 
+_INSTALLATION_TOKENS = {}
+_INSTALLATION_TOKENS_LOCK = threading.Lock()
+INSTALLATION_TOKEN_MARGIN = 120      # seconds before expires_at at which a cached token is no longer reused
+
+
 def installation_token(owner=None):
-    """Short-lived installation token for `owner` (or the default installation)."""
-    ident = installation_for(owner) if owner else default_installation()
-    return app_api(f"/app/installations/{ident}/access_tokens", method="POST")
+    """Short-lived installation token for `owner` (or the default installation).
+
+    Minted once per installation and reused until shortly before the expires_at
+    GitHub returned, so a burst of repo_api calls is one mint, not one each.
+    """
+    ident = str(installation_for(owner) if owner else default_installation())
+    now = time.time()
+    with _INSTALLATION_TOKENS_LOCK:
+        cached = _INSTALLATION_TOKENS.get(ident)
+        if cached and now < cached["until"]:
+            return dict(cached["value"])
+    value = app_api(f"/app/installations/{ident}/access_tokens", method="POST")
+    try:
+        expires = datetime.fromisoformat(str(value["expires_at"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, TypeError, ValueError):
+        expires = 0.0                # no usable expiry: do not cache
+    if value.get("token") and expires - INSTALLATION_TOKEN_MARGIN > now:
+        with _INSTALLATION_TOKENS_LOCK:
+            _INSTALLATION_TOKENS[ident] = {"value": dict(value), "until": expires - INSTALLATION_TOKEN_MARGIN}
+    return value
 
 
 # ------------------------------------------------------------------- allowlist
@@ -2037,14 +2067,58 @@ def load_audit_tail():
 
 # ------------------------------------------------------------- notifications
 
+_NOTIFIED = {}
+_NOTIFIED_LOCK = threading.Lock()
+NOTIFIED_MAX_KEYS = 1024
+
+
+def notify_window():
+    try:
+        return max(0, min(3600, int(os.getenv("ACP_NOTIFY_COALESCE_SECONDS", "60"))))
+    except ValueError:
+        return 60
+
+
+def notify_slot(record, now):
+    """Admit one delivery per (event, resource, incident) per window.
+
+    Returns (admit, suppressed_since_last). The key carries the event type, so a
+    flood of client-reported events can never use up the slot a LOCKED_ENTERED or
+    QUARANTINE_ENTERED needs, and the incident id, so a new incident always alerts.
+    Suppressed duplicates are counted into the next delivery, not lost.
+    """
+    window = notify_window()
+    if not window:
+        return True, 0
+    key = (record.get("event"), record.get("resource_id") or record.get("repository"),
+           record.get("incident_id"))
+    with _NOTIFIED_LOCK:
+        slot = _NOTIFIED.get(key)
+        if slot and now - slot["at"] < window:
+            slot["suppressed"] += 1
+            return False, 0
+        if len(_NOTIFIED) >= NOTIFIED_MAX_KEYS:
+            for stale in [k for k, v in _NOTIFIED.items() if now - v["at"] >= window]:
+                del _NOTIFIED[stale]
+            if len(_NOTIFIED) >= NOTIFIED_MAX_KEYS:
+                _NOTIFIED.pop(min(_NOTIFIED, key=lambda k: _NOTIFIED[k]["at"]))
+        carried = slot["suppressed"] if slot else 0
+        _NOTIFIED[key] = {"at": now, "suppressed": 0}
+        return True, carried
+
+
 def notify(record):
     """Outbound alert for a high-severity control event.
 
     Delivery never affects the decision: the security action already applies and
     the event is already persisted before this runs. Bounded retries, no loop.
+    Repeats of one event on one resource are coalesced (notify_slot).
     """
     url = os.getenv("ACP_SECURITY_WEBHOOK_URL", "").strip()
     if not url:
+        return None
+    admit, suppressed = notify_slot(record, time.time())
+    if not admit:
         return None
     payload = {key: record.get(key) for key in
                ("event_id", "event", "severity", "timestamp", "incident_id", "actor_id", "agent_id",
@@ -2052,6 +2126,8 @@ def notify(record):
                 "authorization_state", "security_version", "policy_id", "policy_version",
                 "recovery_required", "related_attempts", "ref")
                if record.get(key) is not None}
+    if suppressed:
+        payload["suppressed_duplicates"] = suppressed
     payload["summary"] = (f"{record.get('severity')} {record.get('event')} "
                           f"incident={record.get('incident_id') or '-'} "
                           f"actor={record.get('actor_id') or '-'} "
@@ -4257,6 +4333,31 @@ def board_advisory(owner, number):
 # and the terms -- plus the authorization state. It grants nothing: there is no
 # input it can be given that makes a protected operation allowed.
 
+_NOTICE_EMITTED = {}
+_NOTICE_EMITTED_LOCK = threading.Lock()
+
+
+def notice_event_window():
+    try:
+        return max(0, min(86400, int(os.getenv("ACP_NOTICE_LOOKUP_EVENT_SECONDS", "300"))))
+    except ValueError:
+        return 300
+
+
+def notice_event_due(resource, now):
+    """None when this lookup is not to be audited, else the number of lookups
+    skipped since the last audited one: one NOTICE_LOOKUP per governed resource
+    per window per process, the rest counted into the next event."""
+    window = notice_event_window()
+    with _NOTICE_EMITTED_LOCK:
+        slot = _NOTICE_EMITTED.setdefault(resource, {"at": None, "suppressed": 0})
+        if window and slot["at"] is not None and 0 <= now - slot["at"] < window:
+            slot["suppressed"] += 1
+            return None
+        carried, slot["suppressed"], slot["at"] = slot["suppressed"], 0, now
+        return carried
+
+
 def notice_lookup(owner, name, now=None):
     now = time.time() if now is None else now
     owner, name = (owner or "").strip(), (name or "").strip()
@@ -4283,9 +4384,13 @@ def notice_lookup(owner, name, now=None):
     integrity = entry.get("integrity") or {}
     manifest = manifest_of(policy)
     permitted = state == "NORMAL" and not integrity.get("unresolved")
-    emit_event("NOTICE_LOOKUP", now=now, resource_id=f"{owner}/{name}".lower(),
-               policy_id=policy["policy_id"], authorization_state=state,
-               incident_id=entry.get("incident_id"), governed=True)
+    resource = f"{owner}/{name}".lower()
+    skipped = notice_event_due(resource, now)
+    if skipped is not None:
+        emit_event("NOTICE_LOOKUP", now=now, resource_id=resource,
+                   policy_id=policy["policy_id"], authorization_state=state,
+                   incident_id=entry.get("incident_id"), governed=True,
+                   suppressed_lookups=skipped or None)
     return {
         "governed": True,
         "resource": f"{policy['repository']['owner']}/{policy['repository']['name']}".lower(),
@@ -5027,7 +5132,58 @@ ENDPOINTS = {
 }
 
 
+def socket_timeout():
+    try:
+        return float(max(1, min(120, int(os.getenv("ACP_HTTP_TIMEOUT_SECONDS", "15")))))
+    except ValueError:
+        return 15.0
+
+
+_READY_POLICY = {"key": None, "at": 0.0, "error": None}
+_READY_POLICY_LOCK = threading.Lock()
+
+
+def ready_policy_ttl():
+    try:
+        return max(0, min(300, int(os.getenv("ACP_READY_POLICY_TTL_SECONDS", "10"))))
+    except ValueError:
+        return 10
+
+
+def ready_policy_error():
+    """The strict policy check /ready runs, memoized for a short TTL: the route is
+    anonymous, and re-parsing and re-verifying the whole signed policy per request
+    is work any caller could demand. A changed document is seen within the TTL,
+    sooner when its inline text or signing key changes."""
+    path = os.getenv("ACP_POLICY_FILE", "").strip()
+    inline = "" if path else signed_document_text("policy")[0]
+    key = (path, inline, os.getenv("ACP_POLICY_SIGNING_KEY", ""), signing_key_id())
+    now = time.monotonic()
+    ttl = ready_policy_ttl()
+    with _READY_POLICY_LOCK:
+        if ttl and _READY_POLICY["key"] == key and now - _READY_POLICY["at"] < ttl:
+            return _READY_POLICY["error"]
+    error = None
+    try:
+        registry = policy_registry(strict=True)
+    except ValueError:
+        error = "production policy registry is invalid"
+    else:
+        if not registry["policies"]:
+            error = "production policy registry is empty"
+        elif production_hardening_error():
+            error = "required production controls are unavailable"
+    with _READY_POLICY_LOCK:
+        _READY_POLICY.update(key=key, at=now, error=error)
+    return error
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    # Bounds every blocking read -- request line, headers, body -- so an idle or
+    # trickling client cannot pin a thread (and, before auth, a descriptor)
+    # forever. A timed-out read closes the connection (handle_one_request).
+    timeout = socket_timeout()
+
     def do_GET(self):
         route, params = urlsplit(self.path).path, parse_qs(urlsplit(self.path).query)
         first = lambda name: (params.get(name, [""])[0] or "").strip()
@@ -5037,14 +5193,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route == "/ready":
             try:
                 if os.getenv("ACP_REQUIRE_PRODUCTION_CONTROLS", "").strip().lower() in ("1", "true", "yes"):
-                    try:
-                        registry = policy_registry(strict=True)
-                    except ValueError as exc:
-                        raise postgres_store.StorageError("production policy registry is invalid") from exc
-                    if not registry["policies"]:
-                        raise postgres_store.StorageError("production policy registry is empty")
-                    if production_hardening_error():
-                        raise postgres_store.StorageError("required production controls are unavailable")
+                    problem = ready_policy_error()
+                    if problem:
+                        raise postgres_store.StorageError(problem)
                 if postgres_store.enabled():
                     postgres_store.validate_schema()
                     with postgres_store.transaction() as store:
@@ -5221,6 +5372,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "remedy": "Send Authorization: Bearer <ACP_GATEWAY_TOKEN>."})
             return
         if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
+            # Read the body first: a stalled client must never hold a pool slot.
+            self.buffer_body(route)
             return self._with_database_transaction(self.do_POST)
         try:
             if route == "/internal/authorize":
@@ -5294,7 +5447,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               "This endpoint accepts application/json only.",
                               remedy="Send Content-Type: application/json.")
         declared = (self.headers.get("Content-Length") or "").strip()
-        if not declared.isdigit():
+        if not (declared.isascii() and declared.isdigit()):
             raise TargetError(411, "LENGTH_REQUIRED", "A JSON body needs an integer Content-Length.",
                               remedy="Send Content-Length; chunked bodies are not accepted.")
         length = int(declared)
@@ -5305,7 +5458,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               f"The body is larger than this endpoint accepts ({length} bytes).",
                               remedy="Send only the documented fields; telemetry is a bounded summary, "
                                      "not a transcript.", max_bytes=ceiling)
-        raw = self.rfile.read(length)
+        raw = self._raw_body if self._raw_body is not None else self.rfile.read(length)
+        self._raw_body = None
         if len(raw) != length:
             raise TargetError(400, "INCOMPLETE_BODY", "The body was shorter than its Content-Length.",
                               remedy="Resend the whole request.")
@@ -5324,10 +5478,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise TargetError(400, "INVALID_JSON", "The request body is not valid JSON.",
                               remedy="Send a JSON object; see the authorize contract in the README.")
 
+    _raw_body = None
+
+    BODY_CEILINGS = {"/internal/documents": lambda: DOCUMENT_MAX_BYTES,
+                     "/internal/report": event_body_limit,
+                     "/internal/integrity/snapshot": snapshot_body_limit}
+
+    def buffer_body(self, route):
+        """Read the request body into memory, bounded by the route's ceiling, so
+        json_body and discard_body later do no socket I/O. A missing, malformed or
+        oversized Content-Length is left for json_body to refuse, as before."""
+        declared = (self.headers.get("Content-Length") or "").strip()
+        if not (declared.isascii() and declared.isdigit()):
+            return
+        ceiling = self.BODY_CEILINGS.get(route, lambda: MAX_BODY_BYTES)()
+        if int(declared) <= ceiling:
+            self._raw_body = self.rfile.read(int(declared))
+
     def discard_body(self, maximum=MAX_BODY_BYTES):
         """Drain a refused request so the connection stays usable, bounded."""
+        if self._raw_body is not None:
+            self._raw_body = None
+            return
         declared = (self.headers.get("Content-Length") or "").strip()
-        if declared.isdigit():
+        if declared.isascii() and declared.isdigit():
             self.rfile.read(min(int(declared), maximum))
 
     def reply(self, code, body):

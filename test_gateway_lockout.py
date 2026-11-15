@@ -28,6 +28,8 @@ def fresh(state_file=None):
     gateway._TRUST_STATE.update(loaded=True, repositories={})
     gateway._SECURITY.update(loaded=not state_file, records={}, degraded=None)
     gateway._LAST_DENIAL.clear()
+    gateway._NOTIFIED.clear(); gateway._NOTICE_EMITTED.clear()
+    gateway._READY_POLICY.update(key=None, at=0.0, error=None); gateway._INSTALLATION_TOKENS.clear()
     gateway._PROVIDER.update(status="UNKNOWN", changed_at=None)
     del gateway.AUDIT[:]
 
