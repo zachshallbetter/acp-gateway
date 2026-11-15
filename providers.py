@@ -418,16 +418,118 @@ def github_json_file(owner, name, path, sha, token_for, fetch=_fetch):
     return value if isinstance(value, dict) else None
 
 
+class _UnsupportedPattern(ValueError):
+    """A filter pattern ACP cannot interpret exactly; the caller assumes the workflow runs."""
+
+
+def _compile_pattern(body):
+    """GitHub filter grammar as [(accepts, min, loop)]: * stops at /, ** crosses it, ? is zero or
+    one of the preceding character, + is one or more, [a-z] is a class, backslash escapes."""
+    tokens, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == "*":
+            double = body.startswith("**", i)
+            i += 2 if double else 1
+            tokens.append(((lambda ch: True) if double else (lambda ch: ch != "/"), 0, True))
+            continue
+        if c in "?+":
+            if not tokens or tokens[-1][1:] != (1, False):
+                raise _UnsupportedPattern(body)       # nothing single to repeat
+            accepts = tokens.pop()[0]
+            tokens.append((accepts, 0, False) if c == "?" else (accepts, 1, True))
+            i += 1
+            continue
+        if c == "[":
+            j, ranges = i + 1, []
+            if j < n and body[j] in "!^":
+                raise _UnsupportedPattern(body)       # negated classes are not documented
+            while j < n and body[j] != "]":
+                lo = body[j]
+                if lo == "\\":
+                    j += 1
+                    if j >= n:
+                        raise _UnsupportedPattern(body)
+                    lo = body[j]
+                if j + 2 < n and body[j + 1] == "-" and body[j + 2] != "]":
+                    hi = body[j + 2]
+                    if hi < lo:
+                        raise _UnsupportedPattern(body)
+                    ranges.append((lo, hi))
+                    j += 3
+                else:
+                    ranges.append((lo, lo))
+                    j += 1
+            if j >= n or not ranges:
+                raise _UnsupportedPattern(body)       # unterminated or empty class
+            tokens.append(((lambda ch, r=tuple(ranges): any(a <= ch <= b for a, b in r)), 1, False))
+            i = j + 1
+            continue
+        if c == "\\":
+            i += 1
+            if i >= n:
+                raise _UnsupportedPattern(body)
+            c = body[i]
+        tokens.append(((lambda ch, lit=c: ch == lit), 1, False))
+        i += 1
+    return tokens
+
+
+def _pattern_matches(tokens, branch):
+    """Set-of-states simulation: time is O(len(tokens) * len(branch)), whatever the pattern."""
+    n = len(tokens)
+
+    def close(states):
+        out = set()
+        for k in states:
+            out.add(k)
+            while k < n and tokens[k][1] == 0:
+                k += 1
+                out.add(k)
+        return out
+
+    states = close({0})
+    for ch in branch:
+        step = set()
+        for k in states:
+            if k < n and tokens[k][0](ch):
+                step.add(k if tokens[k][2] else k + 1)
+                if tokens[k][2]:
+                    step.add(k + 1)
+        states = close(step)
+        if not states:
+            return False
+    return n in states
+
+
 def _branch_matches(patterns, branch):
-    """GitHub filter patterns: * stops at /, ** crosses it, a leading ! negates."""
+    """GitHub filter patterns, a leading ! negates. Raises _UnsupportedPattern for any pattern
+    ACP cannot read exactly, or a non-scalar one; callers then assume the workflow runs."""
     matched = False
     for pattern in patterns:
+        if isinstance(pattern, bool) or not isinstance(pattern, (str, int)):
+            raise _UnsupportedPattern("not a scalar")
+        pattern = str(pattern)
         negate = pattern.startswith("!")
-        body = pattern[1:] if negate else pattern
-        regex = re.escape(body).replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", ".")
-        if re.fullmatch(regex, branch):
+        if _pattern_matches(_compile_pattern(pattern[1:] if negate else pattern), branch):
             matched = not negate
     return matched
+
+
+class _NoAliasLoader(yaml.SafeLoader):
+    """Workflow text is repository-controlled: aliases can expand a small file into an
+    exponentially large structure, so a document that uses one is treated as unparseable."""
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.events.AliasEvent):
+            raise yaml.YAMLError("YAML aliases are not accepted")
+        return super().compose_node(parent, index)
+
+
+def _trigger_name(value):
+    if isinstance(value, (str, int, bool)):
+        return str(value)
+    raise ValueError("trigger name is not a scalar")
 
 
 def _triggers(document):
@@ -436,21 +538,21 @@ def _triggers(document):
     if isinstance(on, str):
         return {on: None}
     if isinstance(on, list):
-        return {str(item): None for item in on}
+        return {_trigger_name(item): None for item in on}
     if isinstance(on, dict):
-        return {str(key): value for key, value in on.items()}
+        return {_trigger_name(key): value for key, value in on.items()}
     return {}
 
 
 def analyse_workflow(path, text):
     """What a workflow runs on and whether it is bounded."""
     try:
-        document = yaml.safe_load(text)
-    except yaml.YAMLError:
+        document = yaml.load(text, Loader=_NoAliasLoader)  # SafeLoader subclass
+        triggers = _triggers(document) if isinstance(document, dict) else None
+    except (yaml.YAMLError, ValueError):
         return {"path": path, "parse_error": True}
-    if not isinstance(document, dict):
+    if triggers is None:
         return {"path": path, "parse_error": True}
-    triggers = _triggers(document)
     jobs = document.get("jobs") if isinstance(document.get("jobs"), dict) else {}
     top_concurrency = document.get("concurrency") is not None
     unbounded, uncontrolled, matrix = [], [], []
@@ -483,16 +585,19 @@ def workflow_runs_on(analysis, event, branch):
     if "push" not in triggers:
         return False, "no push trigger"
     rules = triggers["push"] if isinstance(triggers["push"], dict) else {}
-    if rules.get("branches") is not None:
-        patterns = rules["branches"] if isinstance(rules["branches"], list) else [rules["branches"]]
-        if not _branch_matches([str(p) for p in patterns], branch):
-            return False, "the push branch filter excludes this branch"
-    elif rules.get("branches-ignore") is not None:
-        patterns = rules["branches-ignore"] if isinstance(rules["branches-ignore"], list) else [rules["branches-ignore"]]
-        if _branch_matches([str(p) for p in patterns], branch):
-            return False, "branches-ignore excludes this branch"
-    elif rules.get("tags") is not None and rules.get("branches") is None:
-        return False, "the push trigger only runs for tags"
+    try:
+        if rules.get("branches") is not None:
+            patterns = rules["branches"] if isinstance(rules["branches"], list) else [rules["branches"]]
+            if not _branch_matches(patterns, branch):
+                return False, "the push branch filter excludes this branch"
+        elif rules.get("branches-ignore") is not None:
+            patterns = rules["branches-ignore"] if isinstance(rules["branches-ignore"], list) else [rules["branches-ignore"]]
+            if _branch_matches(patterns, branch):
+                return False, "branches-ignore excludes this branch"
+        elif rules.get("tags") is not None:
+            return False, "the push trigger only runs for tags"
+    except _UnsupportedPattern:
+        return True, "a branch filter could not be read exactly, so ACP assumes it runs"
     if rules.get("paths") is not None or rules.get("paths-ignore") is not None:
         return True, "a path filter may skip this run; ACP counts it"
     return True, "runs on pushes to this branch"

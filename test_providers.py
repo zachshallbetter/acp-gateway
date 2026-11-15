@@ -271,6 +271,48 @@ def test_branch_patterns_follow_github():
     assert not providers._branch_matches(["**", "!main"], "main")
 
 
+def test_branch_pattern_grammar_and_fail_closed():
+    m = providers._branch_matches
+    assert m(["feature/[0-9]*"], "feature/1x") and not m(["feature/[0-9]*"], "feature/x1")
+    assert m(["feature/[a-c]"], "feature/b") and not m(["feature/[a-c]"], "feature/d")
+    assert m(["rel?"], "re") and m(["rel?"], "rel") and not m(["rel?"], "rell") and not m(["rel?"], "rele")
+    assert m(["v1+"], "v111") and not m(["v1+"], "v") and not m(["v1+"], "v12")
+    assert m(["a\\*b"], "a*b") and not m(["a\\*b"], "axb")
+    assert m(["*"], "main") and not m(["*"], "a/b")
+    for bad in ("[abc", "[!a]", "?x", "a\\", "[]", "[z-a]"):
+        try:
+            m([bad], "x")
+        except providers._UnsupportedPattern:
+            continue
+        raise AssertionError(f"{bad!r} must be unsupported")
+    doc = lambda key, pat: providers.analyse_workflow("w.yml", f"on:\n  push:\n    {key}: ['{pat}']\njobs: {{}}\n")
+    assert providers.workflow_runs_on(doc("branches", "[oops"), "push", "main")[0] is True
+    assert providers.workflow_runs_on(doc("branches-ignore", "[oops"), "push", "main")[0] is True
+    assert providers.workflow_runs_on(doc("branches", "feature/[0-9]*"), "push", "feature/1x")[0] is True
+
+
+def test_branch_pattern_matching_is_linear():
+    import time as _t
+    start = _t.monotonic()
+    assert not providers._branch_matches(["a*a*a*a*a*a*a*a*b"], "a" * 500)
+    assert not providers._branch_matches(["a+a+a+a+a+a+a+a+b"], "a" * 500)
+    assert _t.monotonic() - start < 1.0
+
+
+def test_workflow_yaml_aliases_are_refused():
+    doc = "a0: &a0 [x, y]\n" + "".join(f"a{i}: &a{i} [*a{i-1}, *a{i-1}]\n" for i in range(1, 41))
+    bomb = providers.analyse_workflow("w.yml", doc + "on: [*a40]\njobs: {}\n")
+    assert bomb["parse_error"]
+    assert providers.workflow_runs_on(bomb, "push", "main")[0] is True
+    assert providers.analyse_workflow("w.yml", "base: &b {x: 1}\non: push\nj: *b\n")["parse_error"]
+
+
+def test_workflow_triggers_and_patterns_must_be_scalars():
+    assert providers.analyse_workflow("w.yml", "on: [push, [nested]]\njobs: {}\n")["parse_error"]
+    nested = providers.analyse_workflow("w.yml", "on:\n  push:\n    branches: [[a]]\njobs: {}\n")
+    assert providers.workflow_runs_on(nested, "push", "main")[0] is True
+
+
 # ---- composition ---------------------------------------------------------------
 def token_for(owner):
     return "gh-token"
