@@ -20,8 +20,10 @@ _gp_profile="$(git rev-parse --show-toplevel 2>/dev/null)/.agents/board.env"
 if [ -f "$_gp_profile" ]; then
   while IFS='=' read -r _gp_k _gp_v; do
     _gp_k="${_gp_k#"${_gp_k%%[![:space:]]*}"}"   # trim leading space from the key
+    # Only a plain identifier may reach the indirect expansion below: a key with a
+    # subscript (GP_x[$(cmd)]) would otherwise be evaluated by bash.
+    [[ "$_gp_k" =~ ^(GH_PROJECT_OWNER|GH_PROJECT_NUMBER|GP_[A-Za-z0-9_]+)$ ]] || continue
     case "$_gp_k" in
-      \#*|"") continue;;
       GH_PROJECT_OWNER|GH_PROJECT_NUMBER|GP_*)
         # Strip an inline `# comment`, surrounding space, and quotes -- a value
         # like `4   # Infinite Studio` must bind the number, not the comment.

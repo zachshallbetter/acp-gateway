@@ -73,4 +73,14 @@ stub_curl '{"installations":[{"login":"testorg"},{"login":"testowner"}]}' 200
 err="$(cd "$STUB" && OWNER="" PROJECT="" GH_PROJECT_OWNER="" GH_PROJECT_NUMBER="" GH_PROJECT_CONFIG=/nonexistent bash -c ". '$SKILL/scripts/lib.sh'; gp_resolve; gp_require_target" 2>&1)"
 check "missing target lists owners" "the owner hint"     "$err" "--owner testowner"
 
+# 6. a hostile board.env key must not run code (subscript command substitution in ${!key})
+HOSTILE="$(mktemp -d)"
+git -C "$HOSTILE" init -q
+mkdir -p "$HOSTILE/.agents"
+printf '%s\n' 'GP_x[$(touch '"$HOSTILE"'/pwned)]' 'GP_FIELD_STATUS=Phase' > "$HOSTILE/.agents/board.env"
+out="$(cd "$HOSTILE" && env -u GP_FIELD_STATUS bash -c ". '$SKILL/scripts/lib.sh'; printf %s \"\$GP_FIELD_STATUS\"")"
+[ ! -e "$HOSTILE/pwned" ] && echo "  ok hostile key ran nothing" || { echo "  FAIL hostile board.env key executed a command"; fails=$((fails+1)); }
+check "valid key beside it still binds" "Phase" "$out" "Phase"
+trap 'rm -rf "$STUB" "$HOSTILE"' EXIT
+
 [ "$fails" = 0 ] && echo "acp context tests passed" || { echo "$fails failing"; exit 1; }
