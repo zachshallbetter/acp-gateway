@@ -328,6 +328,20 @@ def test_executing_the_recovery_moves_to_a7_not_to_normal():
     assert events("RECOVERY_EXECUTED") and events("RECOVERY_VERIFICATION_STARTED")
 
 
+def test_completing_a_recovery_records_the_capability_expiry():
+    # The shared store refuses a consumption row without an expiry, so the
+    # completion must pass the expiry the capability actually carries.
+    fresh()
+    with contained_env():
+        lock()
+        grant()
+        out = recover()
+        with patch.object(gateway, "consume_capability", wraps=gateway.consume_capability) as consume:
+            gateway.complete_recovery({"capability_token": out["capability_token"]}, now=2200.0)
+    expiry = consume.call_args.args[3]
+    assert expiry == out["capability"]["expires_at_epoch"] and expiry > 2200.0, consume.call_args
+
+
 def test_a_consumed_recovery_capability_cannot_be_replayed():
     fresh()
     with contained_env():

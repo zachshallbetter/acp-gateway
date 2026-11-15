@@ -3356,7 +3356,7 @@ def complete_recovery(body, now=None):
     if grant.get("authorization_id") != capability.get("authorization_id"):
         raise TargetError(409, "RECOVERY_STATE_MISMATCH",
                           "The capability does not correspond to the active recovery authorization.")
-    consume_capability(keys, now, capability["jti"], capability.get("exp"))
+    consume_capability(keys, now, capability["jti"], capability.get("expires_at_epoch"))
     if result == "failed":
         locked = force_lock(keys, now, "RECOVERY_EXECUTION_FAILED", event="RECOVERY_REJECTED",
                             authorization_id=grant.get("authorization_id"))
