@@ -337,7 +337,11 @@ refused heavy subagent at sonnet or haiku.
 **Caller identity.** The shared bearer cannot tell a lane from a coordinator.
 `ACP_CALLERS` (signed; `scripts/policy-admin.py caller`) issues each lane and
 coordinator its own token, scoped to repositories; ACP stores only the token's
-SHA-256. The admin credential identifies the owner. Until a coordinator has its
+SHA-256. A scoped token acts only on its repositories: authorize (every action
+class except local inspection), `/internal/report` and
+`/internal/integrity/snapshot` refuse any other repository with
+`CALLER_NOT_PERMITTED` before reading or changing containment state. The admin
+credential identifies the owner. Until a coordinator has its
 own credential, the shared bearer is treated as a lane: production merges,
 pushes to production branches and manual CI need an owner grant.
 

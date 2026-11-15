@@ -186,6 +186,38 @@ def test_locked_does_not_authorize_recovery_by_itself():
     assert direct["decision"] == "LOCKED", direct
 
 
+def test_a_scoped_caller_cannot_contain_or_act_on_another_repository():
+    fresh()
+    elsewhere = {"kind": "lane", "id": "lane-b", "repos": [f"{OWNER}/Other"]}
+    covering = {"kind": "lane", "id": "lane-a", "repos": [f"{OWNER}/{REPO}"]}
+    with contained_env():
+        for body in (signal("policy_modification_attempted"),
+                     request("production.deploy"),
+                     request("git.protected_ref.update",
+                             context={"ref": MAIN, "old_sha": BAD, "new_sha": GOOD})):
+            out = gateway.authorize(body, verifier=verifier(), caller=elsewhere, now=1000.0)
+            assert out["decision"] == "DENY" and out["reason"] == "CALLER_NOT_PERMITTED", out
+        assert state_of().get("authorization_state", "NORMAL") == "NORMAL"
+        report = {"event_type": "LOCAL_POLICY_MODIFIED",
+                  "resource": {"owner": OWNER, "name": REPO}, "principal": {"actor_id": "github-user:1"}}
+        snapshot = {"checkpoint": "SESSION_START", "resource": {"owner": OWNER, "name": REPO},
+                    "artifacts": [], "diff": []}
+        for call in (lambda: gateway.report_event(report, now=1001.0, caller=elsewhere),
+                     lambda: gateway.integrity_snapshot(snapshot, verifier=verifier(), now=1001.0,
+                                                        caller=elsewhere)):
+            try:
+                call()
+                raise AssertionError("a scoped caller reported on a repository outside its scope")
+            except gateway.TargetError as exc:
+                assert exc.status == 403 and exc.code == "CALLER_NOT_PERMITTED", exc
+        assert state_of().get("authorization_state", "NORMAL") == "NORMAL"
+        read = gateway.authorize(request("repository.read"), verifier=verifier(), caller=elsewhere)
+        assert read["decision"] == "ALLOW", "local inspection is not a scoped act"
+        mine = gateway.authorize(signal("policy_modification_attempted"), verifier=verifier(),
+                                 caller=covering, now=1002.0)
+    assert mine["decision"] == "QUARANTINE", "a caller covering the repository still reports into it"
+
+
 def test_repeated_locked_requests_only_accumulate_audit():
     fresh()
     with contained_env():

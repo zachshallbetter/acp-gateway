@@ -254,6 +254,21 @@ def caller_covers(caller, owner, name):
     return False
 
 
+def require_caller_covers(caller, owner, name):
+    """A credential issued for some repositories reports only on those.
+
+    Reports and snapshots can quarantine and lock a resource, so a scoped
+    caller naming a repository outside its scope -- or none at all -- is
+    refused before any state is read or written.
+    """
+    if caller is None or caller.get("repos") is None:
+        return
+    if not (owner and name) or not caller_covers(caller, owner, name):
+        raise TargetError(403, "CALLER_NOT_PERMITTED",
+                          "This caller's credential is not issued for this repository.",
+                          remedy="Report only on the repositories your credential names.")
+
+
 def admin_authorized(handler):
     """A second, separate credential for changing ACP itself.
 
@@ -2647,6 +2662,20 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                       "This repository is outside the owners this ACP deployment governs.",
                       policy_effect="NOT_GOVERNED")
 
+    # A credential issued for some repositories acts only on those: before any
+    # containment state is read, counted or escalated, and for every action
+    # class that can change it. Local inspection changes nothing and is exempt.
+    if action not in LOCAL_ACTIONS:
+        scoped = policy.get("repository") or {}
+        scoped_owner = scoped.get("owner") or claim.get("owner") or claim_owner
+        scoped_name = scoped.get("name") or claim.get("name")
+        if caller.get("repos") is not None and \
+                not (scoped_owner and scoped_name and caller_covers(caller, scoped_owner, scoped_name)):
+            if action in metering.REPO_ACTIONS:
+                trace["class"] = "metered"
+            return finish("DENY", "CALLER_NOT_PERMITTED",
+                          "This caller's credential is not issued for this repository.")
+
     trace["keys"] = security_keys(claim, parsed["actor_id"],
                                   include_actor=record is not None or scope is None
                                   or (claim_owner and claim_owner in scope))
@@ -2873,9 +2902,6 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
             return finish("DENY", "METERED_ACTION_NOT_ENABLED",
                           f"The policy governing this repository does not list {action}, so ACP does not "
                           "meter it here and cannot authorize it.")
-        if not caller_covers(caller, policy["repository"]["owner"], policy["repository"]["name"]):
-            return finish("DENY", "CALLER_NOT_PERMITTED",
-                          "This caller's credential is not issued for this repository.")
 
     signals = sorted(set(context.get("signals") or []) & MATERIAL_SIGNALS)
     canonical = policy["repository"].get("canonical_remote")
@@ -3396,7 +3422,7 @@ REPORT_EVIDENCE_FIELDS = {"path", "previous_sha256", "current_sha256", "expected
                           "command_redacted", "observed_agent_id", "count", "action", "checkpoint"}
 
 
-def report_event(body, now=None):
+def report_event(body, now=None, caller=None):
     """Accept telemetry from a client. It records; it never authorizes.
 
     The one state change it can cause is a *reduction* in authority: reported
@@ -3431,6 +3457,7 @@ def report_event(body, now=None):
     owner, name = resource.get("owner"), resource.get("name")
     if not (owner and name) and resource.get("resource_id") and "/" in resource["resource_id"]:
         owner, _, name = resource["resource_id"].partition("/")
+    require_caller_covers(caller, owner, name)
     # Correlation and escalation follow the *resource*. An actor already caught by
     # one incident must not drag an unrelated repository into it.
     resource_keys = security_keys({"owner": owner, "name": name}, None)
@@ -4389,7 +4416,7 @@ def observation_transitions(previous, findings):
     return transitions
 
 
-def integrity_snapshot(body, verifier=None, now=None):
+def integrity_snapshot(body, verifier=None, now=None, caller=None):
     """Receive one integrity snapshot: compare, record, escalate, answer.
 
     It authorizes nothing. Its only power over authorization is downward: a
@@ -4406,6 +4433,7 @@ def integrity_snapshot(body, verifier=None, now=None):
         raise TargetError(400, "INVALID_REQUEST", "`resource` must name the owner and repository.",
                           remedy="ACP identifies the governed resource; the workspace does not have to "
                                  "carry any file for that to work.")
+    require_caller_covers(caller, owner, name)
     resource_id = f"{owner}/{name}".lower()
     resource_keys = security_keys({"owner": owner, "name": name}, None)
     keys = security_keys({"owner": owner, "name": name}, principal.get("actor_id"))
@@ -5161,11 +5189,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.reply(200, refresh_posture())
                 return
             if route == "/internal/report":
-                self.reply(200, report_event(self.json_body(event=True)))
+                self.reply(200, report_event(self.json_body(event=True), caller=caller_for(self)))
                 return
             if route == "/internal/integrity/snapshot":
                 self.reply(200, integrity_snapshot(self.json_body(snapshot=True),
-                                                   verifier=github_evidence))
+                                                   verifier=github_evidence, caller=caller_for(self)))
                 return
             if route == "/internal/verify-capability":
                 body = self.json_body()
