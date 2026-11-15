@@ -289,7 +289,7 @@ policy that binds it.
 
 ### Metered actions: what costs money or reaches production
 
-Five actions are decided against budgets instead of the owner's approval:
+Six actions are decided against budgets and contracts instead of the owner's approval:
 
 | Action | Covers | Who may ask |
 |---|---|---|
@@ -298,6 +298,7 @@ Five actions are decided against budgets instead of the owner's approval:
 | `manual_ci` | `workflow_dispatch` or a rerun | coordinator or owner |
 | `local_heavy_build` | a heavy build outside the `reg` build register | any caller, with a reason |
 | `heavy_subagent` | an opus or fable subagent | any caller, with a reason; 6 at once per session |
+| `build_admission` | a build taking a `reg` slot: attributed, not a duplicate, within its project's share | the register, on the requesting session's behalf |
 
 A repository opts in by listing the first three in its policy's
 `protected_actions` and naming its providers in `metered`

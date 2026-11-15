@@ -1,7 +1,8 @@
 # Metered actions: client contract and rollout
 
 ACP decides five actions that cost money or reach production: `hosted_build`, `production_merge`,
-`manual_ci`, `local_heavy_build` and `heavy_subagent`. The README's Policy authority section says how
+`manual_ci`, `local_heavy_build` and `heavy_subagent`, and a sixth that shares the machine:
+`build_admission`, asked by the `reg` build register before a build takes a slot. The README's Policy authority section says how
 ACP decides them. This document covers what a client sends, what it does with the answer, and how the
 feature reaches production.
 
@@ -31,6 +32,28 @@ feature reaches production.
 | `manual_ci` | `trigger` (`workflow_dispatch`, `rerun`), `workflow` (`.github/workflows/<file>.yml`), `ref`, `new_sha`, `reason`; `run_id` for a rerun | |
 | `local_heavy_build` | `tool_use_id`, `machine_id`, `reason` | `repository_claim` |
 | `heavy_subagent` | `tool_use_id`, `model` (opus or fable), `reason`, and top-level `session_id` | `repository_claim` |
+| `build_admission` | `tool_use_id` (the register's ticket), `machine_id`, `reason`, `admission` (below) | `repository_claim`, top-level `session_id` |
+
+`admission` is the register's facts at the moment of admission: `{contract, project, repo, label,
+command, cache (shared, private, not_cargo), attribution {session_id, host_session_id,
+message_address, subagent, interactive}, running [{project, command, session_id, receipt_id, since}],
+queued_projects [...]}`. ACP evaluates four properties on them, each SATISFIED, VIOLATED or GRAY:
+`attributable` (a session, or the owner at a terminal), `not_duplicate` (no identical build running for
+the project), `within_project_share` (the project holds fewer slots than the contract allows while
+other projects wait) and `shared_cache`. The contract maps them to a decision:
+
+| Property state | Default contract | Decision |
+|---|---|---|
+| `not_duplicate` VIOLATED | `duplicates: refuse` | `DENY BUILD_DUPLICATE`, naming the running build and how to combine steps |
+| `attributable` GRAY | `unattributed: refuse_unless_interactive` | `DENY BUILD_UNATTRIBUTED` |
+| `shared_cache` VIOLATED | `private_cache: note` | recorded; `refuse` makes it `DENY BUILD_PRIVATE_CACHE` |
+| `within_project_share` VIOLATED | `project_slots_while_others_wait: 1` | `REVERIFY_REQUIRED PROJECT_SHARE_EXCEEDED`: the register keeps it queued and asks again |
+| otherwise | | `ALLOW BUILD_ADMITTED` |
+
+The contract is the signed budget policy's optional `build_admission` block (`version`,
+`project_slots_while_others_wait`, `duplicates`, `unattributed`, `private_cache`); a policy without
+one uses the defaults above. Every answer carries `admission_state` and `admission_contract`, and
+the audit event records the project, command and attribution.
 
 `ref` is a full `refs/heads/...` name and `new_sha` a full commit id. `reason` is one sentence, 8 to
 512 characters. The client does not decide which providers build: ACP reads that from the providers
@@ -59,6 +82,7 @@ The standard decision envelope, plus:
 | No answer (unreachable, timeout, non-JSON, 5xx) for `hosted_build`, `production_merge`, `manual_ci` | Deny: no paid build without a decision. Say that ACP was unreachable and that the work can be committed locally and pushed later. |
 | No answer for `local_heavy_build` | Fall back to the local rule: run it through `reg build`. |
 | No answer for `heavy_subagent` | Fall back to the local rule: light models only. |
+| No answer for `build_admission`, or a reason outside the admission vocabulary | The register applies the same default contract itself and says so in its receipt (`decided_by: register`). |
 
 The hook never retries a refusal unchanged. A retry with the same commit after a grant, a budget
 reset or a fixed workflow is the normal path, and is safe: allowed actions are recorded once.

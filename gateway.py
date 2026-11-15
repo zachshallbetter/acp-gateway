@@ -1197,13 +1197,15 @@ def budget_policy():
 def load_budget(raw):
     """Verify one budget document's text: {"limits", "error", "budget_policy_id", "version", "digest"}."""
     value = {"limits": None, "error": "ACP_BUDGET_POLICY is not set", "budget_policy_id": None,
-             "version": None, "digest": None}
+             "version": None, "digest": None, "admission": dict(metering.ADMISSION_CONTRACT)}
     if raw:
         try:
             doc = json.loads(raw)
             if not isinstance(doc, dict) or \
-                    set(doc) - {"budget_policy_id", "version", "limits", "signature", "signing_key_id"}:
-                raise ValueError("ACP_BUDGET_POLICY must be {budget_policy_id, version, limits, signature}")
+                    set(doc) - {"budget_policy_id", "version", "limits", "build_admission", "signature",
+                                "signing_key_id"}:
+                raise ValueError("ACP_BUDGET_POLICY must be {budget_policy_id, version, limits, build_admission?, "
+                                 "signature}")
             if not POLICY_ID_RE.match(str(doc.get("budget_policy_id") or "")):
                 raise ValueError("budget_policy_id must be a plain identifier")
             version = doc.get("version")
@@ -1214,7 +1216,8 @@ def load_budget(raw):
             if not expected or not hmac.compare_digest(expected, str(doc.get("signature") or "")):
                 raise ValueError("ACP_BUDGET_POLICY signature does not verify")
             value = {"limits": metering.validated_limits(doc.get("limits") or {}), "error": None,
-                     "budget_policy_id": doc["budget_policy_id"], "version": version, "digest": digest}
+                     "budget_policy_id": doc["budget_policy_id"], "version": version, "digest": digest,
+                     "admission": metering.validated_admission_contract(doc.get("build_admission"))}
         except (ValueError, TypeError) as exc:
             value = {**value, "error": str(exc)[:200]}
     return value
@@ -2455,7 +2458,8 @@ CONTEXT_FIELDS = {"ref", "old_sha", "new_sha", "force", "non_fast_forward",
                   "target_database", "work_item", "environment"}
 # The only fields that are not strings. Everywhere else a list or a boolean is a
 # shape error, caught here rather than as a type error deep in the evaluation.
-NON_STRING_FIELDS = {"context.force", "context.non_fast_forward", "context.signals"} | NON_STRING_ENVELOPE
+NON_STRING_FIELDS = {"context.force", "context.non_fast_forward", "context.signals",
+                     "context.admission"} | NON_STRING_ENVELOPE
 CONTEXT_FIELDS = CONTEXT_FIELDS | metering.CONTEXT_FIELDS
 FIELD_LIMITS.update(metering.CONTEXT_LIMITS)
 
@@ -2824,6 +2828,10 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                                            ("source_database", "target_database", "work_item",
                                             "environment", "ref", "new_sha")}}
                       if action == "database.migrate" else {}),
+                   **({"admission": {name: (context.get("admission") or {}).get(name)
+                                     for name in ("project", "label", "command", "cache", "attribution")},
+                       "admission_state": extra.get("admission_state")}
+                      if action == "build_admission" else {}),
                    recovery_authorization_id=context.get("recovery_authorization_id"),
                    verification_state=trace["trust"], verification=trace["verification"],
                    provider_verification_state=trace["verification"].get("available"),
@@ -2870,8 +2878,10 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
     if action in metering.LOCAL_ACTIONS:
         trace["class"] = "metered"
         trace["trust"] = "SELF_REPORTED" if claim.get("owner") and claim.get("name") else "UNVERIFIED"
-        return metered_finish(metering.evaluate_local(action, claim, context, caller, budget_policy()["limits"],
-                                                      ledger, now, trace["request_id"], parsed["session_id"]))
+        budget = budget_policy()
+        return metered_finish(metering.evaluate_local(action, claim, context, caller, budget["limits"],
+                                                      ledger, now, trace["request_id"], parsed["session_id"],
+                                                      admission_contract=budget.get("admission")))
 
     # 2. Outside this deployment's scope ACP has no standing to refuse anything.
     scope = policy_scope()

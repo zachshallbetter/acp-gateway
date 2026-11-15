@@ -450,6 +450,80 @@ def test_local_heavy_build_is_recorded_and_never_blocked_without_a_way_forward()
         assert refused["decision"] == "REVERIFY_REQUIRED" and "reg build" in refused["remedy"]
 
 
+# ---- build admission (the machine register asks before a build takes a slot) -------------
+def admission(command="./scripts/conformance.sh", project="peel", running=(), queued=(), session="sess-a",
+              interactive=False, cache="shared", ticket="t-1"):
+    facts = {"contract": "reg-admission/1", "project": project, "repo": f"/r/{project}", "label": "unit",
+             "command": command, "cache": cache,
+             "attribution": {"session_id": session, "message_address": "uds:/tmp/cc-socks/1.sock",
+                             "subagent": False, "interactive": interactive},
+             "running": list(running), "queued_projects": list(queued)}
+    if session is None:
+        facts["attribution"].pop("session_id")
+    return {"agent_id": "reg", "session_id": session, "action": "build_admission",
+            "context": {"reason": f"reg build unit: {command}", "tool_use_id": ticket, "machine_id": "mac-1",
+                        "admission": facts}}
+
+
+def test_build_admission_decides_on_the_registers_facts():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        out = decide(admission(), ledger)
+        assert out["decision"] == "ALLOW" and out["reason"] == "BUILD_ADMITTED", out
+        assert out["admission_state"] == {"attributable": "SATISFIED", "not_duplicate": "SATISFIED",
+                                          "within_project_share": "SATISFIED", "shared_cache": "SATISFIED"}
+        running = [{"project": "peel", "command": "./scripts/conformance.sh", "receipt_id": "rcpt-1"}]
+        dup = decide(admission(running=running, ticket="t-2"), ledger)
+        assert dup["decision"] == "DENY" and dup["reason"] == "BUILD_DUPLICATE", dup
+        assert "rcpt-1" in dup["detail"] and "sh -c" in dup["remedy"]
+        share = decide(admission(command="cargo clippy", running=running, queued=["latchkey"], ticket="t-3"), ledger)
+        assert share["decision"] == "REVERIFY_REQUIRED" and share["reason"] == "PROJECT_SHARE_EXCEEDED", share
+        alone = decide(admission(command="cargo clippy", running=running, queued=["peel"], ticket="t-4"), ledger)
+        assert alone["decision"] == "ALLOW", "a second slot is fine when no other project waits"
+        nobody = decide(admission(session=None, ticket="t-5"), ledger)
+        assert nobody["decision"] == "DENY" and nobody["reason"] == "BUILD_UNATTRIBUTED", nobody
+        owner = decide(admission(session=None, interactive=True, ticket="t-6"), ledger)
+        assert owner["decision"] == "ALLOW", "the owner at a terminal is attributed by being there"
+        private = decide(admission(cache="private", ticket="t-7"), ledger)
+        assert private["decision"] == "ALLOW" and private["admission_state"]["shared_cache"] == "VIOLATED"
+        assert ledger.ledger_count(metering.budget_day(NOW), ["build_admission"]) == 4
+
+
+def test_the_signed_budget_policy_sets_the_admission_contract():
+    strict = {"version": 2, "private_cache": "refuse", "project_slots_while_others_wait": 2}
+    with env(budget_doc=False, ACP_BUDGET_POLICY=json.dumps(signed(
+            {"budget_policy_id": "acp-budgets", "version": 1, "limits": {}, "build_admission": strict}))):
+        fresh()
+        ledger = metering.MemoryLedger()
+        private = decide(admission(cache="private"), ledger)
+        assert private["decision"] == "DENY" and private["reason"] == "BUILD_PRIVATE_CACHE", private
+        assert private["admission_contract"] == 2
+        running = [{"project": "peel", "command": "a"}]
+        assert decide(admission(command="b", running=running, queued=["x"], ticket="t-2"), ledger)["decision"] == "ALLOW"
+    for bad in ({"duplicates": "maybe"}, {"project_slots_while_others_wait": 0}, {"extra": 1}):
+        try:
+            metering.validated_admission_contract(bad)
+            raise AssertionError(f"accepted {bad}")
+        except ValueError:
+            pass
+
+
+def test_build_admission_facts_are_validated():
+    with env():
+        fresh()
+        for broken in ({"project": "p"}, {"project": "p", "command": "x", "running": "many"},
+                       {"project": "p", "command": "x", "attribution": {"session_id": "s", "token": "t"}},
+                       {"project": "p", "command": "x", "cache": "elsewhere"}):
+            body = admission()
+            body["context"]["admission"] = broken
+            try:
+                decide(body, metering.MemoryLedger())
+                raise AssertionError(f"accepted {broken}")
+            except gateway.TargetError as exc:
+                assert exc.status == 400, exc
+
+
 # ---- caller identity over HTTP --------------------------------------------
 def callers_doc(token, kind="coordinator", repos=None):
     return json.dumps(signed({"callers_id": "acp-callers", "version": 1, "callers": [

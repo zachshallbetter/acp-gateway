@@ -18,9 +18,10 @@ import json
 import re
 from datetime import datetime, timezone
 
-METERED_ACTIONS = ("hosted_build", "production_merge", "manual_ci", "local_heavy_build", "heavy_subagent")
+METERED_ACTIONS = ("hosted_build", "production_merge", "manual_ci", "local_heavy_build", "heavy_subagent",
+                   "build_admission")
 REPO_ACTIONS = frozenset({"hosted_build", "production_merge", "manual_ci"})
-LOCAL_ACTIONS = frozenset({"local_heavy_build", "heavy_subagent"})
+LOCAL_ACTIONS = frozenset({"local_heavy_build", "heavy_subagent", "build_admission"})
 HOSTED_PROVIDERS = ("vercel", "railway", "github_actions")
 TRIGGERS = {"hosted_build": frozenset({"push", "cli_deploy", "railway_up"}),
             "production_merge": frozenset({"merge", "promote"}),
@@ -50,10 +51,25 @@ DEFAULT_LIMITS = {
     "manual_ci": {"per_day_total": 10},
     "heavy_subagent": {"concurrent_per_session": 6},
     "local_heavy_build": {},
+    "build_admission": {},
 }
 
+# The machine register asks build_admission before a build takes a slot. The signed budget policy may
+# carry a build_admission block; these are its defaults, so a policy without one still decides.
+ADMISSION_CONTRACT = {"version": 1,
+                      "project_slots_while_others_wait": 1,   # slots one project may hold while others queue
+                      "duplicates": "refuse",                 # a build identical to one running: refuse | note
+                      "unattributed": "refuse_unless_interactive",  # no session recorded: refuse... | note
+                      "private_cache": "note"}                # a cargo build off the shared cache: refuse | note
+ADMISSION_CHOICES = {"duplicates": ("refuse", "note"), "unattributed": ("refuse_unless_interactive", "note"),
+                     "private_cache": ("refuse", "note")}
+ADMISSION_FIELDS = frozenset({"contract", "project", "repo", "label", "command", "cache", "attribution",
+                              "running", "queued_projects"})
+ATTRIBUTION_FIELDS = frozenset({"session_id", "host_session_id", "message_address", "subagent", "interactive"})
+RUNNING_FIELDS = frozenset({"project", "command", "session_id", "receipt_id", "since"})
+
 CONTEXT_FIELDS = frozenset({"trigger", "provider", "workflow", "run_id", "tool_use_id", "model",
-                            "reason", "machine_id"})
+                            "reason", "machine_id", "admission"})
 CONTEXT_LIMITS = {"context.trigger": 32, "context.provider": 32, "context.workflow": 256,
                   "context.run_id": 32, "context.tool_use_id": 128, "context.model": 64,
                   "context.reason": 512, "context.machine_id": 128}
@@ -109,6 +125,12 @@ def validate_context(action, context, session_id):
             if not context.get(name):
                 raise MeteringError(f"local_heavy_build needs context.{name}.", f"context.{name}",
                                     "The hook supplies tool_use_id from the tool call and machine_id from the host.")
+    elif action == "build_admission":
+        for name in ("tool_use_id", "machine_id"):
+            if not context.get(name):
+                raise MeteringError(f"build_admission needs context.{name}.", f"context.{name}",
+                                    "The register supplies its ticket as tool_use_id and machine_id from the host.")
+        validated_admission(context.get("admission"))
     elif action == "heavy_subagent":
         if not context.get("tool_use_id"):
             raise MeteringError("heavy_subagent needs context.tool_use_id.", "context.tool_use_id",
@@ -169,6 +191,116 @@ def validated_metered(raw, policy_id):
         clean["railway"] = {"project_id": block["project_id"], "service_ids": list(block.get("service_ids", []))}
     out["providers"] = clean
     return out
+
+
+def _short_text(value, field, limit):
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > limit or any(ord(c) < 32 for c in value):
+        raise MeteringError(f"{field} must be text of at most {limit} characters.", field)
+    return value
+
+
+def validated_admission(raw):
+    """The register's facts about one build admission, checked field by field (context.admission)."""
+    field = "context.admission"
+    if not isinstance(raw, dict) or set(raw) - ADMISSION_FIELDS:
+        raise MeteringError(f"{field} must be an object of {', '.join(sorted(ADMISSION_FIELDS))}.", field,
+                            "The register builds it; update the harness if this persists.")
+    for name, limit in (("contract", 64), ("project", 128), ("repo", 512), ("label", 128), ("command", 400)):
+        _short_text(raw.get(name), f"{field}.{name}", limit)
+    if not raw.get("project") or not raw.get("command"):
+        raise MeteringError(f"{field} needs project and command.", field)
+    if raw.get("cache") not in (None, "shared", "private", "not_cargo"):
+        raise MeteringError(f"{field}.cache must be shared, private or not_cargo.", f"{field}.cache")
+    attribution = raw.get("attribution") or {}
+    if not isinstance(attribution, dict) or set(attribution) - ATTRIBUTION_FIELDS:
+        raise MeteringError(f"{field}.attribution may carry only {', '.join(sorted(ATTRIBUTION_FIELDS))}.",
+                            f"{field}.attribution")
+    for name in ("session_id", "host_session_id", "message_address"):
+        _short_text(attribution.get(name), f"{field}.attribution.{name}", 256)
+    for name in ("subagent", "interactive"):
+        if attribution.get(name) is not None and not isinstance(attribution[name], bool):
+            raise MeteringError(f"{field}.attribution.{name} must be true or false.", f"{field}.attribution.{name}")
+    running = raw.get("running") or []
+    if not isinstance(running, list) or len(running) > 32 or \
+            any(not isinstance(r, dict) or set(r) - RUNNING_FIELDS for r in running):
+        raise MeteringError(f"{field}.running must list at most 32 builds of "
+                            f"{', '.join(sorted(RUNNING_FIELDS))}.", f"{field}.running")
+    for r in running:
+        for name, limit in (("project", 128), ("command", 400), ("session_id", 256), ("receipt_id", 64)):
+            _short_text(r.get(name), f"{field}.running.{name}", limit)
+    queued = raw.get("queued_projects") or []
+    if not isinstance(queued, list) or len(queued) > 64 or not all(isinstance(q, str) and len(q) <= 128 for q in queued):
+        raise MeteringError(f"{field}.queued_projects must list at most 64 project names.", f"{field}.queued_projects")
+    return raw
+
+
+def validated_admission_contract(raw):
+    """The signed budget policy's build_admission block over ADMISSION_CONTRACT, or a precise error."""
+    if raw is None:
+        return dict(ADMISSION_CONTRACT)
+    if not isinstance(raw, dict) or set(raw) - set(ADMISSION_CONTRACT):
+        raise ValueError(f"build_admission may carry only {', '.join(sorted(ADMISSION_CONTRACT))}")
+    merged = {**ADMISSION_CONTRACT, **raw}
+    if not isinstance(merged["version"], int) or isinstance(merged["version"], bool) or merged["version"] < 1:
+        raise ValueError("build_admission.version must be a positive integer")
+    slots = merged["project_slots_while_others_wait"]
+    if not isinstance(slots, int) or isinstance(slots, bool) or not 1 <= slots <= 16:
+        raise ValueError("build_admission.project_slots_while_others_wait must be 1..16")
+    for name, choices in ADMISSION_CHOICES.items():
+        if merged[name] not in choices:
+            raise ValueError(f"build_admission.{name} must be one of {', '.join(choices)}")
+    return merged
+
+
+def admission_state(admission):
+    """Each required property of taking a slot: SATISFIED, VIOLATED or GRAY, on the register's facts."""
+    attribution = admission.get("attribution") or {}
+    running = admission.get("running") or []
+    mine = [r for r in running if r.get("project") == admission["project"]]
+    others_waiting = [q for q in admission.get("queued_projects") or [] if q != admission["project"]]
+    cache = admission.get("cache")
+    return {"attributable": "SATISFIED" if attribution.get("session_id") or attribution.get("interactive") else "GRAY",
+            "not_duplicate": "VIOLATED" if any(r.get("command") == admission["command"] for r in mine) else "SATISFIED",
+            "within_project_share": None,   # filled against the contract's slot count
+            "shared_cache": {"shared": "SATISFIED", "private": "VIOLATED"}.get(cache, "GRAY"),
+            "_mine": len(mine), "_others_waiting": bool(others_waiting)}
+
+
+def decide_admission(admission, contract):
+    """Γ for a build admission: the contract maps the state vector to a decision. Returns an Outcome."""
+    state = admission_state(admission)
+    mine, waiting = state.pop("_mine"), state.pop("_others_waiting")
+    state["within_project_share"] = "VIOLATED" if waiting and mine >= contract["project_slots_while_others_wait"] \
+        else "SATISFIED"
+    extra = {"admission_state": state, "admission_contract": contract["version"]}
+    if state["not_duplicate"] == "VIOLATED" and contract["duplicates"] == "refuse":
+        same = next(r for r in admission.get("running") or []
+                    if r.get("project") == admission["project"] and r.get("command") == admission["command"])
+        return Outcome("DENY", "BUILD_DUPLICATE",
+                       f"{admission['project']} is already running this exact build"
+                       + (f" (receipt {same['receipt_id']})" if same.get("receipt_id") else "") + ".",
+                       "Wait for it and use its result, or put the distinct steps in one build: "
+                       "reg build -- sh -c \"step1 && step2 && step3\".", **extra)
+    if state["attributable"] == "GRAY" and contract["unattributed"] == "refuse_unless_interactive":
+        return Outcome("DENY", "BUILD_UNATTRIBUTED",
+                       "No agent session was recorded for this build and it is not interactive, so nobody could "
+                       "be told about it.",
+                       "Run it from the agent session that needs it (the register reads CLAUDE_CODE_SESSION_ID), "
+                       "or set REG_SESSION_ID to the session it belongs to.", **extra)
+    if state["shared_cache"] == "VIOLATED" and contract["private_cache"] == "refuse":
+        return Outcome("DENY", "BUILD_PRIVATE_CACHE",
+                       "This cargo build sets its own CARGO_TARGET_DIR, so it compiles cold beside the shared cache.",
+                       "Drop CARGO_TARGET_DIR and let the register place the build on its shared target.", **extra)
+    if state["within_project_share"] == "VIOLATED":
+        return Outcome("REVERIFY_REQUIRED", "PROJECT_SHARE_EXCEEDED",
+                       f"{admission['project']} already holds {mine} slot(s) while other projects wait.",
+                       "The register keeps this build queued and asks again when a slot frees; combining this "
+                       "project's builds into one gets it through sooner.", **extra)
+    noted = [name for name, value in state.items() if value != "SATISFIED"]
+    return Outcome("ALLOW", "BUILD_ADMITTED",
+                   "Admitted" + (f"; recorded: {', '.join(noted)}." if noted else "."), **extra)
 
 
 def validated_limits(raw):
@@ -405,7 +537,8 @@ def _record(ledger, keys, action, grant, claim, context, caller, now, request_id
             "evidence_digest": evidence.get("digest"), "created_at": now})
 
 
-def evaluate_local(action, claim, context, caller, limits, ledger, now, request_id, session_id):
+def evaluate_local(action, claim, context, caller, limits, ledger, now, request_id, session_id,
+                   admission_contract=None):
     """local_heavy_build and heavy_subagent. Local work is never blocked outright: every refusal
     names a way to keep working."""
     if ledger is None:
@@ -419,6 +552,13 @@ def evaluate_local(action, claim, context, caller, limits, ledger, now, request_
                        "Run heavy builds through reg build and use light subagents until the owner sets "
                        "ACP_BUDGET_POLICY.")
     owner, name = claim.get("owner"), claim.get("name")
+    if action == "build_admission":
+        key = record_key(action, context["machine_id"], context["tool_use_id"])
+        outcome = decide_admission(context["admission"], admission_contract or dict(ADMISSION_CONTRACT))
+        if outcome.decision == "ALLOW" and not ledger.ledger_get(key):
+            _record(ledger, {"local": key}, action, None, {"owner": owner, "name": name}, context, caller,
+                    now, request_id, True, {})
+        return outcome
     if action == "local_heavy_build":
         key = record_key(action, context["machine_id"], session_id, context["tool_use_id"])
         if ledger.ledger_get(key):

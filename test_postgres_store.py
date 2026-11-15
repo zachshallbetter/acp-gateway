@@ -169,6 +169,17 @@ class PostgresStoreTests(unittest.TestCase):
             self.assertEqual(store.ledger_count(day, ["hosted_build"], owner="Synthetic", name="Metered"),
                              before + 1)
 
+    def test_an_admitted_build_is_recorded_in_the_ledger(self):
+        now = time.time()
+        key = uuid.uuid4().hex + uuid.uuid4().hex
+        row = {**self._ledger_row(key, None, now), "action": "build_admission", "provider": "local",
+               "ref": None, "resource_owner": None, "resource_name": None, "caller_kind": "coordinator",
+               "reason": "reg build peel: ./scripts/conformance.sh"}
+        with postgres_store.transaction() as store:
+            store.ledger_insert(row)
+        with postgres_store.transaction() as store:
+            self.assertEqual(store.ledger_get(key)["action"], "build_admission")
+
     def test_ledger_constraints_refuse_inconsistent_rows(self):
         now = time.time()
         for change in ({"reason_code": "NO_HOSTED_BUILD"}, {"sha": "not-a-sha"}, {"reason": "short"},
@@ -250,16 +261,16 @@ class PostgresStoreTests(unittest.TestCase):
     def test_runtime_accepts_only_additive_newer_migrations(self):
         with psycopg.connect(DSN) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
-                               "VALUES (6, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+                               "VALUES (7, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
         try:
             postgres_store.validate_schema()             # a newer, additive migration: still runs
             with psycopg.connect(DSN) as connection:
-                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 6")
+                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 7")
             with self.assertRaises(postgres_store.StorageError):
                 postgres_store.validate_schema()         # not additive: refuses
         finally:
             with psycopg.connect(DSN) as connection:
-                connection.execute("DELETE FROM schema_migrations WHERE version = 6")
+                connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         postgres_store.validate_schema()
 
     def test_applied_migration_records_whether_it_is_additive(self):
@@ -268,6 +279,7 @@ class PostgresStoreTests(unittest.TestCase):
                     connection.execute("SELECT version, additive FROM schema_migrations").fetchall()}
         self.assertTrue(rows[4])
         self.assertTrue(rows[5])
+        self.assertTrue(rows[6])
         self.assertFalse(rows[1])
 
     def test_signed_documents_are_versioned_and_read_from_the_database(self):
@@ -363,7 +375,7 @@ class PostgresStoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5])
+        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5, 6])
         postgres_store.validate_schema()
 
 
