@@ -114,6 +114,38 @@ class PostgresStoreTests(unittest.TestCase):
         with postgres_store.transaction() as store:
             self.assertTrue(store.capability_consumed(keys, jti, now))
 
+    def test_a_static_recovery_grant_is_consumed_per_resource(self):
+        jti = f"static:synthetic/static:{uuid.uuid4().hex}"
+        now = time.time()
+        with postgres_store.transaction() as store:
+            store.consume_capability(["resource:synthetic/static"], jti, now, now + 60)
+        with postgres_store.transaction() as store:
+            self.assertTrue(store.capability_consumed(["resource:synthetic/static"], jti, now))
+            self.assertTrue(store.capability_consumed(["resource:synthetic/static", "actor:someone-else"], jti, now))
+
+    def test_a_recovery_consumption_needs_and_records_an_expiry(self):
+        keys = ["resource:synthetic/recovery", "actor:synthetic-actor"]
+        now = time.time()
+        with self.assertRaises(postgres_store.StorageError):
+            with postgres_store.transaction() as store:
+                store.consume_capability(keys, f"no-expiry-{uuid.uuid4().hex}", now, None)
+        jti = f"with-expiry-{uuid.uuid4().hex}"
+        with postgres_store.transaction() as store:
+            store.consume_capability(keys, jti, now, int(now) + 300)
+        with postgres_store.transaction() as store:
+            self.assertTrue(store.capability_consumed(keys, jti, now))
+
+    def test_incident_actor_keys_come_from_the_incident_not_a_scan(self):
+        incident = f"inc-{uuid.uuid4().hex[:12]}"
+        actor = f"actor:synthetic-{uuid.uuid4().hex[:8]}"
+        now = time.time()
+        with postgres_store.transaction():
+            gateway.touch_incident(incident, now, status="OPEN")
+            gateway.write_security([actor], now, incident_id=incident)
+        with postgres_store.transaction() as store:
+            self.assertEqual(store.actor_keys_for_incidents({incident, None}), [actor])
+            self.assertEqual(store.actor_keys_for_incidents(set()), [])
+
     def _ledger_row(self, key, sha, now, request_id=None):
         return {"record_key": key, "request_id": request_id or uuid.uuid4().hex, "action": "hosted_build",
                 "provider": "vercel", "resource_owner": "synthetic", "resource_name": "metered",
@@ -230,8 +262,8 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertFalse(rows[1])
 
     def test_signed_documents_are_versioned_and_read_from_the_database(self):
-        def signed(caller_id):
-            doc = {"callers_id": "acp-callers", "version": 1, "callers": [
+        def signed(caller_id, version=1):
+            doc = {"callers_id": "acp-callers", "version": version, "callers": [
                 {"caller_id": caller_id, "kind": "lane", "repos": ["synthetic/*"], "token_sha256": "a" * 64}]}
             return {**doc, "signature": gateway.policy_signature(gateway.policy_digest(doc))}
 
@@ -264,16 +296,19 @@ class PostgresStoreTests(unittest.TestCase):
                 self.assertEqual([c["caller_id"] for c in gateway.callers_registry()["callers"]], ["lane-seed"])
             self.assertEqual(call("GET", "/internal/documents/callers")[1]["source"], "env:ACP_CALLERS")
             status, stored = call("POST", "/internal/documents",
-                                  {"name": "callers", "expected_version": 0, "document": signed("lane-db")})
+                                  {"name": "callers", "expected_version": 0, "document": signed("lane-db", 2)})
             self.assertEqual((status, stored["version"], stored["source"]), (200, 1, "db:callers@v1"))
             with postgres_store.transaction():
                 self.assertEqual([c["caller_id"] for c in gateway.callers_registry()["callers"]], ["lane-db"])
             status, view = call("GET", "/internal/documents/callers")
             self.assertEqual((view["version"], view["document"]["callers"][0]["caller_id"]), (1, "lane-db"))
             status, stale = call("POST", "/internal/documents",
-                                 {"name": "callers", "expected_version": 0, "document": signed("lane-late")})
+                                 {"name": "callers", "expected_version": 0, "document": signed("lane-late", 3)})
             self.assertEqual((status, stale["error"]), (409, "STALE_DOCUMENT_VERSION"))
-            forged = {**signed("lane-forged"), "signature": "0" * 64}
+            status, rollback = call("POST", "/internal/documents",
+                                    {"name": "callers", "expected_version": 1, "document": signed("lane-seed")})
+            self.assertEqual((status, rollback["error"]), (409, "DOCUMENT_ROLLBACK"))
+            forged = {**signed("lane-forged", 3), "signature": "0" * 64}
             status, invalid = call("POST", "/internal/documents",
                                    {"name": "callers", "expected_version": 1, "document": forged})
             self.assertEqual((status, invalid["error"]), (422, "DOCUMENT_INVALID"))
