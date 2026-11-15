@@ -196,12 +196,17 @@ def railway_deploy(checkout: Path, new_sha: str, timeout: float) -> dict:
 
 
 def verify(hosts: list[str]) -> None:
-    failures = []
+    failures, state_ids = [], {}
     for base in hosts:
         for path, expect in (("/health", "ok"), ("/ready", "ready")):
             status, body = acp_ops.get_json(base + path)
             if status != 200 or body.get("status") != expect:
                 failures.append(f"{base}{path} answered {status} {body.get('status')}")
+            elif path == "/ready":
+                state_ids[base] = body.get("state_authority_id")
+    if len(set(state_ids.values())) > 1:
+        failures.append("hosts report different state_authority_id values: "
+                        + ", ".join(f"{base}={value}" for base, value in state_ids.items()))
     if failures:
         raise Stop("the release is deployed but not healthy: " + "; ".join(failures))
     report("verified", hosts=hosts)

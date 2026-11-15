@@ -414,5 +414,16 @@ class VerifyTests(unittest.TestCase):
                 release.verify(["https://a"])
 
 
+    def test_hosts_reporting_different_state_ids_fail_verification(self):
+        answers = {"https://a/health": (200, {"status": "ok"}), "https://b/health": (200, {"status": "ok"}),
+                   "https://a/ready": (200, {"status": "ready", "state_authority_id": "acp-one"}),
+                   "https://b/ready": (200, {"status": "ready"})}
+        with patch.object(acp_ops, "get_json", side_effect=lambda url: answers[url]):
+            with self.assertRaisesRegex(Stop, "different state_authority_id"):
+                release.verify(["https://a", "https://b"])
+        answers["https://b/ready"] = (200, {"status": "ready", "state_authority_id": "acp-one"})
+        with patch.object(acp_ops, "get_json", side_effect=lambda url: answers[url]):
+            release.verify(["https://a", "https://b"])
+
 if __name__ == "__main__":
     unittest.main()

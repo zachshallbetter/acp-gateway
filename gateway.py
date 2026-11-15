@@ -5310,6 +5310,24 @@ def ready_policy_ttl():
         return 10
 
 
+SHARED_STATE_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
+
+
+def shared_state_id():
+    """The ACP_SHARED_STATE_ID every instance on one database reports from /ready.
+
+    Clients with a multi-endpoint set route only to hosts reporting the id they
+    expect. Unset is None; a malformed value is a storage error so /ready fails
+    rather than reporting an identity nobody can match.
+    """
+    value = os.getenv("ACP_SHARED_STATE_ID", "").strip()
+    if not value:
+        return None
+    if not SHARED_STATE_ID.fullmatch(value):
+        raise postgres_store.StorageError("ACP_SHARED_STATE_ID is malformed")
+    return value
+
+
 def ready_policy_error():
     """The strict policy check /ready runs, memoized for a short TTL: the route is
     anonymous, and re-parsing and re-verifying the whole signed policy per request
@@ -5362,8 +5380,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         store.audit_head()
                 elif security_degraded():
                     raise postgres_store.StorageError("security state is degraded")
+                state_id = shared_state_id()
                 self.reply(200, {"status": "ready", "storage": "postgres"
-                                 if postgres_store.enabled() else "file"})
+                                 if postgres_store.enabled() else "file",
+                                 **({"state_authority_id": state_id} if state_id else {})})
             except postgres_store.StorageError as exc:
                 logging.getLogger("acp_gateway").warning(
                     "ACP readiness check failed: %s", exc)

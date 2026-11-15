@@ -1295,6 +1295,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_NOTIFY_COALESCE_SECONDS` | no | At most one webhook delivery per event, resource and incident per window; suppressed repeats are counted in the next delivery's `suppressed_duplicates`. Default `60`; `0` disables. |
 | `ACP_NOTICE_LOOKUP_EVENT_SECONDS` | no | The unauthenticated `/notice` lookup audits one `NOTICE_LOOKUP` per governed resource per window per process (later lookups counted in `suppressed_lookups`). Default `300`; `0` audits every lookup. |
 | `ACP_READY_POLICY_TTL_SECONDS` | no | How long `/ready` reuses its strict policy check when `ACP_REQUIRE_PRODUCTION_CONTROLS` is on. Default `10`; `0` checks every request. |
+| `ACP_SHARED_STATE_ID` | for failover | The id `/ready` reports as `state_authority_id`. Set the same value on every host sharing one database; clients with a multi-endpoint set route only to hosts reporting the id they expect, and `scripts/release.py` refuses a release whose hosts disagree. Lowercase `[a-z0-9._:-]`, up to 128 characters; a malformed value makes `/ready` answer 503. |
 | `ACP_HTTP_TIMEOUT_SECONDS` | no | Socket timeout for reading a request's line, headers and body; a stalled client is disconnected. Default `15`, clamped to 1–120. |
 | `ACP_AUDIT_HASH_CHAIN` | no | `1` to hash-chain audit events. |
 | `ACP_STORE_FULL_REQUEST_TEXT` | no | `1` to retain the full request text. Off by default; only the bounded summary and its digest are kept. |
@@ -1498,7 +1499,7 @@ latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work
 5. It waits for Vercel's build of that SHA to be READY and the alias to point at it.
 6. It deploys `git archive` of the same SHA to Railway, so nothing outside the commit is
    uploaded, and waits for SUCCESS.
-7. It checks `/health` and `/ready` on both hosts.
+7. It checks `/health` and `/ready` on both hosts, and that both report the same `state_authority_id`.
 
 A failure stops the release where it is and says what state each host is in. A failed
 Vercel build leaves the alias on the previous deployment and Railway untouched; fix forward

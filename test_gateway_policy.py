@@ -184,6 +184,19 @@ def test_get_and_post_share_one_error_contract():
         assert status == 200 and body["status"] == "ok", body
 
 
+def test_ready_reports_the_shared_state_id_clients_match_against():
+    fresh()
+    with env(), Served() as served:
+        status, body = served.get("/ready", token=None)
+        assert status == 200 and "state_authority_id" not in body, body
+    with env(ACP_SHARED_STATE_ID="acp-neon-wispy-scene-19011576"), Served() as served:
+        status, body = served.get("/ready", token=None)
+        assert status == 200 and body["state_authority_id"] == "acp-neon-wispy-scene-19011576", body
+    with env(ACP_SHARED_STATE_ID="Not Valid!"), Served() as served:
+        status, body = served.get("/ready", token=None)
+        assert status == 503 and body["status"] == "not_ready", "a malformed id is never reported"
+
+
 # ---- 5-7. verification is what protected actions turn on -------------------
 def test_local_work_needs_no_github_verification():
     fresh()
