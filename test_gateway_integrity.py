@@ -289,6 +289,25 @@ def test_a_non_material_mismatch_holds_protected_work_at_reverify():
     assert out["integrity"]["findings"][0]["path"] == ".claude/settings.json"
 
 
+def test_an_unresolved_mismatch_clears_only_when_its_path_is_seen_restored():
+    fresh()
+    changed = {".claude/settings.json": {"path": ".claude/settings.json", "state": "present",
+                                         "sha256": "e" * 64}}
+    with governed_env():
+        snapshot(artifacts=intact(**changed))
+        silent = snapshot(artifacts=[], diff=[], now=1001.0)
+        partial = snapshot(artifacts=intact(**{".claude/settings.json": None}), now=1002.0)
+        held = gateway.authorize(request("git.remote.update"), verifier=verifier())
+        restored = snapshot(artifacts=intact(), now=1003.0)
+        after = gateway.authorize(request("git.remote.update"), verifier=verifier())
+    for out in (silent, partial):
+        assert out["integrity"]["unresolved"] is True, "omitting a path is not restoring it"
+    assert held["decision"] == "REVERIFY_REQUIRED", held
+    assert held["integrity"]["findings"][0]["path"] == ".claude/settings.json"
+    assert restored["integrity"]["unresolved"] is False, restored
+    assert after["decision"] != "REVERIFY_REQUIRED", after
+
+
 def test_a_mismatch_during_quarantine_escalates():
     fresh()
     with governed_env():

@@ -4490,7 +4490,8 @@ def integrity_snapshot(body, verifier=None, now=None, caller=None):
     unverified = [f for f in findings if f["result"] == "UNVERIFIED"]
     # A snapshot that reports part of the protected set and omits a required
     # artifact leaves verification incomplete -- which fails closed. A snapshot
-    # that reports nothing at all makes no claim and blocks nothing.
+    # that reports nothing at all makes no new claim: it blocks nothing new and
+    # clears nothing already unresolved.
     incomplete = [f for f in unverified if f["required"]] if parsed["artifacts"] else []
     material = [f for f in findings if f.get("material")] + \
                [f for f in diff_findings if f.get("material")]
@@ -4533,16 +4534,27 @@ def integrity_snapshot(body, verifier=None, now=None, caller=None):
     observations = {**previous, **{f["path"]: {"result": f["result"], "sha256": f.get("observed"),
                                                "state": f.get("observed_state"), "at": iso(now)}
                                    for f in findings}}
-    unresolved = bool(mismatched or diff_findings or incomplete or not remote_ok)
+    # An unresolved mismatch stays unresolved until a snapshot observes the
+    # expected state for it. Omitting a path, or reporting nothing at all, is
+    # not evidence that it was restored.
+    prior = contained.get("integrity") or {}
+    matched = {f["path"] for f in findings if f["result"] == "MATCH"}
+    reported = {f["path"] for f in mismatched + incomplete + diff_findings}
+    carried = [f for f in prior.get("findings") or []
+               if prior.get("unresolved") and f.get("path") not in matched and f.get("path") not in reported]
+    if prior.get("unresolved") and prior.get("remote_ok") is False and not claimed_remote:
+        remote_ok = False
+    unresolved = bool(mismatched or diff_findings or incomplete or carried or not remote_ok)
     write_security(resource_keys, now, observations=observations,
                    integrity={"snapshot_id": request_id, "status": status, "unresolved": unresolved,
                               "checkpoint": parsed["checkpoint"], "checked_at": iso(now),
                               "counts": counts, "mismatched": len(mismatched),
                               "material": len(material), "remote_ok": remote_ok,
-                              "findings": [{"path": f["path"], "expected": f.get("expected"),
+                              "findings": ([{"path": f["path"], "expected": f.get("expected"),
                                             "observed": f.get("observed") or f["result"],
                                             "result": f["result"], "kind": f["kind"]}
-                                           for f in (mismatched + incomplete + diff_findings)][:50]})
+                                           for f in (mismatched + incomplete + diff_findings)]
+                                          + carried)[:50]})
     if material:
         bump_counter(keys, "policy_tamper_count", now, len(material))
         advanced = escalate(resource_keys, now, "PROTECTED_ARTIFACT_STATE_MISMATCH",
