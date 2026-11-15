@@ -301,6 +301,11 @@ class EnrollTests(unittest.TestCase):
         states = rp.validate(fake.patched, KEY, admin.KEY_ID)
         self.assertEqual({r["state"] for r in states.values()}, {"ACTIVE"})
 
+    def test_vercel_output_after_a_hint_line_still_parses(self):
+        printed = subprocess.CompletedProcess([], 0, '<claude-code-hint v="1" />\n{"teams": [{"id": "team_A"}]}\n', "")
+        with patch.object(admin.subprocess, "run", return_value=printed):
+            self.assertEqual(admin.vercel_json("teams", "ls", "--format", "json"), {"teams": [{"id": "team_A"}]})
+
     def test_explicit_projects_name_one_repository(self):
         args = argparse.Namespace(repositories=["o/a", "o/b"], vercel=["prj_x"], vercel_team=None,
                                   railway_project=None, railway_service=[], production_branch=[], apply=False)

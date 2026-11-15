@@ -451,20 +451,26 @@ def metered_policy(policy: dict, providers: dict, branches: list, protect: list,
     return rp.sign(updated, key, KEY_ID)
 
 
-def vercel_get(path: str) -> dict:
-    """One read-only Vercel API call through the signed-in CLI."""
-    result = subprocess.run(["vercel", "api", path, "--raw"], capture_output=True, text=True, cwd=HERE)
+def vercel_json(*args: str) -> dict:
+    """One read-only Vercel CLI call that prints JSON. The CLI may print a hint line first; it is skipped."""
+    result = subprocess.run(["vercel", *args], capture_output=True, text=True, cwd=HERE)
+    text = result.stdout
     try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise SystemExit(f"error: Vercel API GET {path.split('?')[0]} returned no JSON; run `vercel login` and retry")
+        return json.loads(text[text.index("{"):])
+    except ValueError:
+        raise SystemExit(f"error: `vercel {args[0]}` returned no JSON; run `vercel login` and retry")
+
+
+def vercel_get(path: str) -> dict:
+    """One read-only Vercel API call through the signed-in CLI. The path names its team (teamId)."""
+    return vercel_json("api", path, "--raw")
 
 
 def vercel_projects_by_repo() -> dict:
     """{owner/name (lowercase): [(team id, project id), ...]} for every Vercel project linked to a GitHub repo,
     across every team the signed-in Vercel account belongs to."""
     found = {}
-    teams = vercel_get("/v2/teams?limit=100").get("teams") or []
+    teams = vercel_json("teams", "ls", "--format", "json").get("teams") or []
     for team in teams:
         until = None
         while True:
