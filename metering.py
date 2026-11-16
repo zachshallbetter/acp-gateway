@@ -524,6 +524,15 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
     # Unbounded workflows are what burned 4,000 Actions hours. The caller can bound them itself.
     unbounded = [w for w in evidence.get("workflows", [])
                  if w.get("would_run") and (w.get("jobs_without_timeout") or not w.get("has_concurrency"))]
+    # Workflows read at the branch (`read_at`: the commit is not on GitHub yet) are the ones this push may
+    # be fixing, so they inform but never refuse; a merge, whose commit GitHub has, is checked exactly.
+    if any(w.get("read_at") for w in unbounded):
+        advice.setdefault("recommendations", []).append({
+            "code": "WORKFLOW_UNBOUNDED_ON_BRANCH",
+            "text": "On " + str(unbounded[0]["read_at"]) + ", " + ", ".join(w["path"] for w in unbounded) +
+                    " lack a timeout or a concurrency group; if this push does not bound them, the merge is "
+                    "refused until it does."})
+        unbounded = [w for w in unbounded if not w.get("read_at")]
     if unbounded:
         lines = []
         for w in unbounded:

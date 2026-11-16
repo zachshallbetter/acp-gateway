@@ -1177,6 +1177,22 @@ def test_authorization_evidence_is_read_before_the_transaction_and_reused_inside
         assert out["decision"] == "ALLOW" and replayed == [], (out, replayed)
         assert gateway.prefetch_authorize_evidence(b"not json") == {"verify": [], "provider": []}
 
+
+def test_unbounded_workflows_read_at_the_branch_advise_but_never_refuse_the_push_that_fixes_them():
+    ci = [{"provider": "github_actions", "project": ".github/workflows/ci.yml", "would_build": True, "why": "x"}]
+    branch_copy = [{"path": ".github/workflows/ci.yml", "would_run": True, "jobs_without_timeout": ["test"],
+                    "has_concurrency": False, "read_at": "feature"}]
+    with env(policy_body=policy(metered={"production_branches": ["main"], "providers": {}})):
+        fresh()
+        out = decide(request(), metering.MemoryLedger(), caller=COORDINATOR,
+                     provide=evidence(builds=ci, workflows=branch_copy))
+        assert out["decision"] == "ALLOW", out
+        assert "WORKFLOW_UNBOUNDED_ON_BRANCH" in [r["code"] for r in out["advice"]["recommendations"]]
+        exact = [dict(branch_copy[0], read_at=None)]
+        refused = decide(request(sha=SHA2), metering.MemoryLedger(), caller=COORDINATOR,
+                         provide=evidence(builds=ci, workflows=exact))
+        assert refused["reason"] == "WORKFLOW_UNBOUNDED", "the commit's own workflows are still checked exactly"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
