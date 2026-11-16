@@ -17,7 +17,7 @@ Three design rules shape the whole file:
      is allowed -- it never disables enforcement. See authorize().
 """
 from __future__ import annotations
-import base64, hashlib, hmac, http.server, json, logging, os, re, stat, subprocess, sys, tempfile, threading, time
+import base64, copy, hashlib, hmac, http.server, json, logging, os, re, stat, subprocess, sys, tempfile, threading, time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2795,6 +2795,45 @@ def provider_evidence(action, policy, claim, context):
     return evidence
 
 
+def prefetch_authorize_evidence(raw):
+    """Read an authorization's GitHub and provider evidence before its transaction opens.
+
+    Those reads take seconds. Inside the request transaction they held the connection, and a Vercel
+    instance has one, so concurrent authorizations waited, timed out and answered 503, sending clients to
+    the other host. Here only the policy and the repository's trust record are read, in a short transaction
+    of their own; the network reads run with no transaction open. authorize() uses a result only when it
+    asks with exactly these arguments, and reads live otherwise. Any failure here leaves the live path."""
+    memo = {"verify": [], "provider": []}
+    try:
+        parsed = parse_authorization_request(json.loads(raw.decode("utf-8")))
+        action, claim, context = parsed["action"], parsed["repository_claim"], parsed["context"]
+        with postgres_store.transaction():
+            registry = policy_registry()
+            record = match_policy(registry, claim) if registry["error"] is None else None
+            policy = (record or {}).get("policy") or {}
+            slug = f"{claim.get('owner')}/{claim.get('name')}".lower()
+            known = dict(trust_state().get(slug, {})) if claim.get("owner") and claim.get("name") else None
+    except (GatewayError, postgres_store.StorageError, ValueError, TypeError, AttributeError, KeyError):
+        return memo
+    if not policy or known is None:
+        return memo
+    probe = {**context, "_actor_id": parsed["actor_id"]}
+    memo["verify"].append(((claim, probe, policy), github_evidence(claim, probe, policy, known=known)))
+    if action in metering.REPO_ACTIONS:
+        memo["provider"].append(((action, policy, claim, context), provider_evidence(action, policy, claim, context)))
+    return memo
+
+
+def _from_memo(memo, kind, live):
+    """`live`, answered from the prefetch when called with the same arguments."""
+    def call(*args):
+        for asked, answer in memo.get(kind, ()):
+            if asked == args:
+                return copy.deepcopy(answer)
+        return live(*args)
+    return call
+
+
 def authorize(request, verifier=None, admin=False, now=None, caller=None, provider_evidence=None,
               ledger=DEFAULT_LEDGER):
     """Evaluate one authorization request and return the decision.
@@ -5052,7 +5091,7 @@ GITHUB_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
 NEW_REF_SHA = "0" * 40  # the old_sha git reports for a ref that does not exist yet
 
 
-def github_evidence(claim, context=None, policy=None):
+def github_evidence(claim, context=None, policy=None, known=None):
     """Independently confirm a repository claim, read-only and best effort.
 
     Every failure path returns `available: False` instead of raising: losing
@@ -5065,7 +5104,7 @@ def github_evidence(claim, context=None, policy=None):
     if not owner or not name:
         found["error"] = "the claim does not name a repository"
         return found
-    seen = trust_state().get(f"{owner.lower()}/{name.lower()}", {})
+    seen = known if known is not None else trust_state().get(f"{owner.lower()}/{name.lower()}", {})
     personal = bool(os.getenv(owner_env_name(owner)))
     if not personal and not configured():
         found["error"] = "no GitHub credential is configured for this owner"
@@ -5350,11 +5389,35 @@ def _governed_policies():
     return [record["policy"] for record in registry["policies"].values() if record["state"] == "ACTIVE"]
 
 
+def _short_transaction():
+    """A transaction of its own, unless the caller already holds one."""
+    return postgres_store.transaction() if postgres_store.enabled() and not postgres_store.active() \
+        else nullcontext()
+
+
 def refresh_posture(now=None):
-    """Read every governed repository's providers once, read-only, and keep the snapshots."""
+    """Read every governed repository's providers once, read-only, and keep the snapshots.
+
+    The provider reads take seconds per repository, so no database transaction stays open across them: a
+    Vercel instance has one connection, and holding it starved every other request on the instance (/ready
+    and every authorization answered 503 while a refresh ran). Choosing what is due and storing what was
+    read are each a short transaction of their own."""
     now = time.time() if now is None else now
+    with _short_transaction():
+        due, skipped = _posture_due(now)
+    batch = [(slug, policy, providers.posture_snapshot(policy, lambda owner: owner_token(owner)[0], now))
+             for _latest, slug, policy in due[:POSTURE_REFRESH_BATCH]]
+    with _short_transaction():
+        refreshed = _posture_store(batch, now)
+    remaining = [slug for _latest, slug, _policy in due[POSTURE_REFRESH_BATCH:]]
+    return {"refreshed": refreshed, "skipped_recent": skipped, "remaining": remaining,
+            "remedy": ("POST again to refresh the next batch." if remaining else
+                       "Snapshots refresh at most every 10 minutes per repository." if skipped else None)}
+
+
+def _posture_due(now):
     ledger = store_ledger()
-    refreshed, skipped, due = [], [], []
+    skipped, due = [], []
     for policy in _governed_policies():
         slug = f"{policy['repository']['owner']}/{policy['repository']['name']}".lower()
         latest = ledger.snapshot_latest("github_actions", slug)[1] if ledger is not None \
@@ -5364,8 +5427,13 @@ def refresh_posture(now=None):
         else:
             due.append((latest or 0, slug, policy))
     due.sort(key=lambda entry: (entry[0], entry[1]))          # stalest first, then by name: deterministic
-    for _latest, slug, policy in due[:POSTURE_REFRESH_BATCH]:
-        snapshot = providers.posture_snapshot(policy, lambda owner: owner_token(owner)[0], now)
+    return due, skipped
+
+
+def _posture_store(batch, now):
+    ledger = store_ledger()
+    refreshed = []
+    for slug, _policy, snapshot in batch:
         if ledger is not None:
             for provider in ("vercel", "railway", "github_actions"):
                 part = {"schema_version": snapshot["schema_version"], "repository": snapshot["repository"],
@@ -5375,10 +5443,7 @@ def refresh_posture(now=None):
         else:
             _POSTURE[slug] = {"at": now, "snapshot": snapshot}
         refreshed.append(slug)
-    remaining = [slug for _latest, slug, _policy in due[POSTURE_REFRESH_BATCH:]]
-    return {"refreshed": refreshed, "skipped_recent": skipped, "remaining": remaining,
-            "remedy": ("POST again to refresh the next batch." if remaining else
-                       "Snapshots refresh at most every 10 minutes per repository." if skipped else None)}
+    return refreshed
 
 
 def posture_view(now=None):
@@ -5805,15 +5870,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(401, {"error": "UNAUTHORIZED", "detail": "Missing or wrong bearer token.",
                              "remedy": "Send Authorization: Bearer <ACP_GATEWAY_TOKEN>."})
             return
+        if route == "/internal/posture/refresh" and postgres_store.enabled() and \
+                not getattr(self, "_db_transaction_active", False):
+            return self.refresh_posture_request()
         if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
             # Read the body first: a stalled client must never hold a pool slot.
             self.buffer_body(route)
+            self._evidence = prefetch_authorize_evidence(self._raw_body) if route == "/internal/authorize" \
+                else None
             return self._with_database_transaction(self.do_POST)
         try:
             if route == "/internal/authorize":
-                self.reply(200, authorize(self.json_body(), verifier=github_evidence,
+                memo = getattr(self, "_evidence", None) or {}
+                self.reply(200, authorize(self.json_body(), verifier=_from_memo(memo, "verify", github_evidence),
                                           admin=admin_authorized(self), caller=caller_for(self),
-                                          provider_evidence=provider_evidence))
+                                          provider_evidence=_from_memo(memo, "provider", provider_evidence)))
                 return
             if route == "/internal/subagent/release":
                 self.reply(200, release_lease(self.json_body()))
@@ -5871,6 +5942,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.upstream_failure(exc, "Retry. A decision is never inferred from a failure: protected actions "
                                        "remain unauthorized until ACP returns one.")
 
+    def refresh_posture_request(self):
+        """POST /internal/posture/refresh, which opens its own short transactions (see refresh_posture)."""
+        self.discard_body()
+        try:
+            with postgres_store.transaction():
+                kind = (caller_for(self) or {}).get("kind")
+            if kind not in ("owner", "coordinator"):
+                raise TargetError(403, "COORDINATOR_REQUIRED",
+                                  "Refreshing provider evidence needs the owner's or a coordinator's credential.",
+                                  remedy="Read GET /internal/posture instead, or ask your coordinator to refresh.")
+            self._send_reply(200, refresh_posture())
+        except GatewayError as exc:
+            self._send_reply(exc.status, exc.payload())
+        except postgres_store.StorageError:
+            self._send_reply(503, {"error": "STATE_STORE_UNAVAILABLE",
+                                   "detail": "The shared state transaction could not be completed.",
+                                   "remedy": "Retry only after ACP reports ready."})
+        except Exception as exc:
+            self.upstream_failure(exc, "Retry the refresh.")
+
     def upstream_failure(self, exc, remedy):
         """Reply 502 for an unexpected failure. Its text can carry upstream detail, so only its type is
         shown (the full text goes to the log), and inside a request transaction nothing it wrote is kept."""
@@ -5921,6 +6012,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     _raw_body = None
     _rollback = None
+    _evidence = None
 
     BODY_CEILINGS = {"/internal/documents": lambda: DOCUMENT_MAX_BYTES,
                      "/internal/report": event_body_limit,

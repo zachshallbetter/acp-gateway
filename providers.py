@@ -504,8 +504,21 @@ def github_file(owner, name, path, sha, token_for, fetch=_fetch):
         raise ProviderError("github_actions", "DIVERGED", "content is not UTF-8 text") from None
 
 
-def github_json_file(owner, name, path, sha, token_for, fetch=_fetch):
+def github_json_file(owner, name, path, sha, token_for, fetch=_fetch, fallback_ref=None):
+    """A JSON file at an exact commit. For a commit GitHub has not received yet (a pre-push), the file
+    is read at fallback_ref (the branch, else the default branch), as github_workflows does: the
+    commit's own copy cannot be read, and reading nothing would assume the provider's default."""
     text = github_file(owner, name, path, sha, token_for, fetch)
+    if text is None and fallback_ref is not None and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or "") \
+            and not _github_commit_exists(owner, name, sha, token_for, fetch):
+        try:
+            for ref in ([fallback_ref] if fallback_ref else []) + [None]:
+                ref = ref or _github_default_branch(owner, name, token_for, fetch)
+                text = github_file(owner, name, path, ref, token_for, fetch)
+                if text is not None or _github_commit_exists(owner, name, ref, token_for, fetch):
+                    break
+        except ProviderError:
+            text = None                      # unreadable at the branch too: the provider's default applies
     if text is None:
         return None
     try:
@@ -843,7 +856,7 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
                 project = vercel_project(project_id, now, fetch, vercel.get("team_id"))
                 if project.get("root_directory"):
                     config_path = project["root_directory"].strip("/") + "/vercel.json"
-                config = github_json_file(owner, name, config_path, sha, token_for, fetch)
+                config = github_json_file(owner, name, config_path, sha, token_for, fetch, fallback_ref=branch or "")
                 runs, why = vercel_would_build(project, config, claim, branch, trigger)
                 builds.append({"provider": "vercel", "project": project["name"], "project_id": project["id"],
                                "would_build": runs, "why": why})

@@ -584,6 +584,21 @@ def test_branch_rules_follow_vercels_glob_and_any_true_semantics():
     assert providers.vercel_branch_enabled(rules({"experiment-*": False, "*-dev": True}), "experiment-x-dev") is True
     assert providers.vercel_branch_enabled(rules({"dev": False}), "main") is True, "an unnamed branch deploys"
 
+
+def test_vercel_json_of_an_unpushed_commit_is_read_at_its_branch():
+    fresh()
+    sha = "e" * 40
+    token = lambda owner: "gh-token"
+    fake = Fake({"/contents/vercel.json?ref=fix/x": content(json.dumps(
+        {"git": {"deploymentEnabled": {"**": False, "main": True}}}))})
+    config = providers.github_json_file("Example-Org", "Widget", "vercel.json", sha, token, fake, fallback_ref="fix/x")
+    assert config == {"git": {"deploymentEnabled": {"**": False, "main": True}}}, config
+    assert providers.vercel_branch_enabled(config, "fix/x") is False, "so ACP no longer counts a preview Vercel skips"
+    fresh()
+    assert providers.github_json_file("Example-Org", "Widget", "vercel.json", sha, token,
+                                      Fake({f"/commits/{sha}": {"sha": sha}}), fallback_ref="fix/x") is None, \
+        "a pushed commit with no vercel.json has none"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -225,6 +225,11 @@ def _set_transaction_limits(connection) -> None:
     connection.execute("SET LOCAL idle_in_transaction_session_timeout = '10000ms'")
 
 
+def active() -> bool:
+    """Whether a request transaction is open on this thread."""
+    return _ACTIVE.get() is not None
+
+
 def current() -> "PostgresStore":
     store = _ACTIVE.get()
     if store is None:

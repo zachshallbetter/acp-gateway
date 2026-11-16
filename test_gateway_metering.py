@@ -1106,6 +1106,77 @@ def test_a_reused_subagent_tool_use_id_after_release_is_refused():
     else:
         raise AssertionError("the memory ledger must refuse a duplicate lease as the database does")
 
+
+def test_a_posture_refresh_holds_no_transaction_while_it_reads_providers():
+    from contextlib import contextmanager
+    state = {"open": False, "opened": 0}
+
+    @contextmanager
+    def transaction():
+        state["open"], state["opened"] = True, state["opened"] + 1
+        try:
+            yield None
+        finally:
+            state["open"] = False
+
+    def snapshot(policy, token_for, now):
+        assert not state["open"], "a provider read ran inside a database transaction"
+        return {"schema_version": 1, "repository": "example-org/widget", "fetched_at": "x",
+                "vercel": {}, "railway": {}, "github_actions": {}, "errors": []}
+
+    ledger = type("L", (), {"snapshot_latest": lambda self, p, s: (None, None),
+                            "snapshot_put": lambda self, *a: None})()
+    with env(), patch.object(gateway.postgres_store, "enabled", return_value=True), \
+            patch.object(gateway.postgres_store, "active", side_effect=lambda: state["open"]), \
+            patch.object(gateway.postgres_store, "transaction", transaction), \
+            patch.object(gateway, "store_ledger", return_value=ledger), \
+            patch.object(gateway, "_governed_policies", return_value=[policy()]), \
+            patch.object(gateway.providers, "posture_snapshot", side_effect=snapshot):
+        fresh()
+        out = gateway.refresh_posture(now=NOW)
+    assert out["refreshed"] == ["example-org/widget"] and state["opened"] == 2, (out, state)
+
+
+def test_authorization_evidence_is_read_before_the_transaction_and_reused_inside_it():
+    from contextlib import contextmanager
+    state = {"open": False, "network": []}
+
+    @contextmanager
+    def transaction():
+        state["open"] = True
+        try:
+            yield None
+        finally:
+            state["open"] = False
+
+    def github(claim, context, policy_body, known=None):
+        assert not state["open"], "GitHub was read inside a database transaction"
+        state["network"].append("github")
+        return {"available": True, "installed": True,
+                "repository": {"owner": OWNER, "name": REPO, "default_branch": "main"}}
+
+    def provide(action, policy_body, claim, context):
+        assert not state["open"], "a provider was read inside a database transaction"
+        state["network"].append("provider")
+        return evidence()(action, policy_body, claim, context)
+
+    with env():
+        fresh()
+        registry = gateway.policy_registry()
+        with patch.object(gateway.postgres_store, "transaction", transaction), \
+                patch.object(gateway, "policy_registry", return_value=registry), \
+                patch.object(gateway, "trust_state", return_value={}), \
+                patch.object(gateway, "github_evidence", side_effect=github), \
+                patch.object(gateway, "provider_evidence", side_effect=provide):
+            memo = gateway.prefetch_authorize_evidence(json.dumps(request()).encode())
+        assert state["network"] == ["github", "provider"], state
+        replayed = []
+        out = gateway.authorize(request(), verifier=gateway._from_memo(memo, "verify", lambda *a: replayed.append(a)),
+                                now=NOW, caller=COORDINATOR, ledger=metering.MemoryLedger(),
+                                provider_evidence=gateway._from_memo(memo, "provider", lambda *a: replayed.append(a)))
+        assert out["decision"] == "ALLOW" and replayed == [], (out, replayed)
+        assert gateway.prefetch_authorize_evidence(b"not json") == {"verify": [], "provider": []}
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
