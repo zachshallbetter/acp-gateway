@@ -1026,6 +1026,20 @@ class PostgresStore:
             "DO UPDATE SET fetched_at = EXCLUDED.fetched_at",
             (provider, subject, digest, schema_version, _timestamp(fetched_at), _json(body)))
 
+    def snapshot_times(self, provider):
+        """{subject: newest fetched_at (epoch)} for one provider, in one indexed query and without the bodies."""
+        rows = self.connection.execute(
+            "SELECT subject, max(fetched_at) AS fetched_at FROM provider_snapshots WHERE provider=%s GROUP BY subject",
+            (provider,)).fetchall()
+        return {row["subject"]: _epoch(row["fetched_at"]) for row in rows}
+
+    def snapshot_latest_all(self, provider):
+        """{subject: newest body} for one provider, in one query: what snapshot_latest gives per subject."""
+        rows = self.connection.execute(
+            "SELECT DISTINCT ON (subject) subject, body FROM provider_snapshots WHERE provider=%s "
+            "ORDER BY subject, fetched_at DESC, digest", (provider,)).fetchall()
+        return {row["subject"]: row["body"] for row in rows}
+
     def snapshot_latest(self, provider, subject):
         row = self.connection.execute(
             "SELECT body, fetched_at FROM provider_snapshots WHERE provider=%s AND subject=%s "

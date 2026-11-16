@@ -5418,10 +5418,12 @@ def refresh_posture(now=None):
 def _posture_due(now):
     ledger = store_ledger()
     skipped, due = [], []
+    # One query for every repository's last refresh: reading each one's newest snapshot body, 99 of them,
+    # held a Vercel instance's only connection for seconds and timed out /ready.
+    times = ledger.snapshot_times("github_actions") if ledger is not None else {}
     for policy in _governed_policies():
         slug = f"{policy['repository']['owner']}/{policy['repository']['name']}".lower()
-        latest = ledger.snapshot_latest("github_actions", slug)[1] if ledger is not None \
-            else (_POSTURE.get(slug) or {}).get("at")
+        latest = times.get(slug) if ledger is not None else (_POSTURE.get(slug) or {}).get("at")
         if latest and now - latest < POSTURE_REFRESH_SECONDS:
             skipped.append(slug)
         else:
@@ -5451,12 +5453,16 @@ def posture_view(now=None):
     ledger = store_ledger()
     day = metering.budget_day(now)
     snapshots = []
+    # Three queries in all, not three per repository: the per-repository reads held the connection long
+    # enough to time out other requests on the instance.
+    latest = {provider: ledger.snapshot_latest_all(provider) for provider in ("vercel", "railway", "github_actions")} \
+        if ledger is not None else {}
     for policy in _governed_policies():
         slug = f"{policy['repository']['owner']}/{policy['repository']['name']}".lower()
         if ledger is not None:
             merged = {"repository": slug, "vercel": [], "railway": None, "github_actions": None, "errors": []}
             for provider in ("vercel", "railway", "github_actions"):
-                body = ledger.snapshot_latest(provider, slug)[0]
+                body = latest[provider].get(slug)
                 if body:
                     merged[provider] = body.get(provider)
                     merged["fetched_at"] = body.get("fetched_at")

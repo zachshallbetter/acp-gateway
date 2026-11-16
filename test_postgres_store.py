@@ -284,6 +284,8 @@ class PostgresStoreTests(unittest.TestCase):
             store.snapshot_put("vercel", subject, "2" * 64, {"vercel": [{"name": "new"}]}, now)
         with postgres_store.transaction() as store:
             body, fetched = store.snapshot_latest("vercel", subject)
+            self.assertEqual(store.snapshot_latest_all("vercel")[subject], body)
+            self.assertAlmostEqual(store.snapshot_times("vercel")[subject], fetched, delta=0.001)
             self.assertEqual(body["vercel"][0]["name"], "new")
             self.assertAlmostEqual(fetched, now, delta=1)
 

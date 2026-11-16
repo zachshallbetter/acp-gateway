@@ -1124,7 +1124,7 @@ def test_a_posture_refresh_holds_no_transaction_while_it_reads_providers():
         return {"schema_version": 1, "repository": "example-org/widget", "fetched_at": "x",
                 "vercel": {}, "railway": {}, "github_actions": {}, "errors": []}
 
-    ledger = type("L", (), {"snapshot_latest": lambda self, p, s: (None, None),
+    ledger = type("L", (), {"snapshot_times": lambda self, p: {},
                             "snapshot_put": lambda self, *a: None})()
     with env(), patch.object(gateway.postgres_store, "enabled", return_value=True), \
             patch.object(gateway.postgres_store, "active", side_effect=lambda: state["open"]), \
