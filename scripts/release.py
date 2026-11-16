@@ -259,10 +259,12 @@ def release(args, checkout: Path) -> None:
     previous = {"vercel": vercel_current().get("url"),
                 "railway": None if args.skip_railway else (railway_deployments() or [{}])[0].get("id")}
     report("previous", **previous)
+    progress = {"merged": False}
     try:
-        deploy(args, checkout, update, step, branch, resuming)
+        deploy(args, checkout, update, step, branch, resuming, progress)
     except Stop as exc:
-        if resuming or not previous["vercel"]:
+        # Before the merge nothing has moved, so there is nothing to return to.
+        if resuming or not progress["merged"] or not previous["vercel"]:
             raise
         back = [f"vercel rollback {previous['vercel']} --scope {VERCEL_TEAM}"]
         if previous["railway"]:
@@ -272,12 +274,13 @@ def release(args, checkout: Path) -> None:
                    + "; ".join(back)) from exc
 
 
-def deploy(args, checkout: Path, update: dict, step, branch: str, resuming: bool) -> None:
+def deploy(args, checkout: Path, update: dict, step, branch: str, resuming: bool, progress: dict) -> None:
     if not resuming:
         token = acp_ops.bearer(args.token_account)
         if step:
             migrate(update, branch, token, args.work_item, step)
         ff_merge.merge(checkout, update, token, args.work_item)
+        progress["merged"] = True
         report("merged", ref=update["ref"], new_sha=update["new_sha"])
     build = vercel_build(update["new_sha"], args.timeout)
     vercel_alias(build)

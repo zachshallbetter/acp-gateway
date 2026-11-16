@@ -342,7 +342,8 @@ class RailwayTests(unittest.TestCase):
 
 
 class ReleaseOrderTests(unittest.TestCase):
-    def run_release(self, dry_run=False, step=None, skip_railway=False, resuming=False, railway_fails=False):
+    def run_release(self, dry_run=False, step=None, skip_railway=False, resuming=False, railway_fails=False,
+                    merge_fails=False):
         calls = []
         update = {"owner": "zachshallbetter", "name": "acp-gateway", "remote": "origin", "ref": "refs/heads/main",
                   "old_sha": "b" * 40, "new_sha": SHA}
@@ -372,7 +373,8 @@ class ReleaseOrderTests(unittest.TestCase):
                 patch.object(acp_ops, "harness_gate", note("harness", "approved")), \
                 patch.object(acp_ops, "bearer", note("bearer", "t")), \
                 patch.object(release, "migrate", note("migrate")), \
-                patch.object(release.ff_merge, "merge", note("merge")), \
+                patch.object(release.ff_merge, "merge", self.failing("ACP could not be reached") if merge_fails
+                             else note("merge")), \
                 patch.object(release, "vercel_build", note("vercel", {"url": "dpl-new.vercel.app"})), \
                 patch.object(release, "vercel_alias", note("alias")), \
                 patch.object(release, "railway_deploy", self.failing("railway down") if railway_fails
@@ -402,6 +404,11 @@ class ReleaseOrderTests(unittest.TestCase):
         self.assertIn("railway down", message)
         self.assertIn("vercel rollback dpl-old.vercel.app", message)
         self.assertIn("old-railway", message)
+
+    def test_a_stop_before_the_merge_names_no_rollback(self):
+        with self.assertRaises(Stop) as stopped:
+            self.run_release(merge_fails=True)
+        self.assertNotIn("rollback", str(stopped.exception))
 
     def test_a_current_database_skips_the_migration(self):
         self.assertNotIn("migrate", self.run_release())
