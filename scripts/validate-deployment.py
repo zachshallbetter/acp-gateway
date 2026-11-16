@@ -5,10 +5,25 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the bearer to wherever it points."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "refused redirect", headers, fp)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_NoRedirect))
+
 
 def get(url: str, token: str | None = None) -> dict:
     headers = {"Accept": "application/json"}
+    parts = urllib.parse.urlsplit(url)
+    if token and parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise RuntimeError("refusing to send the bearer token over plain http")
     if token: headers["Authorization"] = f"Bearer {token}"
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:

@@ -290,16 +290,16 @@ class PostgresStoreTests(unittest.TestCase):
     def test_runtime_accepts_only_additive_newer_migrations(self):
         with psycopg.connect(DSN) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
-                               "VALUES (8, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+                               "VALUES (9, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
         try:
             postgres_store.validate_schema()             # a newer, additive migration: still runs
             with psycopg.connect(DSN) as connection:
-                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 8")
+                connection.execute("UPDATE schema_migrations SET additive = false WHERE version = 9")
             with self.assertRaises(postgres_store.StorageError):
                 postgres_store.validate_schema()         # not additive: refuses
         finally:
             with psycopg.connect(DSN) as connection:
-                connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+                connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         postgres_store.validate_schema()
 
     def test_applied_migration_records_whether_it_is_additive(self):
@@ -371,13 +371,23 @@ class PostgresStoreTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
             with psycopg.connect(DSN) as connection:
+                # Append-only in production (0008); the synthetic test rows are cleared around the trigger.
+                connection.execute("ALTER TABLE signed_documents DISABLE TRIGGER signed_documents_append_only")
                 connection.execute("DELETE FROM signed_documents")
+                connection.execute("ALTER TABLE signed_documents ENABLE TRIGGER signed_documents_append_only")
             for key, value in saved.items():
                 if value is None:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
             gateway._DOCUMENTS.clear()
+
+    def test_signed_documents_cannot_be_rewritten_or_removed(self):
+        for statement in ("UPDATE signed_documents SET written_by = 'x'", "DELETE FROM signed_documents",
+                          "TRUNCATE signed_documents"):
+            with psycopg.connect(DSN) as connection, self.subTest(statement=statement):
+                with self.assertRaises(psycopg.Error):
+                    connection.execute(statement)
 
     def test_readiness_refuses_missing_schema_without_losing_liveness(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
@@ -389,6 +399,7 @@ class PostgresStoreTests(unittest.TestCase):
                 self.assertEqual(json.load(response), {"status": "ready", "storage": "postgres"})
             with psycopg.connect(DSN) as connection:
                 connection.execute("ALTER TABLE schema_migrations RENAME TO synthetic_missing_migrations")
+            gateway._ANONYMOUS["ready"].clear()          # past the readiness cache's few seconds
             try:
                 with self.assertRaises(HTTPError) as caught:
                     urlopen(base + "/ready", timeout=10)
@@ -404,7 +415,7 @@ class PostgresStoreTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
-        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual([version for version, *_ in migration_files()], [1, 2, 3, 4, 5, 6, 7, 8])
         postgres_store.validate_schema()
 
 

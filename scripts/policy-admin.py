@@ -82,7 +82,30 @@ import urllib.parse
 import urllib.request
 
 HERE = Path(__file__).resolve().parent.parent
-GATEWAY = os.environ.get("ACP_GATEWAY_URL", "https://acp-gateway.vercel.app").rstrip("/")
+# The bearer and admin tokens go only to ACP's own hosts over TLS (a loopback host over http for local
+# tests), and never follow a redirect: urllib would resend the Authorization header to wherever it points.
+GATEWAY_HOSTS = ("acp-gateway.vercel.app", "acp-gateway-production.up.railway.app")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, f"refused redirect to {newurl}", headers, fp)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_NoRedirect))
+
+
+def checked_gateway(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if not ((parts.scheme == "https" and host in GATEWAY_HOSTS)
+            or (parts.scheme in ("http", "https") and host in ("localhost", "127.0.0.1", "::1"))):
+        raise SystemExit(f"error: ACP_GATEWAY_URL must be https://{GATEWAY_HOSTS[0]} or "
+                         f"https://{GATEWAY_HOSTS[1]} (or a loopback host); refusing to send a token to {host or url!r}")
+    return url.rstrip("/")
+
+
+GATEWAY = checked_gateway(os.environ.get("ACP_GATEWAY_URL", "https://acp-gateway.vercel.app"))
 KEYCHAIN_SERVICE = "ACP Gateway Production"
 KEY_ID = "acp-policy-hmac-sha256"
 POLICY_FILE = HERE / "policies/production.json"

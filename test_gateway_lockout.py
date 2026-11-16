@@ -30,6 +30,7 @@ def fresh(state_file=None):
     gateway._LAST_DENIAL.clear()
     gateway._NOTIFIED.clear(); gateway._NOTICE_EMITTED.clear()
     gateway._READY_POLICY.update(key=None, at=0.0, error=None); gateway._INSTALLATION_TOKENS.clear()
+    gateway._ANONYMOUS.update(buckets={}, ready={}, notice={})
     gateway._PROVIDER.update(status="UNKNOWN", changed_at=None)
     del gateway.AUDIT[:]
 
@@ -43,6 +44,11 @@ def contained_env(**extra):
     return env(**{"ACP_POLICY_ADMIN_TOKEN": ADMIN, **extra})
 
 
+# Self-reported signals change containment only for a caller bound to the repository; the shared
+# bearer's are recorded and ignored (see test_shared_bearer_signals_never_contain).
+ATTESTED = {"kind": "coordinator", "id": "coord-test", "repos": None}
+
+
 def signal(name, action="git.remote.update", **overrides):
     body = request(action, context={"signals": [name]})
     body.update(overrides)
@@ -51,12 +57,12 @@ def signal(name, action="git.remote.update", **overrides):
 
 def quarantine(now=1000.0):
     """One material violation: A4."""
-    return gateway.authorize(signal("policy_modification_attempted"), verifier=verifier(), now=now)
+    return gateway.authorize(caller=ATTESTED, request=signal("policy_modification_attempted"), verifier=verifier(), now=now)
 
 
 def escalate_once(now=1001.0):
     """A second material violation on an already-quarantined resource: A5."""
-    return gateway.authorize(signal("acp_bypass_attempted"), verifier=verifier(), now=now)
+    return gateway.authorize(caller=ATTESTED, request=signal("acp_bypass_attempted"), verifier=verifier(), now=now)
 
 
 def lock(now=1000.0):
@@ -104,9 +110,9 @@ def test_provider_disappearance_alone_never_locks():
 def test_local_policy_deletion_is_a_material_signal_not_an_escape():
     fresh()
     with contained_env():
-        first = gateway.authorize(signal("quarantine_policy_removed"), verifier=verifier())
+        first = gateway.authorize(caller=ATTESTED, request=signal("quarantine_policy_removed"), verifier=verifier())
         assert first["reason"] == "CONTROL_PLANE_INTEGRITY_EVENT", first
-        second = gateway.authorize(signal("managed_policy_absent"), verifier=verifier())
+        second = gateway.authorize(caller=ATTESTED, request=signal("managed_policy_absent"), verifier=verifier())
     assert second["decision"] == "LOCKED", second
 
 
@@ -284,11 +290,11 @@ def test_a6_binds_the_exact_resource_ref_and_both_shas():
     with contained_env():
         lock()
         grant()
-        # ...another repository, reached through the same locked actor
+        # ...another repository, reached through the same locked actor (an attested caller's actor)
         wrong_repo = gateway.authorize(
             request(gateway.RECOVERY_OPERATION, repository_claim=claim(name="Other-Repo"),
                     context={"ref": MAIN, "old_sha": BAD, "new_sha": GOOD}),
-            verifier=verifier(ref_sha=BAD), now=2100.0)
+            verifier=verifier(ref_sha=BAD), now=2100.0, caller=ATTESTED)
         assert wrong_repo["reason"] == "RECOVERY_PRECONDITION_FAILED", wrong_repo
         assert "different repository" in wrong_repo["detail"]
         for label, kwargs, needle in (("ref", {"ref": "refs/heads/release"}, "different ref"),

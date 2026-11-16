@@ -35,7 +35,9 @@ BRANCH_INDEPENDENT_TRIGGERS = frozenset({"cli_deploy", "railway_up"})
 # The provider these triggers start; every other trigger builds every connected provider.
 TRIGGER_PROVIDER = {"cli_deploy": "vercel", "railway_up": "railway"}
 # Each request with these triggers starts a new paid run of the same commit.
-INVOCATION_TRIGGERS = frozenset({"cli_deploy", "railway_up", "workflow_dispatch"})
+INVOCATION_TRIGGERS = frozenset({"cli_deploy", "railway_up", "workflow_dispatch", "rerun"})
+# How long the caller that made an invocation's record may retry it and be answered from the record.
+INVOCATION_REPLAY_SECONDS = 600
 # Daily counts that record and report for the coordinator and the owner instead of refusing.
 # Hosted builds and manual CI cost money per run and stay enforced.
 AWARE_BUDGETS = frozenset({"production_merge"})
@@ -362,7 +364,7 @@ def validated_limits(raw):
                         not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 1000
                                 for v in value.values()):
                     raise ValueError(f"limits.{action}.{key} must map providers to 0..1000")
-                merged[action][key] = dict(value)
+                merged[action][key] = {**(merged[action].get(key) or {}), **value}
             elif value is None:
                 merged[action].pop(key, None)                # explicitly unlimited
             elif not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 86400:
@@ -469,7 +471,19 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
     # Replay: the same action asked again is answered from the record, never counted twice.
     # Authority is per caller: a record made for a coordinator does not authorize a lane.
     prior = [ledger.ledger_get(k) for k in keys.values()]
-    if all(prior) and production and not _caller_may_reach_production(caller):
+    if invocation and any(prior) and any(p and (p["caller_id"] != caller["id"]
+                                                or now - p["created_at"] > INVOCATION_REPLAY_SECONDS)
+                                         for p in prior):
+        # A tool_use_id names one tool call. Reused by another caller or after the retry window, it
+        # is a second deploy wearing the first one's id, and answering it from the record would
+        # let every later deploy through uncounted.
+        return Outcome("DENY", "INVOCATION_REUSED",
+                       f"This {trigger} reuses tool_use_id {context.get('tool_use_id')!r}, already recorded for "
+                       "an earlier deploy. A new deploy is a new invocation.",
+                       "Send the id of this tool call (or omit tool_use_id and ACP counts each request), "
+                       "then ask again.", builds=evidence["builds"])
+    own = all(prior) and all(p["caller_id"] == caller["id"] for p in prior)
+    if all(prior) and production and not own and not _caller_may_reach_production(caller):
         return Outcome("AUTH_REQUIRED", "OWNER_REQUIRED",
                        f"This deploys production ({branch}). It is already authorized for another caller, and that "
                        f"authorization is not transferable; this caller is a {caller['kind']} caller.",
@@ -478,9 +492,26 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                        builds=evidence["builds"], caller_kind=caller["kind"],
                        grant_request=grant_request(action, owner, name, context.get("reason")))
     if all(prior):
+        # A retry by the caller that holds the record, a grant's included, is the same push.
         return Outcome("ALLOW", prior[0]["reason_code"],
                        "Already authorized for this exact commit; the earlier record stands and is not counted again.",
                        builds=evidence["builds"], replayed=True)
+    if any(prior):
+        # Part of this was recorded before (the building set grew): count only what is new.
+        keys = {slot: key for (slot, key), seen in zip(keys.items(), prior) if not seen}
+        building = [b for b in building if (b["provider"], project_id(b)) in keys]
+    if action in HOSTED and building:
+        # A merge and the push of the same commit start the same builds: whichever ACP heard of first
+        # counted them, and the other is answered from that record.
+        sibling = _sibling_counted(ledger, action, owner, name, context, building)
+        if sibling:
+            keys = {slot: key for slot, key in keys.items() if slot not in sibling}
+            building = [b for b in building if (b["provider"], project_id(b)) not in sibling]
+            if not building:
+                return Outcome("ALLOW", "WITHIN_BUDGET",
+                               "These builds were already counted when ACP authorized the "
+                               f"{'push' if action == 'production_merge' else 'merge'} of this commit; "
+                               "they are not counted again.", builds=evidence["builds"], replayed=True)
     capacity = {c["provider"]: c for c in evidence.get("capacity") or []}
     advice = advise(ledger, limits, metered, claim, context, action, building, capacity, now)
 
@@ -509,6 +540,29 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                                    "has_concurrency": w.get("has_concurrency")} for w in unbounded],
                        builds=evidence["builds"], advice=advice)
 
+    day = budget_day(now)
+    priority = context.get("priority") if action == "hosted_build" else None
+    common = {"builds": evidence["builds"], "advice": advice}
+
+    # Pacing comes before anything is spent: a request pacing defers takes no grant and no priority
+    # use, and a grant or a coordinator credential does not excuse a burst of builds.
+    prioritized = False
+    if action == "hosted_build":
+        paced = _pacing(ledger, limits, building, capacity, now, priority_ok=False)
+        if paced and paced["reason"] in ("BUILD_PACED", "BUILD_IN_FLIGHT") and \
+                _priority_open(ledger, limits, caller, priority, building, day):
+            paced = _pacing(ledger, limits, building, capacity, now, priority_ok=True)
+            prioritized = paced is None
+        if paced:
+            usage, exceeded = _usage(ledger, action, limits, metered, owner, name, building, capacity, day, now)
+            open_ = _priority_open(ledger, limits, caller, {"blocking": "continue_work", "reason": "-" * 8},
+                                   building, day) if paced["reason"] in ("BUILD_PACED", "BUILD_IN_FLIGHT") \
+                else None
+            return Outcome("REVERIFY_REQUIRED", paced["reason"], paced["detail"], paced["remedy"],
+                           retry_after=paced["retry_after"],
+                           budget={"day": day, "usage": usage, "exceeded": exceeded},
+                           **({"priority_request": _priority_request(open_)} if open_ else {}), **common)
+
     grant = None
     if production and not _caller_may_reach_production(caller):
         grant = ledger.grant_take(action, owner, name, now)
@@ -523,14 +577,10 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                            builds=evidence["builds"], caller_kind=caller["kind"],
                            grant_request=grant_request(action, owner, name, context.get("reason")), advice=advice)
 
-    day = budget_day(now)
     usage, exceeded = _usage(ledger, action, limits, metered, owner, name, building, capacity, day, now)
-    priority = context.get("priority") if action == "hosted_build" else None
-    common = {"builds": evidence["builds"], "advice": advice}
     if exceeded and grant is None and action in AWARE_BUDGETS and _caller_may_reach_production(caller):
-        # A merge costs nothing by itself (the builds it starts are metered as hosted_build), so
-        # for the coordinator or the owner its daily count is awareness, not a gate: counted,
-        # reported and flagged, never refused.
+        # A merge's daily count is awareness for the coordinator or the owner, not a gate: counted,
+        # reported and flagged, never refused. The builds it starts are counted once (see _sibling_counted).
         _record(ledger, keys, action, None, claim, context, caller, now, request_id, True, evidence)
         return Outcome("ALLOW", "OVER_BUDGET_NOTED",
                        f"Allowed and counted past today's {exceeded['scope']} count for {action} "
@@ -546,33 +596,18 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
             return _budget_refusal(ledger, action, owner, name, context, exceeded, usage, day, now, common,
                                    priority_open=None)
 
-    # Pacing: a barrage of builds of one project is deferred, never refused for good.
-    if action == "hosted_build" and grant is None:
-        paced = _pacing(ledger, limits, building, capacity, now, priority_ok=False)
-        if paced and paced["reason"] in ("BUILD_PACED", "BUILD_IN_FLIGHT") and \
-                _priority_open(ledger, limits, caller, priority, [paced["build"]], day):
-            paced = _pacing(ledger, limits, building, capacity, now, priority_ok=True)
-            if paced is None:
-                return _allow_priority(ledger, keys, action, claim, context, caller, now, request_id, evidence,
-                                       limits, metered, owner, name, building, capacity, day, common)
-        if paced:
-            open_ = _priority_open(ledger, limits, caller, {"blocking": "continue_work", "reason": "-" * 8},
-                                   [paced["build"]], day) if paced["reason"] in ("BUILD_PACED", "BUILD_IN_FLIGHT") \
-                else None
-            return Outcome("REVERIFY_REQUIRED", paced["reason"], paced["detail"], paced["remedy"],
-                           retry_after=paced["retry_after"],
-                           budget={"day": day, "usage": usage, "exceeded": exceeded},
-                           **({"priority_request": _priority_request(open_)} if open_ else {}), **common)
+    if prioritized and (exceeded is None or grant is not None or exceeded["kind"] == "project"):
+        return _allow_priority(ledger, keys, action, claim, context, caller, now, request_id, evidence,
+                               limits, metered, owner, name, building, capacity, day, common)
 
     if exceeded and grant is None:
-        if exceeded["kind"] == "project" and _priority_open(ledger, limits, caller, priority,
-                                                            [exceeded["build"]], day):
+        if exceeded["kind"] == "project" and _priority_open(ledger, limits, caller, priority, building, day):
             return _allow_priority(ledger, keys, action, claim, context, caller, now, request_id, evidence,
                                    limits, metered, owner, name, building, capacity, day, common)
         grant = ledger.grant_take(action, owner, name, now)
         if grant is None:
             open_ = _priority_open(ledger, limits, caller, {"blocking": "continue_work", "reason": "-" * 8},
-                                   [exceeded["build"]], day) if exceeded["kind"] == "project" and \
+                                   building, day) if exceeded["kind"] == "project" and \
                 action == "hosted_build" else None
             return _budget_refusal(ledger, action, owner, name, context, exceeded, usage, day, now, common,
                                    priority_open=open_)
@@ -583,6 +618,13 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                    budget={"day": day, "usage": _usage(ledger, action, limits, metered, owner, name, building,
                                                        capacity, day, now)[0]},
                    grant_id=grant, **common)
+
+
+def _sibling_counted(ledger, action, owner, name, context, building):
+    """Slots (provider, project) whose builds of this commit the other hosted action already counted."""
+    other = "hosted_build" if action == "production_merge" else "production_merge"
+    keys = _record_keys(other, owner, name, context, None, building)
+    return {slot for slot, key in keys.items() if (ledger.ledger_get(key) or {}).get("counted")}
 
 
 def _record_keys(action, owner, name, context, invocation, building):
@@ -680,7 +722,9 @@ def _usage(ledger, action, limits, metered, owner, name, building, capacity, day
                       **({} if enforced else {"enforced": False})})
         over = check.get("over_limit") or (check["limit"] is not None and
                                           check["used"] + check["adding"] > check["limit"])
-        if enforced and over and exceeded is None:
+        # A service at its limit outranks a project over its budget: priority may waive the second,
+        # never the first, so the service overrun is the one reported when both apply.
+        if enforced and over and (exceeded is None or (check["kind"] == "service" and exceeded["kind"] != "service")):
             exceeded = {"scope": check["scope"], "used": check["used"], "limit": check["limit"],
                         "kind": "service" if check["kind"] == "service" else
                         "project" if check["kind"] == "project" else check["kind"],
@@ -711,7 +755,8 @@ def _pacing(ledger, limits, building, capacity, now, priority_ok):
         recent = ledger.ledger_recent(HOSTED, b["provider"], pid, now - max(window, spacing, 1))
         in_window = [t for t in recent if t >= now - window] if window else []
         if hb.get("burst_builds") and len(in_window) >= hb["burst_builds"]:
-            wait = int(in_window[0] + window - now) + 1
+            # Below the burst again once the oldest build that keeps it at burst_builds leaves the window.
+            wait = int(in_window[-hb["burst_builds"]] + window - now) + 1
             return {"reason": "BUILD_BURST", "build": b, "retry_after": max(wait, 1),
                     "detail": f"{len(in_window)} builds of {b['provider']} project {b['project']} in the last "
                               f"{window // 60} minutes: that is a burst, not a release cadence.",
@@ -855,8 +900,16 @@ def advise(ledger, limits, metered, claim, context, action, building, capacity, 
                  "ceiling": (hb.get("per_provider_per_day") or {}).get(provider),
                  "deployments_today": live["deployments_today"] if "deployments_today" in live
                  else ledger.ledger_count(day, list(HOSTED), provider=provider),
-                 "in_flight": live.get("in_flight")}
+                 "in_flight": live.get("in_flight"),
+                 **({"lower_bound": True} if live.get("truncated") else {})}
         service.append(entry)
+        if live.get("source") == "unavailable":
+            recommend("CAPACITY_UNREAD", f"ACP could not read {provider}'s live activity ({live.get('kind')}), so its "
+                      "in-flight cap is not applied and its count is ACP's own ledger, which misses dashboard "
+                      "redeploys: push only what must build now.")
+        elif live.get("truncated"):
+            recommend("CAPACITY_UNREAD", f"{provider} has more deployments today than ACP reads in one pass; "
+                      f"{entry['deployments_today']} is a lower bound.")
         if concurrent and (live.get("in_flight") or 0) >= max(concurrent - 1, 1):
             recommend("SERVICE_BUSY", f"{provider} has {live['in_flight']} builds running: push later or batch.")
     resets = datetime.fromtimestamp(now, timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -924,6 +977,10 @@ def evaluate_local(action, claim, context, caller, limits, ledger, now, request_
     lease = ledger.lease_get(key)
     if lease and not lease.get("released_at"):
         return Outcome("ALLOW", "WITHIN_BUDGET", "Already leased.", lease_id=key, replayed=True)
+    if lease:
+        return Outcome("DENY", "INVOCATION_REUSED",
+                       "This tool_use_id already ran a heavy subagent, and that lease was released.",
+                       "Send the id of this tool call, then ask again.")
     cap = limits["heavy_subagent"].get("concurrent_per_session")
     open_now = ledger.leases_open(session_id, now)
     if cap is not None and open_now >= cap:
@@ -1012,6 +1069,8 @@ class MemoryLedger:
         return self.leases.get(key)
 
     def lease_open(self, row):
+        if row["lease_key"] in self.leases:                  # as the database's primary key does
+            raise ValueError("lease already exists")
         self.leases[row["lease_key"]] = {**row, "released_at": None}
 
     def leases_open(self, session_id, now):

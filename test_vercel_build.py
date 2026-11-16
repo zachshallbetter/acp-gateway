@@ -81,21 +81,21 @@ class VercelBuildTests(unittest.TestCase):
         self.migrate()
         with psycopg.connect(self.url) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at) "
-                               "VALUES (8, %s, CURRENT_TIMESTAMP)", ("a" * 64,))
+                               "VALUES (9, %s, CURRENT_TIMESTAMP)", ("a" * 64,))
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 1)
-        self.assertIn("versions this release does not ship: 0008", cp.stdout)
-        self.assertEqual(self.schema_rows(), 8)
+        self.assertIn("versions this release does not ship: 0009", cp.stdout)
+        self.assertEqual(self.schema_rows(), 9)
 
     def test_production_build_runs_on_a_database_ahead_by_additive_migrations(self):
         self.migrate()
         with psycopg.connect(self.url) as connection:
             connection.execute("INSERT INTO schema_migrations (version, checksum, applied_at, additive) "
-                               "VALUES (8, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
+                               "VALUES (9, %s, CURRENT_TIMESTAMP, true)", ("a" * 64,))
         cp = self.build("production", self.url)
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn('"ahead_additive_versions": ["0008"]', cp.stdout)
-        self.assertEqual(self.schema_rows(), 8)
+        self.assertIn('"ahead_additive_versions": ["0009"]', cp.stdout)
+        self.assertEqual(self.schema_rows(), 9)
 
     def test_preview_build_warns_and_never_writes(self):
         cp = self.build("preview", self.url)

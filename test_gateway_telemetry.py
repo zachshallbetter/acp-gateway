@@ -15,7 +15,7 @@ os.environ.setdefault("ACP_GATEWAY_TOKEN", "test-token")
 import gateway  # noqa: E402
 from test_gateway_policy import (OWNER, REPO, REMOTE, NOTICE, SIGNING_KEY, claim, env,  # noqa: E402
                                  request, verifier, Served)
-from test_gateway_lockout import ADMIN, GOOD, BAD, MAIN, contained_env, events, fresh, lock, quarantine, restart
+from test_gateway_lockout import ADMIN, ATTESTED, GOOD, BAD, MAIN, contained_env, events, fresh, lock, quarantine, restart
 
 PAT = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0123456789\n-----END RSA PRIVATE KEY-----"
@@ -440,7 +440,7 @@ def test_a_report_and_a_later_escalation_share_one_incident():
     with contained_env():
         opened = gateway.report_event(report(event_type="CREDENTIAL_EXTRACTION_ATTEMPT"))
         gateway.authorize(request("git.remote.update", context={"signals": ["acp_bypass_attempted"]}),
-                          verifier=verifier())
+                          verifier=verifier(), caller=ATTESTED)
         found = incidents()
     assert len(found) == 1, found
     assert found[0]["incident_id"] == opened["incident_id"]
@@ -986,6 +986,32 @@ def test_concurrent_file_mode_events_do_not_fork_the_chain():
             result = gateway.verify_audit_chain(list(gateway.AUDIT))
             assert result["valid"] is True and result["length"] == 120, result
 
+
+
+# ---- the shared bearer never changes containment ------------------------------------
+SHARED = {"kind": "shared", "id": "shared", "repos": None}
+
+
+def test_shared_bearer_signals_never_contain_a_repository_or_an_actor():
+    fresh()
+    with contained_env():
+        for _ in range(3):
+            out = gateway.authorize(request("git.remote.update", context={"signals": ["acp_bypass_attempted"]}),
+                                    verifier=verifier())
+            assert out["decision"] == "ALLOW" and out["authorization_state"] == "NORMAL", out
+        assert gateway.security_record(gateway.security_keys({"owner": OWNER, "name": REPO}, "github-user:12345")) \
+            is None, "nothing was frozen for the repository or the named actor"
+
+
+def test_shared_bearer_tamper_reports_are_recorded_but_never_escalate():
+    fresh()
+    with contained_env():
+        quarantine()
+        out = gateway.report_event(report(event_type="LOCAL_POLICY_REMOVED"), caller=SHARED)
+        assert out["accepted"] is True and out["authorization_state"] == "QUARANTINED", out
+        escalated = gateway.report_event(report(event_type="LOCAL_POLICY_REMOVED", event_id="evt_client_2"),
+                                         caller=ATTESTED)
+        assert escalated["authorization_state"] == "LOCKED", escalated
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

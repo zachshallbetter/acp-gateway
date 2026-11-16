@@ -91,5 +91,52 @@ class VercelAdapterTests(unittest.TestCase):
                 self.assertNotIn("secret", str(warning.call_args))
 
 
+    def test_a_host_that_fails_its_configuration_check_refuses_everything_but_health(self):
+        responses = []
+        with patch.dict(adapter._BOOT, {"checked": False, "problem": None}), \
+                patch.object(adapter, "boot_check", side_effect=SystemExit("ACP_GATEWAY_TOKEN is required")):
+            for path, allowed in (("/api?__acp_path=%2Fhealth", True), ("/api?__acp_path=%2Fready", False)):
+                handler = object.__new__(adapter.handler)
+                handler.path = path
+                handler.discard_body = lambda: None
+                handler.reply = lambda code, body: responses.append((code, body))
+                self.assertEqual(handler._restore_path(), allowed)
+        self.assertEqual(responses, [(503, responses[0][1])])
+        self.assertEqual(responses[0][1]["error"], "MISCONFIGURED")
+
+    def test_an_unexpected_failure_rolls_back_and_a_serialization_conflict_is_retried(self):
+        attempts = {"opened": 0, "committed": 0}
+
+        @contextmanager
+        def transaction():
+            attempts["opened"] += 1
+            yield None
+            attempts["committed"] += 1
+
+        handler = object.__new__(gateway.Handler)
+        response = {}
+        handler._send_reply = lambda code, body, headers=None: response.update(code=code, body=body)
+
+        def failing():
+            handler.upstream_failure(RuntimeError("boom"), "Retry.")
+        with patch.object(gateway.postgres_store, "transaction", transaction):
+            handler._with_database_transaction(failing)
+        self.assertEqual((attempts["opened"], attempts["committed"]), (1, 0), "nothing a failed request wrote is kept")
+        self.assertEqual(response["code"], 502)
+
+        conflict = type("SerializationFailure", (Exception,), {"sqlstate": "40001"})
+        calls = {"n": 0}
+
+        def conflicted_once():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                handler.upstream_failure(conflict("could not serialize"), "Retry.")
+            else:
+                handler.reply(200, {"ok": True})
+        attempts.update(opened=0, committed=0)
+        with patch.object(gateway.postgres_store, "transaction", transaction), patch.object(gateway.time, "sleep"):
+            handler._with_database_transaction(conflicted_once)
+        self.assertEqual((attempts["opened"], attempts["committed"], response["code"]), (2, 1, 200))
+
 if __name__ == "__main__":
     unittest.main()

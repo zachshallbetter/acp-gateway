@@ -1,5 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": {
+      "*": false,
+      "main": true
+    }
+  },
   "outputDirectory": "public",
   "buildCommand": "python3 -m pip install --quiet --disable-pip-version-check --target .build-deps -r requirements.txt && PYTHONPATH=.build-deps python3 scripts/vercel-build.py",
   "functions": {

@@ -1302,7 +1302,9 @@ def remember_trust(key, **fields):
 AUDIT = []                      # in-process event ring; emit_event writes it
 
 SECRET_ENV = ("ACP_GATEWAY_TOKEN", "ACP_GITHUB_PRIVATE_KEY", "ACP_POLICY_SIGNING_KEY",
-              "ACP_POLICY_ADMIN_TOKEN", "RAILWAY_TOKEN", "RAILWAY_API_TOKEN")
+              "ACP_POLICY_ADMIN_TOKEN", "ACP_CAPABILITY_SIGNING_KEY", "ACP_VERCEL_TOKEN", "ACP_RAILWAY_TOKEN",
+              "ACP_SECURITY_WEBHOOK_TOKEN", "ACP_DATABASE_URL", "DATABASE_URL", "POSTGRES_URL",
+              "RAILWAY_TOKEN", "RAILWAY_API_TOKEN")
 
 
 def secret_values():
@@ -1496,6 +1498,23 @@ def security_keys(claim, actor_id=None, include_actor=True):
     if include_actor and actor_id:
         keys.append("actor:" + actor_id.lower())
     return keys
+
+
+def attested(caller):
+    """Whether a caller's own say-so may change containment state.
+
+    The shared bearer sits in every hook on every machine, including the agents being
+    governed, so its claims about actors and its self-reported signals are recorded but
+    never freeze anything: otherwise any holder could lock any repository or actor.
+    """
+    if caller is None:                                   # an in-process call: no bearer was presented
+        return True
+    return caller.get("kind") in ("lane", "coordinator", "owner")
+
+
+def reported_signals(context, caller):
+    """The material signals a caller may escalate with: none from the shared bearer."""
+    return sorted(set(context.get("signals") or []) & MATERIAL_SIGNALS) if attested(caller) else []
 
 
 def security_record(keys):
@@ -1724,7 +1743,13 @@ def containment_summary(record):
 # does not obtain the underlying authority: the capability boundary still checks.
 
 def capability_key():
-    return os.getenv("ACP_CAPABILITY_SIGNING_KEY", "") or os.getenv("ACP_POLICY_SIGNING_KEY", "")
+    """The capability signing key. Without a dedicated one it is derived from the policy key for this one
+    purpose, so a capability token and a policy signature never share a key."""
+    dedicated = os.getenv("ACP_CAPABILITY_SIGNING_KEY", "")
+    if dedicated:
+        return dedicated
+    policy = os.getenv("ACP_POLICY_SIGNING_KEY", "")
+    return hmac.new(policy.encode(), b"acp-capability-signing-v1", hashlib.sha256).hexdigest() if policy else ""
 
 
 def capability_ttl(default=60):
@@ -2572,6 +2597,21 @@ def parse_authorization_request(body):
                                       ("force", "force"), ("non_fast_forward", "non_fast_forward")):
         if context.get(context_key) is None and operation.get(envelope_key) is not None:
             context[context_key] = operation[envelope_key]
+    # These reach GitHub API paths, so they are held to what GitHub itself allows.
+    for field in ("owner", "name"):
+        if claim.get(field) is not None and not GITHUB_NAME_RE.fullmatch(str(claim[field])):
+            raise TargetError(400, "INVALID_REQUEST", f"repository_claim.{field} is not a GitHub owner or "
+                              "repository name.", remedy="Send the names from the git remote.",
+                              field=f"repository_claim.{field}")
+    for field in ("old_sha", "new_sha"):
+        if context.get(field) and not re.fullmatch(r"[A-Za-z0-9]{1,64}", str(context[field])):
+            raise TargetError(400, "INVALID_REQUEST", f"context.{field} is not a Git object ID.",
+                              remedy="Send the commit's hex id.", field=f"context.{field}")
+    ref = context.get("ref")
+    if ref is not None and (not isinstance(ref, str) or ".." in ref or ref.endswith((".", "/")) or
+                            any(ord(c) < 33 or ord(c) == 127 or c in "\\~^:?*[#%" for c in ref) or "@{" in ref):
+        raise TargetError(400, "INVALID_REQUEST", "context.ref is not a valid Git ref.",
+                          remedy="Send the full ref, e.g. refs/heads/main.", field="context.ref")
     for flag in ("force", "non_fast_forward"):
         if flag in context and not isinstance(context[flag], bool):
             raise TargetError(400, "INVALID_REQUEST", f"context.{flag} must be true or false.",
@@ -2924,8 +2964,8 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                           "This caller's credential is not issued for this repository.")
 
     trace["keys"] = security_keys(claim, parsed["actor_id"],
-                                  include_actor=record is not None or scope is None
-                                  or (claim_owner and claim_owner in scope))
+                                  include_actor=attested(caller) and (record is not None or scope is None
+                                                                      or (claim_owner and claim_owner in scope)))
     trace["entry_state"] = (security_record(trace["keys"]) or {}).get("authorization_state", "NORMAL")
 
     # A client change is not a violation. Repeating a *blocked* controlled
@@ -3024,7 +3064,7 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
         # Repeated attempts are recorded, never punished with anything worse:
         # the system stays stable and locked.
         write_security(trace["keys"], now, attempts=contained.get("attempts", 0) + 1)
-        material = sorted(set(context.get("signals") or []) & MATERIAL_SIGNALS)
+        material = reported_signals(context, caller)
         return finish("LOCKED", contained.get("reason") or "REPEATED_CONTROL_BYPASS",
                       "Controlled operations are suspended for this resource. Authentication, a new session, a "
                       "different agent, a fresh clone and restoring local files do not clear this state; only "
@@ -3101,7 +3141,7 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
         contained = {}                                   # cleared: evaluate this request normally
 
     if trace["state"] == "QUARANTINED":
-        signals = sorted(set(context.get("signals") or []) & MATERIAL_SIGNALS)
+        signals = reported_signals(context, caller)
         attempts = contained.get("attempts", 0) + 1
         if signals:
             advanced = escalate(trace["keys"], now, quarantine_reason(signals), signals)
@@ -3150,7 +3190,7 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                           f"The policy governing this repository does not list {action}, so ACP does not "
                           "meter it here and cannot authorize it.")
 
-    signals = sorted(set(context.get("signals") or []) & MATERIAL_SIGNALS)
+    signals = reported_signals(context, caller)
     canonical = policy["repository"].get("canonical_remote")
     claimed_remote = claim.get("remote_url")
     remote_ok = not (canonical and claimed_remote) or remote_matches(canonical, claimed_remote)
@@ -3739,7 +3779,8 @@ def report_event(body, now=None, caller=None):
     # Correlation and escalation follow the *resource*. An actor already caught by
     # one incident must not drag an unrelated repository into it.
     resource_keys = security_keys({"owner": owner, "name": name}, None)
-    keys = security_keys({"owner": owner, "name": name}, principal.get("actor_id"))
+    keys = security_keys({"owner": owner, "name": name}, principal.get("actor_id"),
+                         include_actor=attested(caller))
     contained = security_record(resource_keys or keys) or {}
     resource_id = f"{owner}/{name}".lower() if owner and name else resource.get("resource_id")
 
@@ -3759,7 +3800,7 @@ def report_event(body, now=None, caller=None):
 
     escalated = None
     state = contained.get("authorization_state", "NORMAL")
-    if event_type in TAMPER_EVENTS and state == "QUARANTINED":
+    if event_type in TAMPER_EVENTS and state == "QUARANTINED" and attested(caller):
         # Quarantine active, control artifacts tampered with again: A4 -> A5.
         escalated = escalate(resource_keys or keys, now, "CONTROL_PLANE_INTEGRITY_EVENT",
                              [event_type.lower()])
@@ -4745,7 +4786,8 @@ def integrity_snapshot(body, verifier=None, now=None, caller=None):
     require_caller_covers(caller, owner, name)
     resource_id = f"{owner}/{name}".lower()
     resource_keys = security_keys({"owner": owner, "name": name}, None)
-    keys = security_keys({"owner": owner, "name": name}, principal.get("actor_id"))
+    keys = security_keys({"owner": owner, "name": name}, principal.get("actor_id"),
+                         include_actor=attested(caller))
     if security_degraded():
         raise UpstreamError(503, "SECURITY_STATE_UNAVAILABLE", security_degraded(),
                             remedy="Controlled operations stay refused until the state store is usable.")
@@ -5006,6 +5048,7 @@ def actor_identity(owner, actor_id):
     return value
 
 
+GITHUB_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
 NEW_REF_SHA = "0" * 40  # the old_sha git reports for a ref that does not exist yet
 
 
@@ -5466,11 +5509,80 @@ def ready_policy_error():
     return error
 
 
+# Anonymous routes (/ready, /notice) are answered to anyone, so each client address gets a bounded
+# rate and repeated questions are answered from a short per-instance cache instead of the database.
+ANONYMOUS_PER_MINUTE = 60
+READY_CACHE_SECONDS = 5
+NOTICE_CACHE_SECONDS = 15
+_ANONYMOUS = {"buckets": {}, "ready": {}, "notice": {}}
+_ANONYMOUS_LOCK = threading.Lock()
+
+
+def anonymous_allowed(client, now=None):
+    """A token bucket per client address: ANONYMOUS_PER_MINUTE, refilled continuously."""
+    now = time.monotonic() if now is None else now
+    with _ANONYMOUS_LOCK:
+        buckets = _ANONYMOUS["buckets"]
+        tokens, at = buckets.get(client, (float(ANONYMOUS_PER_MINUTE), now))
+        tokens = min(float(ANONYMOUS_PER_MINUTE), tokens + (now - at) * ANONYMOUS_PER_MINUTE / 60.0)
+        allowed = tokens >= 1.0
+        buckets[client] = (tokens - 1.0 if allowed else tokens, now)
+        if len(buckets) > 4096:
+            buckets.pop(next(iter(buckets)))
+        return allowed
+
+
+def _anonymous_cached(slot, key, ttl, now=None):
+    now = time.monotonic() if now is None else now
+    with _ANONYMOUS_LOCK:
+        hit = _ANONYMOUS[slot].get(key)
+        return hit[1] if hit and now - hit[0] < ttl else None
+
+
+def _anonymous_store(slot, key, value, now=None):
+    now = time.monotonic() if now is None else now
+    with _ANONYMOUS_LOCK:
+        _ANONYMOUS[slot][key] = (now, value)
+        if len(_ANONYMOUS[slot]) > 1024:
+            _ANONYMOUS[slot].pop(next(iter(_ANONYMOUS[slot])))
+
+
+def _ready_cache_key():
+    """A readiness answer holds only for the configuration that produced it."""
+    return (os.getenv("ACP_SHARED_STATE_ID", ""), os.getenv("ACP_REQUIRE_PRODUCTION_CONTROLS", ""),
+            os.getenv("ACP_STORAGE_BACKEND", ""))
+
+
+# What a caller without the bearer is not shown: which files the integrity check watches and the
+# signed document's identity. State and governance stay public: an agent in a copy needs them.
+NOTICE_BEARER_ONLY = ("canonical_remote", "policy_sha256", "signing_key_id", "protected_artifacts",
+                      "protected_patterns")
+
+
+def anonymous_notice(body):
+    return {key: value for key, value in body.items() if key not in NOTICE_BEARER_ONLY}
+
+
+class _RollbackRequest(Exception):
+    """Raised inside a request transaction so it rolls back; never leaves the handler."""
+
+
+# One request plus two retries of a serialization conflict (SQLSTATE 40001).
+SERIALIZATION_ATTEMPTS = 3
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     # Bounds every blocking read -- request line, headers, body -- so an idle or
     # trickling client cannot pin a thread (and, before auth, a descriptor)
     # forever. A timed-out read closes the connection (handle_one_request).
     timeout = socket_timeout()
+
+    def client_address_key(self):
+        """The caller's address as the platform proxy saw it: the address it appended, not one a client
+        wrote into X-Forwarded-For itself."""
+        real = (self.headers.get("X-Real-IP") or "").strip()
+        forwarded = [part.strip() for part in (self.headers.get("X-Forwarded-For") or "").split(",") if part.strip()]
+        return ((forwarded[-1] if forwarded else "") or real or str((self.client_address or ("",))[0]))[:64]
 
     def do_GET(self):
         route, params = urlsplit(self.path).path, parse_qs(urlsplit(self.path).query)
@@ -5478,7 +5590,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route == "/health":
             self.reply(200, {"status": "ok", "service": "acp-gateway", "app_configured": configured()})
             return
+        if route in ("/ready", "/notice", "/.well-known/acp") and not getattr(self, "_db_transaction_active", False) \
+                and not authorized(self) and not anonymous_allowed(self.client_address_key()):
+            self.reply(429, {"error": "RATE_LIMITED", "detail": "Too many anonymous requests from this address.",
+                             "remedy": "Wait a minute, or send the ACP bearer token.", "retry_after": 60})
+            return
         if route == "/ready":
+            cached = _anonymous_cached("ready", _ready_cache_key(), READY_CACHE_SECONDS)
+            if cached is not None:
+                self.reply(*cached)
+                return
             try:
                 if os.getenv("ACP_REQUIRE_PRODUCTION_CONTROLS", "").strip().lower() in ("1", "true", "yes"):
                     problem = ready_policy_error()
@@ -5491,25 +5612,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 elif security_degraded():
                     raise postgres_store.StorageError("security state is degraded")
                 state_id = shared_state_id()
-                self.reply(200, {"status": "ready", "storage": "postgres"
-                                 if postgres_store.enabled() else "file",
-                                 **({"state_authority_id": state_id} if state_id else {})})
+                answer = (200, {"status": "ready", "storage": "postgres"
+                                if postgres_store.enabled() else "file",
+                                **({"state_authority_id": state_id} if state_id else {})})
             except postgres_store.StorageError as exc:
                 logging.getLogger("acp_gateway").warning(
                     "ACP readiness check failed: %s", exc)
-                self.reply(503, {"status": "not_ready", "storage": "unavailable"})
+                answer = (503, {"status": "not_ready", "storage": "unavailable"})
+            _anonymous_store("ready", _ready_cache_key(), answer)
+            self.reply(*answer)
             return
         if route in ("/notice", "/.well-known/acp"):
-            if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
-                return self._with_database_transaction(self.do_GET)
             # Unauthenticated on purpose: an agent in a copy holds no token, and
             # it is the party that most needs to be told the terms.
+            bearer = authorized(self)
+            key = (first("owner").lower(), first("name").lower())
+            cached = None if bearer else _anonymous_cached("notice", key, NOTICE_CACHE_SECONDS)
+            if cached is not None:
+                self.reply(200, cached)
+                return
+            if postgres_store.enabled() and not getattr(self, "_db_transaction_active", False):
+                return self._with_database_transaction(self.do_GET)
             try:
-                self.reply(200, notice_lookup(first("owner"), first("name")))
+                found = notice_lookup(first("owner"), first("name"))
+                if not bearer:
+                    found = anonymous_notice(found)
+                    _anonymous_store("notice", key, found)
+                self.reply(200, found)
             except GatewayError as exc:
                 self.reply(exc.status, exc.payload())
             except Exception as exc:
-                self.reply(502, {"error": "UPSTREAM_FAILURE", "detail": str(exc)[:240]})
+                self.upstream_failure(exc, "Retry in a minute.")
             return
         if not route.startswith("/internal/"):
             self.reply(404, {"error": "NOT_FOUND", "detail": f"No route {route}.", "endpoints": ENDPOINTS})
@@ -5528,8 +5661,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except postgres_store.StorageError:
             raise
         except Exception as exc:
-            self.reply(502, {"error": "UPSTREAM_FAILURE", "detail": str(exc)[:240],
-                             "remedy": "Check /internal/app-probe; if that mints a token, the failure is board-side."})
+            self.upstream_failure(exc, "Check /internal/app-probe; if that mints a token, the failure is board-side.")
 
     def internal(self, route, first):
         if route == "/internal/app-status":
@@ -5736,9 +5868,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except postgres_store.StorageError:
             raise
         except Exception as exc:
-            self.reply(502, {"error": "UPSTREAM_FAILURE", "detail": str(exc)[:240],
-                             "remedy": "Retry. A decision is never inferred from a failure: protected actions "
-                                       "remain unauthorized until ACP returns one."})
+            self.upstream_failure(exc, "Retry. A decision is never inferred from a failure: protected actions "
+                                       "remain unauthorized until ACP returns one.")
+
+    def upstream_failure(self, exc, remedy):
+        """Reply 502 for an unexpected failure. Its text can carry upstream detail, so only its type is
+        shown (the full text goes to the log), and inside a request transaction nothing it wrote is kept."""
+        logging.getLogger("acp_gateway").warning("request failed: %s: %s", type(exc).__name__, scrub(str(exc)))
+        if getattr(self, "_db_transaction_active", False):
+            self._rollback = exc
+        self.reply(502, {"error": "UPSTREAM_FAILURE", "detail": type(exc).__name__, "remedy": remedy})
 
     def json_body(self, event=False, snapshot=False, maximum=None, reject_duplicate_keys=False):
         """Bounded, typed body reading. The body is never echoed back."""
@@ -5781,6 +5920,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               remedy="Send a JSON object; see the authorize contract in the README.")
 
     _raw_body = None
+    _rollback = None
 
     BODY_CEILINGS = {"/internal/documents": lambda: DOCUMENT_MAX_BYTES,
                      "/internal/report": event_body_limit,
@@ -5818,18 +5958,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
 
     def _with_database_transaction(self, request_handler):
-        self._pending_reply = None
-        self._db_transaction_active = True
-        try:
-            with postgres_store.transaction():
-                request_handler()
-            code, body = self._pending_reply or (500, {"error": "INTERNAL_ERROR"})
-        except postgres_store.StorageError:
-            code, body = 503, {"error": "STATE_STORE_UNAVAILABLE",
-                               "detail": "The shared state transaction could not be completed.",
-                               "remedy": "Retry only after ACP reports ready; no authorization was issued."}
-        finally:
-            self._db_transaction_active = False
+        """Run one request in one serializable transaction. A request that failed unexpectedly keeps
+        nothing it wrote, and a serialization conflict with a concurrent request is retried a bounded
+        number of times on the same buffered body before it is reported as unavailable."""
+        buffered = self._raw_body
+        for attempt in range(SERIALIZATION_ATTEMPTS):
+            self._pending_reply, self._rollback, self._raw_body = None, None, buffered
+            self._db_transaction_active = True
+            retry = False
+            try:
+                with postgres_store.transaction():
+                    request_handler()
+                    if self._rollback is not None:
+                        raise _RollbackRequest()
+                code, body = self._pending_reply or (500, {"error": "INTERNAL_ERROR"})
+            except _RollbackRequest:
+                retry = postgres_store.serialization_failure(self._rollback)
+                code, body = self._pending_reply or (500, {"error": "INTERNAL_ERROR"})
+            except postgres_store.StorageError as exc:
+                retry = postgres_store.serialization_failure(exc)
+                code, body = 503, {"error": "STATE_STORE_UNAVAILABLE",
+                                   "detail": "The shared state transaction could not be completed.",
+                                   "remedy": "Retry only after ACP reports ready; no authorization was issued."}
+            finally:
+                self._db_transaction_active = False
+            if not retry or attempt + 1 == SERIALIZATION_ATTEMPTS:
+                break
+            time.sleep(0.05 * (attempt + 1))
         self._send_reply(code, body)
 
     def log_message(self, *_):
@@ -5837,6 +5992,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    boot_check()
+    http.server.ThreadingHTTPServer((os.getenv("ACP_BIND_HOST", "0.0.0.0"), int(os.getenv("PORT", "8080"))), Handler).serve_forever()
+
+
+def boot_check():
+    """Every configuration check a host must pass before it serves. Raises SystemExit naming the first
+    problem. The server runs it at start; the Vercel adapter runs it once per instance."""
     if not os.getenv("ACP_GATEWAY_TOKEN"):
         raise SystemExit("ACP_GATEWAY_TOKEN is required")
     if postgres_store.enabled():
@@ -5864,7 +6026,6 @@ def main():
     load_audit_tail()                    # history stays queryable across a restart
     if security_degraded():              # a corrupt containment store must not read as "nothing contained"
         raise SystemExit("ACP_SECURITY_STATE_FILE: " + security_degraded())
-    http.server.ThreadingHTTPServer((os.getenv("ACP_BIND_HOST", "0.0.0.0"), int(os.getenv("PORT", "8080"))), Handler).serve_forever()
 
 
 if __name__ == "__main__":

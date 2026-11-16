@@ -15,7 +15,7 @@ os.environ.setdefault("ACP_GATEWAY_TOKEN", "test-token")
 import gateway  # noqa: E402
 from test_gateway_policy import OWNER, REPO, REMOTE, NOTICE, SIGNING_KEY, claim, request, signed  # noqa
 from test_gateway_policy import policy as base_policy, verifier, Served  # noqa: E402
-from test_gateway_lockout import ADMIN, GOOD, BAD, MAIN, fresh, restart  # noqa: E402
+from test_gateway_lockout import ADMIN, ATTESTED, GOOD, BAD, MAIN, fresh, restart  # noqa: E402
 from unittest.mock import patch as _patch
 
 AGENTS = hashlib.sha256(b"# AGENTS\n").hexdigest()
@@ -553,7 +553,7 @@ def test_end_to_end_out_of_band_tampering_between_sessions():
 
             bypassed = gateway.authorize(
                 request("git.remote.update", context={"signals": ["acp_bypass_attempted"]}),
-                verifier=verifier(), now=1002.0)
+                verifier=verifier(), now=1002.0, caller=ATTESTED)
             assert bypassed["decision"] == "QUARANTINE" and bypassed["code"] == "A4", bypassed
             incident = bypassed["incident_id"]
 

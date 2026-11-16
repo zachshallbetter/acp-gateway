@@ -22,6 +22,15 @@ from db_migrations import applied_history, classify
 class StorageError(RuntimeError):
     """A storage operation failed; protected decisions must fail closed."""
 
+    def __init__(self, message, sqlstate=None):
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def serialization_failure(exc) -> bool:
+    """Whether a failure is a serialization conflict another attempt can resolve (SQLSTATE 40001)."""
+    return getattr(exc, "sqlstate", None) == "40001"
+
 
 _VERCEL_RUNTIME = bool(os.getenv("VERCEL"))
 _BACKEND = os.getenv("ACP_STORAGE_BACKEND", "postgres" if _VERCEL_RUNTIME else "file").strip().lower()
@@ -206,7 +215,7 @@ def transaction():
     except psycopg.Error as exc:
         state = getattr(exc, "sqlstate", None)
         detail = f" SQLSTATE {state}" if state else ""
-        raise StorageError("database transaction failed" + detail) from exc
+        raise StorageError("database transaction failed" + detail, sqlstate=state) from exc
 
 
 def _set_transaction_limits(connection) -> None:

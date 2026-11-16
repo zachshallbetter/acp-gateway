@@ -50,6 +50,7 @@ def fresh():
     gateway._SECURITY.update(loaded=True, records={}, degraded=None)
     gateway._LAST_DENIAL.clear()
     gateway._PROVIDER.update(status="UNKNOWN", changed_at=None)
+    gateway._ANONYMOUS.update(buckets={}, ready={}, notice={})
     del gateway.AUDIT[:]
 
 
@@ -790,7 +791,7 @@ def test_a_policy_modification_attempt_is_a_circumvention_signal():
     with env():
         out = gateway.authorize(request("git.remote.update",
                                         context={"signals": ["policy_modification_attempted"]}),
-                                verifier=verifier())
+                                verifier=verifier(), caller={"kind": "lane", "id": "lane-test", "repos": None})
     assert out["decision"] == "QUARANTINE" and out["reason"] == "CIRCUMVENTION_SUSPECTED", out
     assert out["policy_effect"] == "CONTAINMENT_NO_AUTOMATIC_REPAIR"
 
@@ -925,6 +926,29 @@ def test_every_decision_is_audited_without_credentials():
     assert entry["decision"] == "ALLOW" and entry["actor_id"] == "github-user:12345"
     assert "PRIVATE KEY" not in gateway.scrub(json.dumps(entry))
 
+
+
+def test_names_shas_and_refs_bound_for_github_paths_are_validated():
+    fresh()
+    with env():
+        for body in (request("repository.read", repository_claim=claim(name="widget?ref=x")),
+                     request("repository.read", repository_claim=claim(owner="../evil")),
+                     request("git.protected_ref.update", context={"ref": "refs/heads/main#x", "new_sha": "a" * 40}),
+                     request("git.protected_ref.update", context={"ref": "refs/heads/main", "new_sha": "../x"})):
+            try:
+                gateway.authorize(body, verifier=None)
+            except gateway.TargetError as exc:
+                assert exc.status == 400 and exc.payload()["error"] == "INVALID_REQUEST", exc.payload()
+            else:
+                raise AssertionError(body)
+
+
+def test_an_unexpected_failure_shows_only_its_type():
+    fresh()
+    with env(), Served() as served, \
+            patch.object(gateway, "authorize", side_effect=RuntimeError("upstream said secret-thing at /x")):
+        status, body = served.post(request("repository.read"))
+    assert status == 502 and body["detail"] == "RuntimeError", body
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -342,7 +342,7 @@ class RailwayTests(unittest.TestCase):
 
 
 class ReleaseOrderTests(unittest.TestCase):
-    def run_release(self, dry_run=False, step=None, skip_railway=False, resuming=False):
+    def run_release(self, dry_run=False, step=None, skip_railway=False, resuming=False, railway_fails=False):
         calls = []
         update = {"owner": "zachshallbetter", "name": "acp-gateway", "remote": "origin", "ref": "refs/heads/main",
                   "old_sha": "b" * 40, "new_sha": SHA}
@@ -375,7 +375,10 @@ class ReleaseOrderTests(unittest.TestCase):
                 patch.object(release.ff_merge, "merge", note("merge")), \
                 patch.object(release, "vercel_build", note("vercel", {"url": "dpl-new.vercel.app"})), \
                 patch.object(release, "vercel_alias", note("alias")), \
-                patch.object(release, "railway_deploy", note("railway", {"id": "new"})), \
+                patch.object(release, "railway_deploy", self.failing("railway down") if railway_fails
+                             else note("railway", {"id": "new"})), \
+                patch.object(release, "vercel_current", lambda: {"url": "dpl-old.vercel.app"}), \
+                patch.object(release, "railway_deployments", lambda: [{"id": "old-railway"}]), \
                 patch.object(release, "verify", note("verify")), patch("sys.stdout", io.StringIO()):
             release.release(args, ROOT)
         return calls
@@ -385,6 +388,20 @@ class ReleaseOrderTests(unittest.TestCase):
         self.assertEqual(self.run_release(step=step),
                          ["plan", "check", "harness", "bearer", "migrate", "merge", "vercel", "alias", "railway",
                           "verify"])
+
+    @staticmethod
+    def failing(message):
+        def fail(*args, **kwargs):
+            raise Stop(message)
+        return fail
+
+    def test_a_stop_after_the_merge_names_how_to_return_to_the_previous_release(self):
+        with self.assertRaises(Stop) as stopped:
+            self.run_release(railway_fails=True)
+        message = str(stopped.exception)
+        self.assertIn("railway down", message)
+        self.assertIn("vercel rollback dpl-old.vercel.app", message)
+        self.assertIn("old-railway", message)
 
     def test_a_current_database_skips_the_migration(self):
         self.assertNotIn("migrate", self.run_release())
@@ -411,7 +428,7 @@ class VerifyTests(unittest.TestCase):
         answers = {"https://a/health": (200, {"status": "ok"}), "https://a/ready": (503, {"status": "not_ready"})}
         with patch.object(acp_ops, "get_json", side_effect=lambda url: answers[url]):
             with self.assertRaisesRegex(Stop, "https://a/ready answered 503 not_ready"):
-                release.verify(["https://a"])
+                release.verify(["https://a"], attempts=1)
 
 
     def test_hosts_reporting_different_state_ids_fail_verification(self):
@@ -420,10 +437,17 @@ class VerifyTests(unittest.TestCase):
                    "https://b/ready": (200, {"status": "ready"})}
         with patch.object(acp_ops, "get_json", side_effect=lambda url: answers[url]):
             with self.assertRaisesRegex(Stop, "different state_authority_id"):
-                release.verify(["https://a", "https://b"])
+                release.verify(["https://a", "https://b"], attempts=1)
         answers["https://b/ready"] = (200, {"status": "ready", "state_authority_id": "acp-one"})
         with patch.object(acp_ops, "get_json", side_effect=lambda url: answers[url]):
             release.verify(["https://a", "https://b"])
+
+    def test_a_host_still_warming_up_is_asked_again(self):
+        answers = iter([(503, {"status": "not_ready"}), (200, {"status": "ok"}), (200, {"status": "ready"})])
+        with patch.object(acp_ops, "get_json", side_effect=lambda url: (200, {"status": "ok"})
+                          if url.endswith("/health") else next(answers)), patch.object(release, "sleep", lambda s: None):
+            release.verify(["https://a"], attempts=3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -358,9 +358,17 @@ A repository opts in by listing the first three in its policy's
    triggers, and recommendations such as batching pushes, waiting for a running
    build, turning off preview builds nobody opens, or not pushing one commit
    under two branches. Asking again for the same pushed commit is answered from
-   the record and not counted twice; a CLI deploy (`cli_deploy`, `railway_up`) or
-   a manual dispatch starts a new run each time, so each invocation is counted
-   (the same `context.tool_use_id` counts once). A commit no provider builds is
+   the record and not counted twice, and a lane retrying its own granted push is
+   answered the same way; a CLI deploy (`cli_deploy`, `railway_up`), a manual
+   dispatch or a rerun starts a new run each time, so each invocation is counted.
+   The same `context.tool_use_id` retried by the same caller within ten minutes
+   counts once; reused by another caller or later, it is refused
+   (`INVOCATION_REUSED`), since it would otherwise let later deploys through
+   uncounted. A merge and the push of the same commit start the same builds, so
+   whichever ACP hears of first counts them and the other is answered from that
+   record. Pacing is checked before anything is spent: a deferred push takes no
+   grant and no priority use, and neither a grant nor the coordinator's
+   credential excuses a burst. A commit no provider builds is
    allowed and not counted (`NO_HOSTED_BUILD`); a CLI deploy to a provider the
    policy does not meter is refused (`PROVIDER_NOT_METERED`). What builds comes
    from the repository's evidence for the trigger, never from
@@ -401,8 +409,9 @@ which is all a scoped caller may ask; the full audit is for the coordinator, the
 owner or the admin credential. `scripts/policy-admin.py coverage [OWNER/NAME]`
 prints it, and `enroll` prints it for the repository it just enrolled.
 
-A production merge costs nothing by itself (its builds are metered as hosted
-builds), so for the coordinator and the owner the daily merge count is awareness,
+A production merge's builds are counted once, as hosted builds, whether ACP hears
+of them through the merge or the push, so for the coordinator and the owner the
+daily merge count is awareness,
 not a gate: past it a merge is allowed, counted and flagged `OVER_BUDGET_NOTED`
 with the count in the answer and in `GET /internal/budget`. Hosted builds and
 manual CI stay enforced.
@@ -411,8 +420,9 @@ The owner is asked only past a budget or for production, through a grant:
 `scripts/policy-admin.py budget-grant --action hosted_build --repo OWNER/NAME
 --uses 1 --expires 2h --reason "…" --apply`. A grant is bounded in uses and
 time and takes effect at once, without a deployment. Repeating the same grant
-command within ten minutes answers with the grant it already issued, and how many
-uses it has left; a later run issues a new one. A grant names a repository ACP governs
+command within the same ten-minute window (UTC, starting on the hour's :00, :10, …)
+answers with the grant it already issued, and how many uses it has left; a run in a
+later window issues a new one, so two runs a minute apart across a window edge issue two. A grant names a repository ACP governs
 or none at all (`REPOSITORY_NOT_GOVERNED` otherwise). Every refusal a grant would clear
 carries `grant_request`: the grant's fields and the complete command that issues it, with
 the request's own reason filled in. The command starts with `ACP_GRANT_COMMAND_PREFIX`,
@@ -435,7 +445,23 @@ class except local inspection), `/internal/report` and
 `CALLER_NOT_PERMITTED` before reading or changing containment state. The admin
 credential identifies the owner. Until a coordinator has its
 own credential, the shared bearer is treated as a lane: production merges,
-pushes to production branches and manual CI need an owner grant.
+pushes to production branches and manual CI need an owner grant. The shared
+bearer sits in every hook, including the agents' own, so what it says about
+itself never freezes anything: its `context.signals` and its tamper reports are
+recorded but neither quarantine nor lock, and its `actor_id` attaches no actor
+record. Containment from a caller's own say-so needs a lane, coordinator or owner
+credential.
+
+**Anonymous routes.** `/ready` and `/notice` answer without the bearer. Each
+client address gets 60 such requests a minute (`429 RATE_LIMITED` past it;
+the bearer is not limited), and an instance answers repeats from a short cache
+(readiness 5 seconds, a notice 15) instead of the database, so a change in
+containment reaches an anonymous caller within 15 seconds. Without the bearer a
+notice leaves out `canonical_remote`, `policy_sha256`, `signing_key_id`,
+`protected_artifacts` and `protected_patterns`; governance, state and integrity
+status stay public. An unexpected failure answers `502 UPSTREAM_FAILURE` with only
+the failure's type, and nothing the request wrote is kept; a serialization
+conflict with a concurrent request is retried twice before it answers.
 
 **Posture.** `GET /internal/posture` lists every governed repository's Vercel,
 Railway and Actions build behaviour, today's budget use, and the risky settings
@@ -1330,7 +1356,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_QUARANTINE_ATTEMPT_LIMIT` | no | Protected attempts while quarantined before escalation. Default `5`. |
 | `ACP_QUARANTINE_SETTINGS` | no | JSON payload handed to the agent for `.claude/settings.local.json`. Defence in depth, not authority. |
 | `ACP_RECOVERY_REQUIRES_PROVIDER` | no | `1` (default): ACP must confirm the observed SHA itself before issuing a recovery capability. |
-| `ACP_CAPABILITY_SIGNING_KEY` | no | Key for capability MACs. Falls back to `ACP_POLICY_SIGNING_KEY`. |
+| `ACP_CAPABILITY_SIGNING_KEY` | no | Key for capability MACs. Unset, a key derived from `ACP_POLICY_SIGNING_KEY` for this purpose alone (HMAC-SHA256 of `acp-capability-signing-v1`), so capabilities and policy signatures never share a key. |
 | `ACP_CAPABILITY_TTL` | no | Seconds an `A0` capability lives. Default `60`; recovery capabilities get 5 minutes. |
 | `ACP_INCIDENT_STATE_FILE` | no | Alias for `ACP_SECURITY_STATE_FILE`; one store holds containment, incidents and the chain head. |
 | `ACP_EVENT_MAX_BODY_BYTES` | no | Body cap for `POST /internal/report`. Default `32768`. |
@@ -1541,13 +1567,18 @@ latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work
    `database.migrate`, applies them and checks again. It applies only migrations marked
    additive; anything else stops the release with the fix.
 4. It fast-forwards `main` under an exact `git.protected_ref.update`. Vercel builds `main`
-   and moves the production alias on its own.
+   and moves the production alias on its own; it builds no other branch from git
+   (`vercel.json` `git.deploymentEnabled`), so production builds happen on release.
 5. It waits for Vercel's build of that SHA to be READY and the alias to point at it.
 6. It deploys `git archive` of the same SHA to Railway, so nothing outside the commit is
    uploaded, and waits for SUCCESS.
-7. It checks `/health` and `/ready` on both hosts, and that both report the same `state_authority_id`.
+7. It checks `/health` and `/ready` on both hosts, and that both report the same `state_authority_id`,
+   asking again twice, ten seconds apart, while a host warms up.
 
-A failure stops the release where it is and says what state each host is in. A failed
+A failure stops the release where it is and says what state each host is in. Before the
+merge it records the deployment each host runs; a stop after the merge also prints how to
+return both to it (`vercel rollback <deployment> --scope <team>` and the Railway deployment to
+redeploy), next to fixing forward. A failed
 Vercel build leaves the alias on the previous deployment and Railway untouched; fix forward
 with a new release. Rerunning after the merge resumes: when `main` already holds HEAD, the
 merge is skipped and the Vercel check, Railway deploy and health checks run again. `--dry-run`

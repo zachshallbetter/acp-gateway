@@ -968,6 +968,144 @@ def test_policy_metered_block_is_validated():
         raise AssertionError(bad)
 
 
+
+# ---- review fixes ------------------------------------------------------------
+def _grant(ledger, action="hosted_build", grant_id="g-0000000000000009", uses=1):
+    ledger.grant_issue({"grant_id": grant_id, "action": action, "resource_owner": OWNER.lower(),
+                        "resource_name": REPO.lower(), "uses_total": uses, "uses_left": uses, "issued_at": NOW,
+                        "expires_at": NOW + 86400, "issued_by": "owner", "reason": "review fix test"})
+
+
+def test_a_reused_tool_use_id_is_refused_not_replayed():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        day = metering.budget_day(NOW)
+        first = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_9"), ledger,
+                       caller=COORDINATOR, now=NOW)
+        assert first["decision"] == "ALLOW" and not first.get("replayed"), first
+        late = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_9"), ledger,
+                      caller=COORDINATOR, now=NOW + metering.INVOCATION_REPLAY_SECONDS + 1)
+        assert late["decision"] == "DENY" and late["reason"] == "INVOCATION_REUSED", late
+        other = {"kind": "coordinator", "id": "coord-2", "repos": [f"{OWNER}/*"]}
+        borrowed = decide(request(trigger="cli_deploy", ref="refs/heads/main", tool_use_id="toolu_9"), ledger,
+                          caller=other, now=NOW + 5)
+        assert borrowed["reason"] == "INVOCATION_REUSED", "another caller cannot ride on this record"
+        assert ledger.ledger_count(day, ["hosted_build"]) == 1
+
+
+def test_each_rerun_is_counted():
+    with env(policy_body=policy(metered={"production_branches": ["main"], "providers": {}})):
+        fresh()
+        ledger = metering.MemoryLedger()
+        ci = [{"provider": "github_actions", "project": ".github/workflows/ci.yml", "would_build": True, "why": "x"}]
+        bounded = [{"path": ".github/workflows/ci.yml", "would_run": True, "jobs_without_timeout": [],
+                    "has_concurrency": True}]
+        for n in range(2):
+            out = decide(request("manual_ci", ref="refs/heads/main", trigger="rerun", run_id="123",
+                                 workflow=".github/workflows/ci.yml"), ledger, caller=COORDINATOR,
+                         provide=evidence(builds=ci, workflows=bounded), now=NOW + n * 600)
+            assert out["decision"] == "ALLOW" and not out.get("replayed"), out
+        assert ledger.ledger_count(metering.budget_day(NOW), ["manual_ci"]) == 2
+
+
+def test_priority_never_waives_a_service_ceiling_even_when_the_project_is_also_over():
+    ask = {"blocking": "continue_work", "reason": "the lane needs this branch built to continue"}
+    full = [{"provider": "vercel", "source": "live", "deployments_today": 150, "in_flight": 0, "projects_in_flight": {}}]
+    with env(limits={"hosted_build": {"per_project_per_day": 1, "min_spacing_seconds": 0}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        assert decide(request(sha="1" * 40), ledger, caller=LANE, now=NOW)["decision"] == "ALLOW"
+        out = decide(request(sha="2" * 40, priority=ask), ledger, caller=LANE, now=NOW + 600,
+                     provide=evidence(capacity=full))
+        assert out["decision"] == "AUTH_REQUIRED" and out["reason"] == "SERVICE_LIMIT_REACHED", out
+        assert out["budget"]["exceeded"]["kind"] == "service"
+
+
+def test_a_merge_and_the_push_of_one_commit_count_its_builds_once():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        day = metering.budget_day(NOW)
+        merged = decide(request("production_merge", ref="refs/heads/main"), ledger, caller=COORDINATOR, now=NOW)
+        assert merged["decision"] == "ALLOW", merged
+        pushed = decide(request(ref="refs/heads/main"), ledger, caller=COORDINATOR, now=NOW + 30)
+        assert pushed["decision"] == "ALLOW" and pushed.get("replayed") is True, pushed
+        assert ledger.ledger_count(day, list(metering.HOSTED)) == 1
+
+
+def test_a_lane_retrying_its_own_granted_production_push_is_answered_from_the_record():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        _grant(ledger)
+        first = decide(request(ref="refs/heads/main"), ledger, caller=LANE, now=NOW)
+        assert first["reason"] == "GRANT_APPLIED", first
+        again = decide(request(ref="refs/heads/main"), ledger, caller=LANE, now=NOW + 20)
+        assert again["decision"] == "ALLOW" and again.get("replayed") is True, again
+        other = {"kind": "lane", "id": "lane-b", "repos": [f"{OWNER}/{REPO}"]}
+        assert decide(request(ref="refs/heads/main"), ledger, caller=other, now=NOW + 40)["reason"] == "OWNER_REQUIRED"
+
+
+def test_a_grant_is_not_spent_on_a_push_pacing_defers():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        assert decide(request(sha="1" * 40, ref="refs/heads/main"), ledger, caller=COORDINATOR,
+                      now=NOW)["decision"] == "ALLOW"
+        _grant(ledger)
+        paced = decide(request(sha="2" * 40, ref="refs/heads/main"), ledger, caller=LANE, now=NOW + 10)
+        assert paced["reason"] == "BUILD_PACED", "a grant does not excuse pacing"
+        assert ledger.grants["g-0000000000000009"]["uses_left"] == 1, "nothing was spent on a deferral"
+        later = decide(request(sha="2" * 40, ref="refs/heads/main"), ledger, caller=LANE, now=NOW + 600)
+        assert later["reason"] == "GRANT_APPLIED", later
+
+
+def test_per_provider_limits_merge_over_the_defaults():
+    merged = metering.validated_limits({"hosted_build": {"per_provider_per_day": {"vercel": 100}}})
+    defaults = metering.DEFAULT_LIMITS["hosted_build"]["per_provider_per_day"]
+    assert merged["hosted_build"]["per_provider_per_day"] == {**defaults, "vercel": 100}
+
+
+def test_a_burst_retry_after_waits_for_the_window_to_drop_below_the_burst():
+    with env(limits={"hosted_build": {"min_spacing_seconds": 0}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        for n in range(7):
+            ledger.ledger_insert({"record_key": f"k{n}", "request_id": f"r{n}", "action": "hosted_build",
+                                  "provider": "vercel", "project": "widget", "resource_owner": OWNER.lower(),
+                                  "resource_name": REPO.lower(), "ref": "refs/heads/feature", "sha": str(n) * 40,
+                                  "caller_kind": "lane", "caller_id": "lane-a", "reason": "x" * 8, "counted": True,
+                                  "reason_code": "WITHIN_BUDGET", "budget_day": metering.budget_day(NOW),
+                                  "grant_id": None, "evidence_digest": None, "created_at": NOW + n * 60})
+        burst = decide(request(sha="9" * 40), ledger, caller=LANE, now=NOW + 420)
+        assert burst["reason"] == "BUILD_BURST", burst
+        # Builds at +0..+360: the window holds at most 4 once the build at +120 (7th from last is +0;
+        # the 5th newest is +120) leaves it, 30 minutes after +120.
+        assert burst["retry_after"] == int(NOW + 120 + 1800 - (NOW + 420)) + 1, burst
+
+
+def test_an_unreadable_service_is_advised_not_silently_ignored():
+    down = [{"provider": "vercel", "source": "unavailable", "kind": "UNAVAILABLE", "detail": "HTTP 503"}]
+    with env():
+        fresh()
+        out = decide(request(), metering.MemoryLedger(), caller=COORDINATOR, provide=evidence(capacity=down))
+        assert out["decision"] == "ALLOW"
+        assert "CAPACITY_UNREAD" in [r["code"] for r in out["advice"]["recommendations"]], out["advice"]
+
+
+def test_a_reused_subagent_tool_use_id_after_release_is_refused():
+    ledger = metering.MemoryLedger()
+    ledger.lease_open({"lease_key": "k", "session_id": "s", "model": "opus", "reason": "x" * 8,
+                       "opened_at": NOW, "expires_at": NOW + 60})
+    try:
+        ledger.lease_open({"lease_key": "k", "session_id": "s", "model": "opus", "reason": "x" * 8,
+                           "opened_at": NOW, "expires_at": NOW + 60})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the memory ledger must refuse a duplicate lease as the database does")
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

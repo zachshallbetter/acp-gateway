@@ -17,4 +17,11 @@ The gateway supports an explicit fail-closed production profile. The transition 
 5. Run `python3 scripts/validate-deployment.py --url "$ACP_GATEWAY_URL" --require-security`. The command prints only sanitized control status.
 6. Verify restart continuity: record the authenticated app-status and security summary, redeploy/restart once, then confirm the persisted containment and audit-chain state remains available.
 
-The current Railway deployment is not in this profile until all six steps are completed. Do not set `ACP_REQUIRE_PRODUCTION_CONTROLS=1` before signing every live policy and attaching durable storage.
+Both production hosts run this profile: on 2026-11-15 `validate-deployment.py --require-security` reported policy signing, capability signing, persisted security state, the audit log and its hash chain on Railway and on Vercel. Step 6 stays a check to repeat after any storage change. Do not set `ACP_REQUIRE_PRODUCTION_CONTROLS=1` on a new host before signing every live policy and attaching durable storage.
+
+Both hosts run the same start-up configuration check (`gateway.boot_check`): the Railway server refuses to start when it fails, and the Vercel adapter answers every route but `/health` with `503 MISCONFIGURED` and logs the setting it names.
+
+## Builds and releases
+
+- Vercel builds only `main` from git (`vercel.json` `git.deploymentEnabled`); other branches start no preview build. `main` moves only by a release (`scripts/release.py`), so production builds happen on release. Railway has no GitHub source: it deploys only when `release.py` runs `railway up`.
+- A release that stops after the merge prints the commands that return both hosts to the deployments they ran before it (`vercel rollback <previous deployment> --scope <team>`, and the Railway deployment to redeploy), next to the fix-forward route. Migrations are additive, so the previous release runs on the migrated schema.

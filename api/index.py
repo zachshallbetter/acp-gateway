@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 # locally and in the deployed runtime before importing the gateway.
 os.environ["VERCEL"] = "1"
 
-from gateway import Handler
+from gateway import Handler, boot_check
 
 
 ROUTE_PARAMETER = "__acp_path"
@@ -53,18 +53,39 @@ def restore_request_path(request_path: str) -> str:
     return safe_route + ("?" + query if query else "")
 
 
+_BOOT = {"checked": False, "problem": None}
+
+
+def boot_problem():
+    """The gateway's start-up configuration check, run once per instance (Vercel never calls main())."""
+    if not _BOOT["checked"]:
+        try:
+            boot_check()
+        except SystemExit as exc:
+            _BOOT["problem"] = str(exc) or "configuration check failed"
+            logging.error("ACP configuration check failed: %s", _BOOT["problem"])
+        _BOOT["checked"] = True
+    return _BOOT["problem"]
+
+
 class handler(Handler):
     """Vercel's required top-level Python function handler."""
 
     def _restore_path(self):
         try:
             self.path = restore_request_path(self.path)
-            return True
         except (UnicodeError, ValueError) as exc:
             reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
             logging.warning("Rejected Vercel rewrite: %s", reason)
             self.reply(400, {"error": "INVALID_REWRITE", "detail": "The request route is invalid."})
             return False
+        if urlsplit(self.path).path != "/health" and boot_problem():
+            # Fail closed, as the server does when it refuses to start; /health still answers.
+            self.discard_body()
+            self.reply(503, {"error": "MISCONFIGURED", "detail": "This ACP host failed its configuration check.",
+                             "remedy": "The owner reads the function log for the named setting."})
+            return False
+        return True
 
     def do_GET(self):
         if self._restore_path():

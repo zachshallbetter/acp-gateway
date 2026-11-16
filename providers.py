@@ -475,7 +475,7 @@ def _github(path, token_for, owner, fetch):
 def github_file(owner, name, path, sha, token_for, fetch=_fetch):
     """A small file's text at an exact commit, or None when it does not exist."""
     try:
-        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/contents/{quote(path)}?ref={sha}",
+        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/contents/{quote(path)}?ref={quote(sha)}",
                       token_for, owner, fetch)
     except ProviderError as exc:
         if exc.detail == "HTTP 404":
@@ -687,16 +687,33 @@ def workflow_runs_on(analysis, event, branch):
     return True, "runs on pushes to this branch"
 
 
-def github_workflows(owner, name, sha, token_for, fetch=_fetch):
-    """Every workflow file at an exact commit, analysed. Immutable per commit, so cached."""
-    def load():
+def _github_commit_exists(owner, name, sha, token_for, fetch):
+    try:
+        _github(f"/repos/{quote(owner)}/{quote(name)}/commits/{quote(sha)}", token_for, owner, fetch)
+    except ProviderError as exc:
+        if exc.detail in ("HTTP 404", "HTTP 422"):
+            return False
+        raise
+    return True
+
+
+def github_workflows(owner, name, sha, token_for, fetch=_fetch, fallback_ref=None):
+    """Every workflow file at an exact commit, analysed. Immutable per commit, so cached.
+
+    A pre-push asks about a commit GitHub has not received yet. Its workflows cannot be read, so
+    they are read at fallback_ref (the branch's current head, else the default branch) and marked
+    `read_at`; that answer moves with the branch and is never cached. "No workflows" is believed
+    only for a commit GitHub has."""
+    def listing_at(ref):
         try:
-            listing = _github(f"/repos/{quote(owner)}/{quote(name)}/contents/.github/workflows?ref={sha}",
-                              token_for, owner, fetch)
+            return _github(f"/repos/{quote(owner)}/{quote(name)}/contents/.github/workflows?ref={quote(ref)}",
+                           token_for, owner, fetch)
         except ProviderError as exc:
             if exc.detail == "HTTP 404":
-                return []
+                return None
             raise
+
+    def analyse(listing, ref):
         if not isinstance(listing, list):
             raise ProviderError("github_actions", "DIVERGED", "the workflow listing is not a list")
         results = []
@@ -705,14 +722,38 @@ def github_workflows(owner, name, sha, token_for, fetch=_fetch):
             if _need("github_actions", entry, "type", str, "contents[]") != "file" or \
                     not path.endswith((".yml", ".yaml")):
                 continue
-            text = github_file(owner, name, path, sha, token_for, fetch)
+            text = github_file(owner, name, path, ref, token_for, fetch)
             if text is not None:
                 results.append(analyse_workflow(path, text))
         return results
 
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""):
-        return load()                                # a branch name moves; only a commit is cacheable
-    return _cached(_CACHE, ("workflows", owner.lower(), name.lower(), sha), None, 0, load)
+    exact = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""))
+    hit = _CACHE.get(("workflows", owner.lower(), name.lower(), sha)) if exact else None
+    if hit:
+        return hit[1]
+    listing = listing_at(sha)
+    if listing is not None:
+        results = analyse(listing, sha)
+    elif not exact or _github_commit_exists(owner, name, sha, token_for, fetch):
+        results = []                                 # the commit is there and has no workflows
+    else:
+        for ref in ([fallback_ref] if fallback_ref else []) + [None]:
+            ref = ref or _github_default_branch(owner, name, token_for, fetch)
+            listing = listing_at(ref)
+            if listing is not None:
+                return [dict(a, read_at=ref) for a in analyse(listing, ref)]
+            if _github_commit_exists(owner, name, ref, token_for, fetch):
+                return []                            # that branch exists and has no workflows
+        raise ProviderError("github_actions", "UNAVAILABLE",
+                            "neither the commit nor its branch is on GitHub, so its workflows cannot be read")
+    if not exact:
+        return results                               # a branch name moves; only a commit is cacheable
+    return _cached(_CACHE, ("workflows", owner.lower(), name.lower(), sha), None, 0, lambda: results)
+
+
+def _github_default_branch(owner, name, token_for, fetch):
+    raw = _github(f"/repos/{quote(owner)}/{quote(name)}", token_for, owner, fetch)
+    return _need("github_actions", raw, "default_branch", str, "repository")
 
 
 def github_runs_per_day(owner, name, token_for, days=7, now=None, fetch=_fetch):
@@ -801,7 +842,7 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
                            "would_build": runs, "why": why})
         if trigger in ("push", "merge", "promote", "workflow_dispatch", "rerun"):
             event = "push" if trigger in ("merge", "promote") else trigger
-            for analysis in github_workflows(owner, name, sha, token_for, fetch):
+            for analysis in github_workflows(owner, name, sha, token_for, fetch, fallback_ref=branch):
                 if trigger in ("workflow_dispatch", "rerun") and analysis["path"] != context.get("workflow"):
                     continue
                 runs, why = workflow_runs_on(analysis, event, branch)

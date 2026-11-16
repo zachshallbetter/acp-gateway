@@ -144,12 +144,18 @@ def vercel_build(new_sha: str, timeout: float) -> dict:
         sleep(POLL_SECONDS)
 
 
-def vercel_alias(build: dict) -> None:
+def vercel_current() -> dict:
+    """The deployment Vercel's production alias points at now."""
     result = acp_ops.run("vercel", "inspect", VERCEL_URL.removeprefix("https://"), "--json", "--scope", VERCEL_TEAM)
     try:
         current = json.loads(result.stdout)
     except ValueError:
         current = {}
+    return current if isinstance(current, dict) else {}
+
+
+def vercel_alias(build: dict) -> None:
+    current = vercel_current()
     if current.get("url") != build.get("url"):
         raise Stop(f"the production alias points at {current.get('url') or 'an unknown deployment'}, not "
                    f"{build.get('url')}; Railway was not deployed. Promote or roll back on Vercel first")
@@ -195,7 +201,19 @@ def railway_deploy(checkout: Path, new_sha: str, timeout: float) -> dict:
         sleep(POLL_SECONDS)
 
 
-def verify(hosts: list[str]) -> None:
+def verify(hosts: list[str], attempts: int = 3) -> None:
+    """Health and readiness on every host. A host that just switched may still be warming up, so a
+    failing check is asked again a few times before the release is reported unhealthy."""
+    for attempt in range(attempts):
+        try:
+            return _verify_once(hosts)
+        except Stop:
+            if attempt + 1 == attempts:
+                raise
+            sleep(POLL_SECONDS)
+
+
+def _verify_once(hosts: list[str]) -> None:
     failures, state_ids = [], {}
     for base in hosts:
         for path, expect in (("/health", "ok"), ("/ready", "ready")):
@@ -237,6 +255,24 @@ def release(args, checkout: Path) -> None:
     if args.dry_run:
         return
     report("harness", allowed_by=acp_ops.harness_gate(update["name"]))
+    # What each host runs before this release, so a stop after the merge says how to go back.
+    previous = {"vercel": vercel_current().get("url"),
+                "railway": None if args.skip_railway else (railway_deployments() or [{}])[0].get("id")}
+    report("previous", **previous)
+    try:
+        deploy(args, checkout, update, step, branch, resuming)
+    except Stop as exc:
+        if resuming or not previous["vercel"]:
+            raise
+        back = [f"vercel rollback {previous['vercel']} --scope {VERCEL_TEAM}"]
+        if previous["railway"]:
+            back.append(f"redeploy Railway deployment {previous['railway']} (railway.com: the service's "
+                        "Deployments, that deployment, Redeploy)")
+        raise Stop(f"{exc}. To return the hosts to the previous release instead of fixing forward: "
+                   + "; ".join(back)) from exc
+
+
+def deploy(args, checkout: Path, update: dict, step, branch: str, resuming: bool) -> None:
     if not resuming:
         token = acp_ops.bearer(args.token_account)
         if step:

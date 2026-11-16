@@ -329,6 +329,27 @@ def test_the_well_known_alias_serves_the_same_answer():
     assert direct["controlled_operations"] == alias["controlled_operations"]
 
 
+
+def test_the_anonymous_notice_leaves_out_the_integrity_manifest():
+    fresh()
+    with governed_env(), Served() as served:
+        status, anonymous = served.get("/notice?owner=%s&name=%s" % (OWNER, REPO), token=None)
+        assert status == 200 and anonymous["governed"] is True, anonymous
+        for hidden in gateway.NOTICE_BEARER_ONLY:
+            assert hidden not in anonymous, hidden
+        assert anonymous["authorization_state"] == "NORMAL" and "integrity" in anonymous
+        status, full = served.get("/notice?owner=%s&name=%s" % (OWNER, REPO), token=TOKEN)
+        assert status == 200 and "protected_artifacts" in full and "policy_sha256" in full, full
+
+
+def test_anonymous_requests_are_rate_limited_per_address():
+    fresh()
+    with governed_env(), Served() as served:
+        statuses = [served.get("/ready", token=None)[0] for _ in range(gateway.ANONYMOUS_PER_MINUTE + 1)]
+        assert statuses[-1] == 429 and statuses[0] == 200, statuses
+        status, body = served.get("/notice?owner=%s&name=%s" % (OWNER, REPO), token=TOKEN)
+        assert status == 200, "the bearer is not rate limited"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

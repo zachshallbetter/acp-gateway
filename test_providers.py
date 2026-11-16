@@ -547,6 +547,33 @@ def test_team_projects_carry_their_git_link():
     assert seen == [{"id": "prj_cli", "name": "cli-site", "linked_repository": None},
                     {"id": "prj_widget", "name": "widget", "linked_repository": "Example-Org/Widget"}]
 
+
+def test_workflows_of_an_unpushed_commit_are_read_at_its_branch_and_never_cached():
+    fresh()
+    sha = "c" * 40
+    token = lambda owner: "gh-token"
+    fake = Fake({"/contents/.github/workflows?ref=main": [{"type": "file", "path": ".github/workflows/ci.yml"}],
+                 "/contents/.github/workflows/ci.yml?ref=main": content(CI_BOUNDED)})
+    found = providers.github_workflows("Example-Org", "Widget", sha, token, fake, fallback_ref="main")
+    assert [w["path"] for w in found] == [".github/workflows/ci.yml"] and found[0]["read_at"] == "main", found
+    assert ("workflows", "example-org", "widget", sha) not in providers._CACHE, "a branch's answer moves"
+
+
+def test_no_workflows_is_believed_only_for_a_commit_github_has():
+    fresh()
+    sha = "d" * 40
+    token = lambda owner: "gh-token"
+    assert providers.github_workflows("Example-Org", "Widget", sha, token,
+                                      Fake({f"/commits/{sha}": {"sha": sha}})) == []
+    fresh()
+    try:
+        providers.github_workflows("Example-Org", "Widget", sha, token, Fake({"/repos/Example-Org/Widget?": {}}),
+                                   fallback_ref="feature")
+    except providers.ProviderError as exc:
+        assert exc.kind in ("UNAVAILABLE", "DIVERGED"), exc
+    else:
+        raise AssertionError("neither the commit nor a branch was readable, so the answer is unknown")
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
