@@ -13,6 +13,7 @@ never logged, returned or put in an error.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import hashlib
 import json
@@ -742,16 +743,17 @@ def github_workflows(owner, name, sha, token_for, fetch=_fetch, fallback_ref=Non
     def analyse(listing, ref):
         if not isinstance(listing, list):
             raise ProviderError("github_actions", "DIVERGED", "the workflow listing is not a list")
-        results = []
+        paths = []
         for entry in listing[:MAX_WORKFLOW_FILES]:
             path = _need("github_actions", entry, "path", str, "contents[]")
-            if _need("github_actions", entry, "type", str, "contents[]") != "file" or \
-                    not path.endswith((".yml", ".yaml")):
-                continue
-            text = github_file(owner, name, path, ref, token_for, fetch)
-            if text is not None:
-                results.append(analyse_workflow(path, text))
-        return results
+            if _need("github_actions", entry, "type", str, "contents[]") == "file" and \
+                    path.endswith((".yml", ".yaml")):
+                paths.append(path)
+        # Read concurrently: a repository with many workflows read one by one outlasted the push hook's
+        # time limit. Results keep the listing's order.
+        with ThreadPoolExecutor(max_workers=min(8, len(paths) or 1)) as pool:
+            texts = list(pool.map(lambda path: github_file(owner, name, path, ref, token_for, fetch), paths))
+        return [analyse_workflow(path, text) for path, text in zip(paths, texts) if text is not None]
 
     exact = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""))
     hit = _CACHE.get(("workflows", owner.lower(), name.lower(), sha)) if exact else None
@@ -765,16 +767,31 @@ def github_workflows(owner, name, sha, token_for, fetch=_fetch, fallback_ref=Non
     else:
         for ref in ([fallback_ref] if fallback_ref else []) + [None]:
             ref = ref or _github_default_branch(owner, name, token_for, fetch)
-            listing = listing_at(ref)
-            if listing is not None:
-                return [dict(a, read_at=ref) for a in analyse(listing, ref)]
-            if _github_commit_exists(owner, name, ref, token_for, fetch):
-                return []                            # that branch exists and has no workflows
+            head = _github_ref_sha(owner, name, ref, token_for, fetch)
+            if head is None:
+                continue                             # no such branch on GitHub yet
+            # The branch head is a commit, so its analysis is cached like any commit's: repeated pre-pushes
+            # of one branch read its workflows once.
+            return [dict(a, read_at=ref) for a in github_workflows(owner, name, head, token_for, fetch)]
         raise ProviderError("github_actions", "UNAVAILABLE",
                             "neither the commit nor its branch is on GitHub, so its workflows cannot be read")
     if not exact:
         return results                               # a branch name moves; only a commit is cacheable
     return _cached(_CACHE, ("workflows", owner.lower(), name.lower(), sha), None, 0, lambda: results)
+
+
+def _github_ref_sha(owner, name, ref, token_for, fetch):
+    """The commit a branch (or any ref GitHub resolves) points at, or None when GitHub has no such ref."""
+    try:
+        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/commits/{quote(ref)}", token_for, owner, fetch)
+    except ProviderError as exc:
+        if exc.detail in ("HTTP 404", "HTTP 422"):
+            return None
+        raise
+    sha = _need("github_actions", raw, "sha", str, "commit")
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        raise ProviderError("github_actions", "DIVERGED", "commit.sha is not an object id")
+    return sha
 
 
 def _github_default_branch(owner, name, token_for, fetch):

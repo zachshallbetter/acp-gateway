@@ -552,11 +552,17 @@ def test_workflows_of_an_unpushed_commit_are_read_at_its_branch_and_never_cached
     fresh()
     sha = "c" * 40
     token = lambda owner: "gh-token"
-    fake = Fake({"/contents/.github/workflows?ref=main": [{"type": "file", "path": ".github/workflows/ci.yml"}],
-                 "/contents/.github/workflows/ci.yml?ref=main": content(CI_BOUNDED)})
+    head = "f" * 40
+    fake = Fake({"/commits/main": {"sha": head},
+                 f"/contents/.github/workflows?ref={head}": [{"type": "file", "path": ".github/workflows/ci.yml"}],
+                 f"/contents/.github/workflows/ci.yml?ref={head}": content(CI_BOUNDED)})
     found = providers.github_workflows("Example-Org", "Widget", sha, token, fake, fallback_ref="main")
     assert [w["path"] for w in found] == [".github/workflows/ci.yml"] and found[0]["read_at"] == "main", found
     assert ("workflows", "example-org", "widget", sha) not in providers._CACHE, "a branch's answer moves"
+    assert ("workflows", "example-org", "widget", head) in providers._CACHE, "the branch head's analysis is reused"
+    calls = len(fake.calls)
+    providers.github_workflows("Example-Org", "Widget", sha, token, fake, fallback_ref="main")
+    assert len(fake.calls) - calls == 3, "a repeat reads only the listing, the commit check and the branch head"
 
 
 def test_no_workflows_is_believed_only_for_a_commit_github_has():
