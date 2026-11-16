@@ -1377,6 +1377,8 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_PATH_CASE_SENSITIVE` | no | `1` to compare protected paths case-sensitively. Default: case-insensitive matching, with the difference reported. |
 | `ACP_BOARD_READ_GATE` | no | `locked` (default), `contained`, or `off`. Only has an effect once a policy declares `boards`. |
 | `ACP_BUDGET_POLICY` | for metered actions | Signed deployment-wide limits. Without it, or a stored version, every metered action is refused (`BUDGET_POLICY_UNAVAILABLE`). Seeds the database like `ACP_POLICY`. |
+| `ACP_DATABASE_POOL_MAX` | no | Database connections per instance: default 1 on Vercel (at most 2) and 2 elsewhere (at most 4). Production Vercel sets 2, so one slow request cannot hold an instance's only connection. |
+| `ACP_DATABASE_TIMEOUT_SECONDS` | no | Seconds to wait for a pooled connection or to connect, 1 to 15, default 5. |
 | `ACP_CALLERS` | no | Signed per-caller credentials: lane and coordinator token hashes, each scoped to repositories. Unset and not stored: every caller is the shared bearer. Seeds the database like `ACP_POLICY`. |
 | `ACP_VERCEL_TOKEN` | for Vercel evidence | Vercel token ACP reads projects and deployments with. Only GETs are sent. |
 | `ACP_VERCEL_TEAM_ID` | no | Default Vercel team. A policy's `metered.providers.vercel.team_id` names the team its projects belong to and takes precedence, so projects in several teams can be metered. The token must reach every such team. |
