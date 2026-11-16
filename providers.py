@@ -14,7 +14,6 @@ never logged, returned or put in an error.
 from __future__ import annotations
 
 import base64
-import fnmatch
 import hashlib
 import json
 import os
@@ -330,12 +329,26 @@ def vercel_branch_enabled(config, branch):
     if isinstance(setting, bool):
         return setting
     if isinstance(setting, dict):
-        if branch in setting and isinstance(setting[branch], bool):
-            return setting[branch]
-        for pattern, enabled in setting.items():
-            if isinstance(enabled, bool) and fnmatch.fnmatchcase(branch, pattern.replace("**", "*")):
-                return enabled
+        # Vercel's rules: patterns are minimatch globs (`*` stops at `/`, `**` crosses it), a branch no
+        # rule names deploys, and a branch several rules name deploys if any of them is true.
+        matched = [enabled for pattern, enabled in setting.items()
+                   if isinstance(enabled, bool) and _branch_glob(pattern).fullmatch(branch or "")]
+        return True if not matched else any(matched)
     return True
+
+
+def _branch_glob(pattern):
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out)
 
 
 def vercel_would_build(project, config, claim, branch, trigger):

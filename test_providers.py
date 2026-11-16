@@ -574,6 +574,16 @@ def test_no_workflows_is_believed_only_for_a_commit_github_has():
     else:
         raise AssertionError("neither the commit nor a branch was readable, so the answer is unknown")
 
+
+def test_branch_rules_follow_vercels_glob_and_any_true_semantics():
+    rules = lambda d: {"git": {"deploymentEnabled": d}}
+    assert providers.vercel_branch_enabled(rules({"*": False, "main": True}), "fix/review") is True, \
+        "`*` stops at a slash, so a nested branch is not covered and deploys"
+    assert providers.vercel_branch_enabled(rules({"**": False, "main": True}), "fix/review") is False
+    assert providers.vercel_branch_enabled(rules({"**": False, "main": True}), "main") is True, "any true rule wins"
+    assert providers.vercel_branch_enabled(rules({"experiment-*": False, "*-dev": True}), "experiment-x-dev") is True
+    assert providers.vercel_branch_enabled(rules({"dev": False}), "main") is True, "an unnamed branch deploys"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
