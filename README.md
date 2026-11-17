@@ -250,6 +250,7 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `OVER_BUDGET_NOTED`, `BUDGET_EXCEEDED`, `PRIORITY_GRANTED`,
 `BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY`, `SERVICE_LIMIT_REACHED`,
 `SERVICE_OVER_LIMIT`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`, `INVOCATION_REUSED`,
+`DEPLOY_COMMIT_REQUIRED`, `NOT_ON_PRODUCTION_BRANCH`, `CI_FAILED`, `CI_PENDING`,
 `SUBAGENT_LIMIT_REACHED`, `BUILD_ADMITTED`, `BUILD_DUPLICATE`, `BUILD_UNATTRIBUTED`,
 `BUILD_PRIVATE_CACHE`, `PROJECT_SHARE_EXCEEDED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
 `CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
@@ -341,6 +342,12 @@ A repository opts in by listing the first three in its policy's
    workflows are read at the branch, and there the same finding only advises
    (`WORKFLOW_UNBOUNDED_ON_BRANCH` in `advice.recommendations`, never a refusal): the push may be
    the fix. A merge, whose commit GitHub has, is checked exactly;
+   a production CLI deploy (`railway up`, or `vercel deploy` to the production branch) ships the
+   commit it names in `new_sha`, so ACP refuses one that names none (`DEPLOY_COMMIT_REQUIRED`), one
+   not merged into the first production branch (`NOT_ON_PRODUCTION_BRANCH`), and one whose check
+   runs failed (`CI_FAILED`); while check runs are still going, or none has started though a
+   workflow runs on pushes to that branch, it answers `REVERIFY_REQUIRED` `CI_PENDING` with
+   `retry_after`. `acp deploy` waits for that and deploys a clean checkout of the commit;
 4. reads the live state of each service it would build on (Vercel: today's
    deployments and builds in flight across the team; Railway: today's
    deployments and the workspace usage limit), falling back to its own ledger

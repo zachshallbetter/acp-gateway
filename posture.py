@@ -95,7 +95,7 @@ def findings(snapshot, ledger_rows=None, day=None):
                 f"Railway deploys every push to {branch} of {repository}"
                 + (f" ({services} service environments)." if services > 1 else "."),
                 "Keep it only if this branch is production. Otherwise Railway dashboard: Service > Settings > "
-                "Source: disconnect the branch, and deploy with railway up under an ACP hosted_build decision.",
+                "Source: disconnect the branch, and deploy merged, green commits with `acp deploy railway`.",
                 owner_only=True))
         limit = railway.get("usage_limit")
         if limit is not None and limit.get("hard_limit") is None:

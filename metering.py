@@ -425,6 +425,42 @@ def _caller_may_reach_production(caller):
     return caller["kind"] in PRODUCTION_CALLERS
 
 
+CI_PENDING_RETRY_SECONDS = 60
+
+
+def release_refusal(release, owner, name, builds):
+    """The refusal for a production CLI deploy whose commit is not merged or whose CI is not green, else None.
+
+    `release` is the provider evidence's readiness of the named commit; None when this is not such a deploy."""
+    if release is None:
+        return None
+    branch = release["branch"]
+    if not release.get("sha"):
+        return Outcome("DENY", "DEPLOY_COMMIT_REQUIRED",
+                       f"A production deploy of {owner}/{name} must name the commit it ships (context.new_sha), "
+                       "so ACP can check it is merged and its CI is green.",
+                       f"Deploy from a checkout of {branch}, or run `acp deploy` with the commit, then ask again.",
+                       builds=builds)
+    sha = release["sha"]
+    if not release["merged"]:
+        return Outcome("DENY", "NOT_ON_PRODUCTION_BRANCH",
+                       f"Commit {sha[:12]} is not on {branch} of {owner}/{name}, so it has not been merged. "
+                       "Production deploys ship only merged commits.",
+                       f"Merge the change into {branch}, then deploy that commit.", builds=builds, release=release)
+    checks = release["checks"]
+    if checks["failed"]:
+        return Outcome("DENY", "CI_FAILED",
+                       f"CI failed on {sha[:12]}: {', '.join(checks['failed'][:10])}.",
+                       f"Fix it on {branch} and deploy the commit whose checks pass.", builds=builds, release=release)
+    if checks["pending"] or release.get("ci_expected"):
+        waiting = ", ".join(checks["pending"][:10]) or "CI has not started on this commit"
+        return Outcome("REVERIFY_REQUIRED", "CI_PENDING",
+                       f"CI on {sha[:12]} has not finished: {waiting}.",
+                       f"Ask again in {CI_PENDING_RETRY_SECONDS} seconds; `acp deploy` waits for it.",
+                       builds=builds, release=release, retry_after=CI_PENDING_RETRY_SECONDS)
+    return None
+
+
 def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledger, now, request_id):
     """Decide hosted_build, production_merge or manual_ci for a verified, governed repository."""
     if ledger is None:
@@ -464,6 +500,9 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
                        f"The owner enrolls the {TRIGGER_PROVIDER[trigger]} project for this repository "
                        f"(scripts/policy-admin.py enroll), then ask again.",
                        builds=evidence["builds"])
+    refused = release_refusal(evidence.get("release"), owner, name, evidence["builds"])
+    if refused:
+        return refused
     # A push of one commit builds once, so asking again is a replay. A CLI deploy or a manual
     # dispatch starts a new run each time, so each invocation is its own record.
     invocation = (context.get("tool_use_id") or request_id) if trigger in INVOCATION_TRIGGERS else None

@@ -605,6 +605,88 @@ def test_vercel_json_of_an_unpushed_commit_is_read_at_its_branch():
                                       Fake({f"/commits/{sha}": {"sha": sha}}), fallback_ref="fix/x") is None, \
         "a pushed commit with no vercel.json has none"
 
+# ---- production CLI deploys: merged and green ---------------------------------
+def release_routes(status="behind", runs=(), workflow=CI_BOUNDED):
+    return {**github_routes(workflow), "/compare/main...": {"status": status},
+            "/check-runs": {"total_count": len(runs), "check_runs": list(runs)},
+            "/v9/projects/": VERCEL_PROJECT, "AcpProject": RAILWAY_PROJECT}
+
+
+def railway_up(fake, sha=SHA):
+    return providers.build_evidence("hosted_build", POLICY, CLAIM, {"trigger": "railway_up", "new_sha": sha},
+                                    token_for, NOW, fake)
+
+
+def test_railway_up_reads_whether_the_commit_is_merged_and_green():
+    with creds():
+        fresh()
+        green = [{"name": "test", "status": "completed", "conclusion": "success"},
+                 {"name": "lint", "status": "completed", "conclusion": "skipped"}]
+        seen = railway_up(Fake(release_routes("identical", green)))
+        assert seen["release"] == {"sha": SHA, "branch": "main", "merged": True, "ci_expected": False,
+                                   "checks": {"total": 2, "pending": [], "failed": []}}
+
+
+def test_release_readiness_names_pending_and_failed_checks():
+    with creds():
+        fresh()
+        runs = [{"name": "test", "status": "in_progress", "conclusion": None},
+                {"name": "build", "status": "completed", "conclusion": "failure"},
+                {"name": "docs", "status": "completed", "conclusion": "neutral"}]
+        checks = railway_up(Fake(release_routes("behind", runs)))["release"]["checks"]
+        assert checks == {"total": 3, "pending": ["test"], "failed": ["build (failure)"]}
+
+
+def test_an_unmerged_commit_is_not_merged_and_its_checks_are_not_read():
+    with creds():
+        for status in ("ahead", "diverged"):
+            fresh()
+            fake = Fake(release_routes(status))
+            assert railway_up(fake)["release"]["merged"] is False
+            assert not [c for c in fake.calls if "/check-runs" in c[1]]
+
+
+def test_a_commit_github_does_not_have_is_not_merged():
+    with creds():
+        fresh()
+        routes = release_routes()
+        del routes["/compare/main..."]
+        assert railway_up(Fake(routes))["release"]["merged"] is False
+
+
+def test_no_check_runs_yet_is_expected_ci_when_a_workflow_runs_on_push():
+    with creds():
+        fresh()
+        assert railway_up(Fake(release_routes("identical", [])))["release"]["ci_expected"] is True
+        fresh()
+        no_push_ci = "on: pull_request\njobs: {t: {runs-on: x, timeout-minutes: 5, steps: [{run: t}]}}\n"
+        assert railway_up(Fake(release_routes("identical", [], no_push_ci)))["release"]["ci_expected"] is False
+
+
+def test_a_deploy_without_a_commit_records_none_and_a_preview_is_not_checked():
+    with creds():
+        fresh()
+        assert railway_up(Fake(release_routes()), sha="")["release"] == {"sha": None, "branch": "main"}
+        fresh()
+        preview = providers.build_evidence("hosted_build", POLICY, CLAIM,
+                                           {"trigger": "cli_deploy", "ref": "refs/heads/feature", "new_sha": SHA},
+                                           token_for, NOW, Fake(release_routes()))
+        assert "release" not in preview
+        fresh()
+        prod = providers.build_evidence("hosted_build", POLICY, CLAIM,
+                                        {"trigger": "cli_deploy", "ref": "refs/heads/main", "new_sha": SHA},
+                                        token_for, NOW, Fake(release_routes("identical", [
+                                            {"name": "t", "status": "completed", "conclusion": "success"}])))
+        assert prod["release"]["merged"] is True
+
+
+def test_an_unrecognised_compare_status_diverges():
+    with creds():
+        fresh()
+        seen = railway_up(Fake(release_routes("sideways")))
+        assert seen["available"] is False and seen["kind"] == "DIVERGED"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

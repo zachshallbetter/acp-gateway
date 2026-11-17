@@ -1193,6 +1193,79 @@ def test_unbounded_workflows_read_at_the_branch_advise_but_never_refuse_the_push
                          provide=evidence(builds=ci, workflows=exact))
         assert refused["reason"] == "WORKFLOW_UNBOUNDED", "the commit's own workflows are still checked exactly"
 
+# ---- production CLI deploys ship only merged commits with green CI ---------------
+RAILWAY_API = {"provider": "railway", "project": "api", "project_id": "rw-1", "would_build": True,
+               "why": "railway up always builds and deploys"}
+
+
+def released(release):
+    base = evidence(builds=[RAILWAY_API])
+
+    def provide(action, policy_body, claim, context):
+        return {**base(action, policy_body, claim, context), "release": release}
+    return provide
+
+
+def readiness(merged=True, pending=(), failed=(), total=1, ci_expected=False, sha=SHA):
+    return {"sha": sha, "branch": "main", "merged": merged, "ci_expected": ci_expected,
+            "checks": {"total": total, "pending": list(pending), "failed": list(failed)}}
+
+
+def test_a_production_deploy_of_a_merged_green_commit_is_allowed():
+    with env():
+        fresh()
+        out = decide(request(trigger="railway_up", ref=None), metering.MemoryLedger(), caller=COORDINATOR,
+                     provide=released(readiness()))
+        assert out["decision"] == "ALLOW", out
+
+
+def test_a_production_deploy_must_name_its_commit():
+    with env():
+        fresh()
+        out = decide(request(trigger="railway_up", ref=None), metering.MemoryLedger(), caller=COORDINATOR,
+                     provide=released({"sha": None, "branch": "main"}))
+        assert out["decision"] == "DENY" and out["reason"] == "DEPLOY_COMMIT_REQUIRED", out
+        assert "acp deploy" in out["remedy"]
+
+
+def test_an_unmerged_commit_is_refused():
+    with env():
+        fresh()
+        out = decide(request(trigger="railway_up", ref=None), metering.MemoryLedger(), caller=COORDINATOR,
+                     provide=released(readiness(merged=False)))
+        assert out["decision"] == "DENY" and out["reason"] == "NOT_ON_PRODUCTION_BRANCH", out
+        assert out["release"]["merged"] is False
+
+
+def test_failed_ci_is_refused_and_named():
+    with env():
+        fresh()
+        out = decide(request(trigger="railway_up", ref=None), metering.MemoryLedger(), caller=COORDINATOR,
+                     provide=released(readiness(failed=["test (failure)"], pending=["lint"])))
+        assert out["decision"] == "DENY" and out["reason"] == "CI_FAILED", out
+        assert "test (failure)" in out["detail"]
+
+
+def test_running_or_unstarted_ci_asks_again_later_and_counts_nothing():
+    with env():
+        for release in (readiness(pending=["test"]), readiness(total=0, ci_expected=True)):
+            fresh()
+            ledger = metering.MemoryLedger()
+            out = decide(request(trigger="railway_up", ref=None), ledger, caller=COORDINATOR,
+                         provide=released(release))
+            assert out["decision"] == "REVERIFY_REQUIRED" and out["reason"] == "CI_PENDING", out
+            assert out["retry_after"] == metering.CI_PENDING_RETRY_SECONDS
+            assert ledger.ledger_count(metering.budget_day(NOW), ["hosted_build"]) == 0
+
+
+def test_a_commit_with_no_ci_at_all_may_deploy():
+    with env():
+        fresh()
+        out = decide(request(trigger="railway_up", ref=None), metering.MemoryLedger(), caller=COORDINATOR,
+                     provide=released(readiness(total=0)))
+        assert out["decision"] == "ALLOW", out
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

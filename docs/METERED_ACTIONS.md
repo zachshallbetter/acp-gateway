@@ -27,7 +27,7 @@ feature reaches production.
 
 | Action | Required `context` | Optional |
 |---|---|---|
-| `hosted_build` | `trigger` (`push`, `cli_deploy`, `railway_up`), `ref`, `new_sha`, `reason` | `ref` may be left out for `cli_deploy` and `railway_up`, which deploy the linked project from any checkout, detached included; `priority` `{blocking: continue_work\|release\|fix, reason}` when the agent cannot continue without this push |
+| `hosted_build` | `trigger` (`push`, `cli_deploy`, `railway_up`), `ref`, `new_sha`, `reason` | `ref` may be left out for `cli_deploy` and `railway_up`, which deploy the linked project from any checkout, detached included; `railway_up`, and `cli_deploy` to a production branch, must name in `new_sha` a commit merged into the production branch whose check runs passed (`acp deploy` does this); `priority` `{blocking: continue_work\|release\|fix, reason}` when the agent cannot continue without this push |
 | `production_merge` | `trigger` (`merge`, `promote`), `ref` (the production branch), `new_sha` (the merge result), `reason` | |
 | `manual_ci` | `trigger` (`workflow_dispatch`, `rerun`), `workflow` (`.github/workflows/<file>.yml`), `ref`, `new_sha`, `reason`; `run_id` for a rerun | |
 | `local_heavy_build` | `tool_use_id`, `machine_id`, `reason` | `repository_claim` |
@@ -70,7 +70,8 @@ The standard decision envelope, plus:
 | `builds` | repository actions | `[{provider, project, project_id, would_build, why}]` for each connected provider and workflow. |
 | `budget` | repository actions | `{day, usage: [{scope, used, limit, limit_source?, source?, enforced?}], exceeded?}`. Scopes: `project <provider>/<name>` and `service <provider>` are enforced; the repository and deployment-wide totals carry `enforced: false`. |
 | `advice` | repository actions, allow and refusal | `{project_usage: [{provider, project, used_today, limit, limit_source, builds_last_30m, last_build_seconds_ago}], service: [{provider, source, ceiling, deployments_today, in_flight, lower_bound?}], triggers: [{provider, project, would_build, why}], recommendations: [{code, text}], resets_at}`; on a budget refusal also `usage_by_repository: [{repository, used}]`. Recommendation codes: `BATCH_PUSHES`, `NEAR_LIMIT`, `WAIT_FOR_INFLIGHT`, `PREVIEW_BUILDS`, `SAME_COMMIT`, `MULTI_SERVICE`, `SERVICE_BUSY`, `WORKFLOW_UNBOUNDED_ON_BRANCH` (a workflow read at the branch lacks a timeout or concurrency group; advice only, the merge is refused until it is bounded), `CAPACITY_UNREAD` (a service's live activity could not be read, so its in-flight cap is not applied and its count is ACP's ledger; or `lower_bound` marks a count past what ACP reads in one pass). Show each `text` to the agent. |
-| `retry_after` | `REVERIFY_REQUIRED` `BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY` | Seconds until asking again can succeed. Commit locally meanwhile. |
+| `retry_after` | `REVERIFY_REQUIRED` `BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY`, `CI_PENDING` | Seconds until asking again can succeed. Commit locally meanwhile. |
+| `release` | a production CLI deploy refused for its commit | `{sha, branch, merged, ci_expected, checks: {total, pending, failed}}`: whether `new_sha` is on the production branch, and its check runs still going and failed, by name. |
 | `priority_request` | a refusal priority would clear | `{field: "context.priority", blocking: [...], remaining_today, example}`. |
 | `resets_at` | budget refusals | When today's budgets reset (00:00 UTC). |
 | `authorized_action` | `ALLOW` | `{action, ref, new_sha, trigger, workflow?, run_id?}`. Proceed with exactly this. |

@@ -824,6 +824,60 @@ def github_check_runs(owner, name, ref, token_for, fetch=_fetch):
     return {"ref": ref, "total": total, "by_app": dict(sorted(by_app.items()))}
 
 
+MAX_CHECK_RUN_PAGES = 3      # 300 check runs on one commit
+# A finished check run passes with these conclusions; any other conclusion fails it.
+CHECK_PASSING = frozenset({"success", "neutral", "skipped"})
+
+
+def github_release_readiness(owner, name, sha, branch, token_for, fetch=_fetch):
+    """Whether a commit may be deployed to production: merged into `branch`, and its CI finished green.
+
+    Returns {"sha", "branch", "merged", "checks": {"total", "pending": [...], "failed": [...]},
+    "ci_expected"}. `merged` is True when the commit is the branch head or behind it (an ancestor).
+    The check runs are GitHub's latest per name on the commit, every app's included."""
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""):
+        raise ProviderError("github_actions", "UNAVAILABLE", "the commit is not a full object id")
+    try:
+        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/compare/{quote(branch, safe='')}...{quote(sha)}",
+                      token_for, owner, fetch)
+        status = _need("github_actions", raw, "status", str, "compare")
+        if status not in ("identical", "behind", "ahead", "diverged"):
+            raise ProviderError("github_actions", "DIVERGED", f"compare.status {status!r} is not recognised")
+        merged = status in ("identical", "behind")
+    except ProviderError as exc:
+        if exc.detail not in ("HTTP 404", "HTTP 422"):
+            raise
+        merged = False                               # the commit or the branch is not on GitHub
+    pending, failed, total, seen = [], [], 0, 0
+    # An unmerged commit is refused for that alone; its checks are not read.
+    for page in range(1, MAX_CHECK_RUN_PAGES + 1 if merged else 1):
+        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/commits/{quote(sha)}/check-runs"
+                      f"?filter=latest&per_page=100&page={page}", token_for, owner, fetch)
+        total = _need("github_actions", raw, "total_count", int, "check runs")
+        runs = _need("github_actions", raw, "check_runs", list, "check runs")
+        for run in runs:
+            label = _need("github_actions", run, "name", str, "check_runs[]")
+            state = _need("github_actions", run, "status", str, "check_runs[]")
+            conclusion = run.get("conclusion")
+            if state != "completed" or conclusion is None:
+                pending.append(label)
+            elif conclusion not in CHECK_PASSING:
+                failed.append(f"{label} ({conclusion})")
+        seen += len(runs)
+        if seen >= total or not runs:
+            break
+    if seen < total:
+        # More check runs than ACP reads: the unread ones are not known to be green.
+        pending.append(f"{total - seen} more check run(s) ACP did not read")
+    ci_expected = False
+    if merged and total == 0:
+        # No check run yet: CI that runs on pushes to this branch has not started, or there is none.
+        ci_expected = any(workflow_runs_on(a, "push", branch)[0]
+                          for a in github_workflows(owner, name, sha, token_for, fetch))
+    return {"sha": sha, "branch": branch, "merged": merged, "ci_expected": ci_expected,
+            "checks": {"total": total, "pending": pending, "failed": failed}}
+
+
 def github_actions_spend(owner, token_for, now=None, fetch=_fetch):
     """This month's Actions spend, when the enhanced billing API lets ACP read it."""
     now = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc)
@@ -892,10 +946,19 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
                 workflows.append({**analysis, "would_run": runs, "why": why})
                 builds.append({"provider": "github_actions", "project": analysis["path"],
                                "project_id": analysis["path"], "would_build": runs, "why": why})
+        release = None
+        production = metered.get("production_branches") or ["main"]
+        if trigger == "railway_up" or (trigger == "cli_deploy" and branch in production):
+            # A CLI deploy to production ships whatever commit it names, so ACP checks that commit:
+            # merged into the production branch, and its CI finished green.
+            release = github_release_readiness(owner, name, sha, production[0], token_for, fetch) \
+                if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or "") else {"sha": None, "branch": production[0]}
     except ProviderError as exc:
         return {"available": False, "kind": exc.kind, "provider": exc.provider, "detail": exc.detail}
     body = {"schema_version": SCHEMA_VERSION, "builds": builds,
             "workflows": [{k: v for k, v in w.items() if k != "triggers"} for w in workflows]}
+    if release is not None:
+        body["release"] = release
     return {"available": True, **body, "digest": digest(body)}
 
 
