@@ -715,13 +715,7 @@ def workflow_runs_on(analysis, event, branch):
 
 
 def _github_commit_exists(owner, name, sha, token_for, fetch):
-    try:
-        _github(f"/repos/{quote(owner)}/{quote(name)}/commits/{quote(sha)}", token_for, owner, fetch)
-    except ProviderError as exc:
-        if exc.detail in ("HTTP 404", "HTTP 422"):
-            return False
-        raise
-    return True
+    return _github_ref_sha(owner, name, sha, token_for, fetch) is not None
 
 
 def github_workflows(owner, name, sha, token_for, fetch=_fetch, fallback_ref=None):
@@ -781,14 +775,22 @@ def github_workflows(owner, name, sha, token_for, fetch=_fetch, fallback_ref=Non
 
 
 def _github_ref_sha(owner, name, ref, token_for, fetch):
-    """The commit a branch (or any ref GitHub resolves) points at, or None when GitHub has no such ref."""
+    """The commit a branch (or any ref GitHub resolves) points at, or None when GitHub has no such ref.
+
+    Read from the commit list, one entry long: GET /commits/{ref} carries every file's patch, and a
+    commit that touches many files outgrew the response cap (1 MB), refusing the push it described."""
     try:
-        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/commits/{quote(ref)}", token_for, owner, fetch)
+        raw = _github(f"/repos/{quote(owner)}/{quote(name)}/commits?sha={quote(ref, safe='')}&per_page=1",
+                      token_for, owner, fetch)
     except ProviderError as exc:
         if exc.detail in ("HTTP 404", "HTTP 422"):
             return None
         raise
-    sha = _need("github_actions", raw, "sha", str, "commit")
+    if not isinstance(raw, list):
+        raise ProviderError("github_actions", "DIVERGED", "the commit list is not a list")
+    if not raw:
+        return None
+    sha = _need("github_actions", raw[0], "sha", str, "commit")
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
         raise ProviderError("github_actions", "DIVERGED", "commit.sha is not an object id")
     return sha

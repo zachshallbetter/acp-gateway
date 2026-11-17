@@ -553,7 +553,7 @@ def test_workflows_of_an_unpushed_commit_are_read_at_its_branch_and_never_cached
     sha = "c" * 40
     token = lambda owner: "gh-token"
     head = "f" * 40
-    fake = Fake({"/commits/main": {"sha": head},
+    fake = Fake({"/commits?sha=main&": [{"sha": head}],
                  f"/contents/.github/workflows?ref={head}": [{"type": "file", "path": ".github/workflows/ci.yml"}],
                  f"/contents/.github/workflows/ci.yml?ref={head}": content(CI_BOUNDED)})
     found = providers.github_workflows("Example-Org", "Widget", sha, token, fake, fallback_ref="main")
@@ -570,7 +570,7 @@ def test_no_workflows_is_believed_only_for_a_commit_github_has():
     sha = "d" * 40
     token = lambda owner: "gh-token"
     assert providers.github_workflows("Example-Org", "Widget", sha, token,
-                                      Fake({f"/commits/{sha}": {"sha": sha}})) == []
+                                      Fake({f"/commits?sha={sha}&": [{"sha": sha}]})) == []
     fresh()
     try:
         providers.github_workflows("Example-Org", "Widget", sha, token, Fake({"/repos/Example-Org/Widget?": {}}),
@@ -602,8 +602,18 @@ def test_vercel_json_of_an_unpushed_commit_is_read_at_its_branch():
     assert providers.vercel_branch_enabled(config, "fix/x") is False, "so ACP no longer counts a preview Vercel skips"
     fresh()
     assert providers.github_json_file("Example-Org", "Widget", "vercel.json", sha, token,
-                                      Fake({f"/commits/{sha}": {"sha": sha}}), fallback_ref="fix/x") is None, \
+                                      Fake({f"/commits?sha={sha}&": [{"sha": sha}]}), fallback_ref="fix/x") is None, \
         "a pushed commit with no vercel.json has none"
+
+def test_a_commit_is_looked_up_without_its_file_patches():
+    fresh()
+    sha = "a" * 40
+    fake = Fake({f"/commits?sha={sha}&per_page=1": [{"sha": sha}]})
+    assert providers._github_commit_exists("Example-Org", "Widget", sha, token_for, fake)
+    assert not [c for c in fake.calls if f"/commits/{sha}" in c[1]], "GET /commits/{sha} carries every patch"
+    assert providers._github_ref_sha("Example-Org", "Widget", "main", token_for, Fake({"/commits?sha=main&": []})) \
+        is None, "an empty list is no such ref"
+
 
 # ---- production CLI deploys: merged and green ---------------------------------
 def release_routes(status="behind", runs=(), workflow=CI_BOUNDED):
