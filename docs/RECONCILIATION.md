@@ -2,6 +2,9 @@
 
 Reconciled 2026-11-02 after the owner paused other work and completed cleanup.
 This record distinguishes preserved implementation from released behavior.
+It is a historical record: since 2026-11-02 both production hosts are released by
+`scripts/release.py` and migrations run to 0008. Where it differs from the README, the README
+describes current behavior.
 It does not authorize a protected effect or replace a signed ACP decision.
 
 ## Verified baseline

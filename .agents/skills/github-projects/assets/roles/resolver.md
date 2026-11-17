@@ -12,8 +12,8 @@ Rules:
 - **Do not let a build pollute the diff.** If running the build regenerated `Cargo.lock`
   (or any `*/Cargo.lock`) and you did not intentionally change dependencies, restore it:
   `git checkout -- Cargo.lock` before committing. Commit only the files your change needs.
-- **Commit** to the worktree's branch with a clear message; end the message with:
-  `Co-Authored-By: Claude <noreply@anthropic.com>`. Do **NOT** push and do **NOT** open a
+- **Commit** to the worktree's branch with a clear message and no `Co-Authored-By` trailer
+  (the owner is the only author). Do **NOT** push and do **NOT** open a
   pull request — the coordinator handles pushing, the PR, and the merge.
 - If the ticket is ambiguous, blocked, or larger than described, **stop and report** —
   do not guess or expand scope.

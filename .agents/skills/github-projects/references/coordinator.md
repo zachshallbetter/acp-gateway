@@ -149,8 +149,9 @@ which is the safe default.
 
 ### Admission and qualification handshakes
 
-When the repository provides them (they are repository scripts, not part of this
-engine), admission is the first coordinator operation, not an agent judgment. Run
+These are repository scripts, not part of this engine: `coordinator.sh` stops at admission
+(`STOP: coordinator admission script is missing`) in a repository that lacks
+`scripts/coordinator-admission.sh`. Admission is the first coordinator operation, not an agent judgment. Run
 `scripts/coordinator-admission.sh` with the Project item, issue, branch, and
 developer. It returns `INVALID`, `BLOCKED`, `APPROVED`, or `REJECTED`; only
 `APPROVED` may claim or create a worktree. A worker resolves only the returned

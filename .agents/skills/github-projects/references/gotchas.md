@@ -143,8 +143,9 @@ fill themselves. See `references/conventions.md`.
 
 ## 16. A bare `429 rate limited` from the gateway is Railway's WAF, not a rate limit
 
-The ACP gateway never answers 429 and every refusal it does send is JSON with `error`,
-`detail` and `remedy`. A 12-byte `text/plain` body of `rate limited`, with `server: railway-hikari`
+The ACP gateway answers 429 only to an anonymous `/ready` or `/notice` caller past 60 requests a
+minute, and as JSON (`error: RATE_LIMITED`); no board read, which needs the bearer, is ever limited.
+Every refusal it sends is JSON with `error`, `detail` and `remedy`. A 12-byte `text/plain` body of `rate limited`, with `server: railway-hikari`
 and an `x-hikari-trace` header but **no** `x-railway-request-id`, is Railway's edge answering
 before the request reaches the service. The cause on 2026-09-06 to 2026-09-11 was Railway's WAF
 **Under Attack Mode** left on with no expiry on the `acp-gateway` production service: browsers get

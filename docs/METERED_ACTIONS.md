@@ -69,13 +69,13 @@ The standard decision envelope, plus:
 | `grant_request` | a refusal an owner grant would clear | `{action, repository, uses, expires, reason, command}`: `command` is complete and runnable as is, with the request's reason. Show it to the owner. |
 | `builds` | repository actions | `[{provider, project, project_id, would_build, why}]` for each connected provider and workflow. |
 | `budget` | repository actions | `{day, usage: [{scope, used, limit, limit_source?, source?, enforced?}], exceeded?}`. Scopes: `project <provider>/<name>` and `service <provider>` are enforced; the repository and deployment-wide totals carry `enforced: false`. |
-| `advice` | repository actions, allow and refusal | `{project_usage: [{provider, project, used_today, limit, limit_source, builds_last_30m, last_build_seconds_ago}], service: [{provider, source, ceiling, deployments_today, in_flight, lower_bound?}], triggers: [{provider, project, would_build, why}], recommendations: [{code, text}], resets_at}`; on a budget refusal also `usage_by_repository: [{repository, used}]`. Recommendation codes: `BATCH_PUSHES`, `NEAR_LIMIT`, `WAIT_FOR_INFLIGHT`, `PREVIEW_BUILDS`, `SAME_COMMIT`, `MULTI_SERVICE`, `SERVICE_BUSY`, `CAPACITY_UNREAD` (a service's live activity could not be read, so its in-flight cap is not applied and its count is ACP's ledger; or `lower_bound` marks a count past what ACP reads in one pass). Show each `text` to the agent. |
+| `advice` | repository actions, allow and refusal | `{project_usage: [{provider, project, used_today, limit, limit_source, builds_last_30m, last_build_seconds_ago}], service: [{provider, source, ceiling, deployments_today, in_flight, lower_bound?}], triggers: [{provider, project, would_build, why}], recommendations: [{code, text}], resets_at}`; on a budget refusal also `usage_by_repository: [{repository, used}]`. Recommendation codes: `BATCH_PUSHES`, `NEAR_LIMIT`, `WAIT_FOR_INFLIGHT`, `PREVIEW_BUILDS`, `SAME_COMMIT`, `MULTI_SERVICE`, `SERVICE_BUSY`, `WORKFLOW_UNBOUNDED_ON_BRANCH` (a workflow read at the branch lacks a timeout or concurrency group; advice only, the merge is refused until it is bounded), `CAPACITY_UNREAD` (a service's live activity could not be read, so its in-flight cap is not applied and its count is ACP's ledger; or `lower_bound` marks a count past what ACP reads in one pass). Show each `text` to the agent. |
 | `retry_after` | `REVERIFY_REQUIRED` `BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY` | Seconds until asking again can succeed. Commit locally meanwhile. |
 | `priority_request` | a refusal priority would clear | `{field: "context.priority", blocking: [...], remaining_today, example}`. |
 | `resets_at` | budget refusals | When today's budgets reset (00:00 UTC). |
 | `authorized_action` | `ALLOW` | `{action, ref, new_sha, trigger, workflow?, run_id?}`. Proceed with exactly this. |
 | `lease_id` | `heavy_subagent` `ALLOW` | Send it to `POST /internal/subagent/release` when the subagent stops. |
-| `replayed` | a repeat of an allowed request | The earlier record stands; nothing was counted again. |
+| `replayed` | a repeat of an allowed request | The earlier record stands; nothing was counted again. This includes a merge whose builds ACP already counted for the push of the same commit, and the reverse. |
 | `caller_kind` | metered actions | `shared`, `lane`, `coordinator` or `owner`, as ACP identified the caller. |
 
 ## What the hook does
@@ -92,6 +92,8 @@ The standard decision envelope, plus:
 On every answer the hook prints each `advice.recommendations[].text`; with `retry_after` it says when
 to ask again, and with `priority_request` how to ask for priority (`ACP_PRIORITY="<blocking>: <reason>"`
 in the bootstrap client).
+
+A CLI deploy (`cli_deploy`, `railway_up`), `workflow_dispatch` or `rerun` starts a new run each time, so each invocation is counted. `context.tool_use_id` names one tool call: the same caller may repeat it within ten minutes and it is counted once; another caller, or the same one later, gets `DENY INVOCATION_REUSED`: send the id of the actual tool call, or none. For `heavy_subagent` the same refusal answers an id whose lease was already released.
 
 The hook never retries a refusal unchanged. A retry with the same commit after a grant, a budget
 reset or a fixed workflow is the normal path, and is safe: allowed actions are recorded once.

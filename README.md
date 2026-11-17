@@ -7,10 +7,10 @@ repositories it governs: an agent asks ACP whether a protected action is
 authorized, and ACP answers. The HTTP handler uses Python's standard library;
 the Vercel runtime uses the PostgreSQL dependencies pinned in `requirements.txt`.
 
-Current recovery scope, preserved candidates, ticket dispositions, and release
-gates are recorded in [the reconciliation record](docs/RECONCILIATION.md).
-Local source, GitHub issue completion, and the deployment serving production
-are separate states; none proves the others.
+[The reconciliation record](docs/RECONCILIATION.md) is a dated record (2026-11-02) of
+the recovery scope, preserved candidates, ticket dispositions and release gates at that
+time; this README describes the current behaviour. Local source, GitHub issue completion,
+and the deployment serving production are separate states; none proves the others.
 
 The two halves share a process and a bearer token, and nothing else. Losing
 GitHub takes the read side offline; it does **not** take the policy side
@@ -249,8 +249,9 @@ Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `VERIFIED_AND_PERMITTED`. Metered actions add `WITHIN_BUDGET`, `GRANT_APPLIED`,
 `NO_HOSTED_BUILD`, `PROVIDER_NOT_METERED`, `OVER_BUDGET_NOTED`, `BUDGET_EXCEEDED`, `PRIORITY_GRANTED`,
 `BUILD_PACED`, `BUILD_IN_FLIGHT`, `BUILD_BURST`, `SERVICE_AT_CAPACITY`, `SERVICE_LIMIT_REACHED`,
-`SERVICE_OVER_LIMIT`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`,
-`SUBAGENT_LIMIT_REACHED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
+`SERVICE_OVER_LIMIT`, `OWNER_REQUIRED`, `WORKFLOW_UNBOUNDED`, `INVOCATION_REUSED`,
+`SUBAGENT_LIMIT_REACHED`, `BUILD_ADMITTED`, `BUILD_DUPLICATE`, `BUILD_UNATTRIBUTED`,
+`BUILD_PRIVATE_CACHE`, `PROJECT_SHARE_EXCEEDED`, `REPOSITORY_NOT_GOVERNED`, `METERED_ACTION_NOT_ENABLED`,
 `CALLER_NOT_PERMITTED`, `PROVIDER_EVIDENCE_UNAVAILABLE`,
 `PROVIDER_RESPONSE_DIVERGED`, `BUDGET_LEDGER_UNAVAILABLE` and
 `BUDGET_POLICY_UNAVAILABLE`.
@@ -336,7 +337,10 @@ A repository opts in by listing the first three in its policy's
    and workflows this exact commit would build (`vercel.json` and the
    workflows are read at `new_sha`), and whether those workflows are bounded;
 3. refuses a workflow with no `timeout-minutes` or no concurrency group
-   (`WORKFLOW_UNBOUNDED`), naming the lines to add;
+   (`WORKFLOW_UNBOUNDED`), naming the lines to add. A push's commit is not on GitHub yet, so its
+   workflows are read at the branch, and there the same finding only advises
+   (`WORKFLOW_UNBOUNDED_ON_BRANCH` in `advice.recommendations`, never a refusal): the push may be
+   the fix. A merge, whose commit GitHub has, is checked exactly;
 4. reads the live state of each service it would build on (Vercel: today's
    deployments and builds in flight across the team; Railway: today's
    deployments and the workspace usage limit), falling back to its own ledger
@@ -429,6 +433,13 @@ the request's own reason filled in. The command starts with `ACP_GRANT_COMMAND_P
 by default `latchkey run --env-file ~/Projects/acp-gateway/.env.local -- python3
 ~/Projects/acp-gateway/scripts/policy-admin.py`.
 
+**Evidence outside the transaction.** On PostgreSQL storage, `POST /internal/authorize` reads the
+request body, then reads GitHub and provider evidence before its database transaction opens (a short
+transaction of its own reads only the policy and the repository's trust record). The decision runs in
+the request transaction and uses that evidence only for exactly the arguments it was read with, and
+reads live otherwise; a failed prefetch leaves the live path. A slow provider therefore never holds
+the instance's database connection.
+
 **Fail closed.** No budget policy, unreadable provider evidence, a provider
 response that does not match the expected fields, an unknown action, an
 ungoverned repository, or a deployment without the shared PostgreSQL ledger
@@ -452,7 +463,7 @@ recorded but neither quarantine nor lock, and its `actor_id` attaches no actor
 record. Containment from a caller's own say-so needs a lane, coordinator or owner
 credential.
 
-**Anonymous routes.** `/ready` and `/notice` answer without the bearer. Each
+**Anonymous routes.** `/ready` and `/notice` (and its alias `/.well-known/acp`) answer without the bearer. Each
 client address gets 60 such requests a minute (`429 RATE_LIMITED` past it;
 the bearer is not limited), and an instance answers repeats from a short cache
 (readiness 5 seconds, a notice 15) instead of the database, so a change in
@@ -470,7 +481,10 @@ machines and concurrency are the owner's to change; ACP reports them and changes
 nothing. `POST /internal/posture/refresh` (owner or coordinator) re-reads the
 providers, at most every 10 minutes per repository and three repositories per request (it answers
 `remaining`; POST again for the next batch);
-`scripts/posture-report.py --refresh` renders the page. Provider deployment
+`scripts/posture-report.py --refresh` renders the page. A refresh runs in phases so no database
+transaction is open while providers are read: a short transaction chooses the repositories that are
+due (stalest first), the provider reads run with none open, and a second short transaction stores
+what was read. Provider deployment
 counts above what ACP authorized appear as `UNRECORDED_BUILDS`. A Vercel project's build
 machine is judged by what its latest build actually ran on, not only by its setting. The
 report script also compares the policies both production hosts hold and reports any
@@ -525,7 +539,9 @@ GitHub App, on its own, never does: that is `REVERIFY_REQUIRED`.
 A policy is a JSON object (or a list of them, or `{"policies": [...]}`). The
 deployment's policies, its caller registry and its budget policy are each one
 signed document, stored versioned and append-only in the shared PostgreSQL
-database (`signed_documents`, migration 0005). Both production hosts read the
+database (`signed_documents`, migration 0005; migration 0008 adds a trigger that refuses any
+`UPDATE`, `DELETE` or `TRUNCATE` on it, so no writer can rewrite a version the other host
+trusted). Both production hosts read the
 newest version, at most every `ACP_DOCUMENT_TTL_SECONDS` (default 15), so a
 change takes effect within seconds and is not bound by a host's
 environment-variable size limit. `ACP_POLICY`, `ACP_CALLERS` and
@@ -1339,6 +1355,8 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_GITHUB_INSTALLATION_ID` | no | Legacy single installation. Used as a fallback if the installation list can't be fetched, or when a call names no owner. |
 | `ACP_GITHUB_TOKEN_<OWNER>` | for user boards | A classic PAT with `read:project` for one owner, e.g. `ACP_GITHUB_TOKEN_ZACHSHALLBETTER`. Takes precedence over the App for that owner. Required for **user-owned** boards — see below. |
 | `PORT` | no | Defaults to `8080`. |
+| `ACP_BIND_HOST` | no | Address `python3 gateway.py` listens on. Defaults to `0.0.0.0`. |
+| `ACP_CLIENT_RELEASES_FILE` | no | Path to the released-bootstrap-client list. Defaults to the bundled `client_releases.json`. |
 | `ACP_POLICY` | for policy | The policy document as literal JSON. Seeds the shared database until its first stored version; the source on file storage. |
 | `ACP_POLICY_FILE` | for policy | Path to the same, if you prefer a mounted file. Takes precedence over the database and `ACP_POLICY`. |
 | `ACP_DOCUMENT_TTL_SECONDS` | no | How long a host keeps the signed documents it read from the database (default 15, at most 300). |
@@ -1377,6 +1395,8 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_PATH_CASE_SENSITIVE` | no | `1` to compare protected paths case-sensitively. Default: case-insensitive matching, with the difference reported. |
 | `ACP_BOARD_READ_GATE` | no | `locked` (default), `contained`, or `off`. Only has an effect once a policy declares `boards`. |
 | `ACP_BUDGET_POLICY` | for metered actions | Signed deployment-wide limits. Without it, or a stored version, every metered action is refused (`BUDGET_POLICY_UNAVAILABLE`). Seeds the database like `ACP_POLICY`. |
+| `ACP_STORAGE_BACKEND` | no | `file` or `postgres`. Defaults to `postgres` on Vercel and `file` elsewhere; the metered actions need `postgres`. |
+| `ACP_DATABASE_URL` | with `postgres` | The PostgreSQL connection URL; `POSTGRES_URL`, then `DATABASE_URL`, are read if it is unset. A non-local host is upgraded to hostname-verified TLS. |
 | `ACP_DATABASE_POOL_MAX` | no | Database connections per instance: default 1 on Vercel (at most 2) and 2 elsewhere (at most 4). Production Vercel sets 2, so one slow request cannot hold an instance's only connection. |
 | `ACP_DATABASE_TIMEOUT_SECONDS` | no | Seconds to wait for a pooled connection or to connect, 1 to 15, default 5. |
 | `ACP_CALLERS` | no | Signed per-caller credentials: lane and coordinator token hashes, each scoped to repositories. Unset and not stored: every caller is the shared bearer. Seeds the database like `ACP_POLICY`. |
@@ -1450,6 +1470,7 @@ not `-f`, which throws it away).
 | `OWNER_NOT_VISIBLE` | 404 | The login didn't resolve to a user or org. |
 | `APP_NOT_CONFIGURED` | 503 | Gateway has no App credentials. |
 | `INSTALLATION_LOOKUP_FAILED` / `UPSTREAM_FAILURE` | 502 | GitHub side; retry, then check `/internal/app-probe`. |
+| `RATE_LIMITED` | 429 | An anonymous `/ready` or `/notice` caller sent over 60 requests a minute from one address. Wait a minute, or send the bearer; the body carries `retry_after`. |
 | `METHOD_NOT_ALLOWED` | 405 | `/internal/authorize` is a POST. |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | Send `Content-Type: application/json`. |
 | `LENGTH_REQUIRED` | 411 | Send an integer `Content-Length`; chunked bodies are not accepted. |
@@ -1506,6 +1527,7 @@ python3 test_vercel_adapter.py
 python3 test_gateway_metering.py
 python3 test_providers.py
 python3 test_release_scripts.py
+python3 test_policy_admin.py
 ```
 
 Self-contained — mocks the GitHub calls, no network or real credentials
@@ -1518,6 +1540,8 @@ release may run on. The PostgreSQL integration checks are separate:
 ```bash
 ACP_TEST_DATABASE_URL=postgresql://127.0.0.1:5432/acp_runtime_test .venv/bin/python test_postgres_store.py
 ```
+
+`test_migrate_db.py` and `test_vercel_build.py` take the same variable and run nothing without it.
 
 Create a disposable, empty local database first. This check applies this release's
 migrations, exercises rollback, concurrent capability consumption, the metered-action
@@ -1580,7 +1604,7 @@ latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work
 A failure stops the release where it is and says what state each host is in. Before the
 merge it records the deployment each host runs; a stop after the merge also prints how to
 return both to it (`vercel rollback <deployment> --scope <team>` and the Railway deployment to
-redeploy), next to fixing forward. A failed
+redeploy), next to fixing forward (a rerun that resumes after the merge prints none). A failed
 Vercel build leaves the alias on the previous deployment and Railway untouched; fix forward
 with a new release. Rerunning after the merge resumes: when `main` already holds HEAD, the
 merge is skipped and the Vercel check, Railway deploy and health checks run again. `--dry-run`
