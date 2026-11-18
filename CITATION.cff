@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use acp-gateway, please cite it using these metadata."
+title: "acp-gateway"
+type: software
+authors:
+  - family-names: "Shallbetter"
+    given-names: "Zach"
+repository-code: "https://github.com/zachshallbetter/acp-gateway"
+license: MIT
+abstract: "A policy decision service that agents ask before protected repository actions, metered builds and production deploys."

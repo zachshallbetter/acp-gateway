@@ -1,0 +1,35 @@
+name: Bug report
+description: ACP decided, answered or stored something other than what the README documents.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. Use dummy repositories and tokens; never paste a real token, key or policy signature.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit and deployment mode
+      placeholder: 3f2a1c9, file mode / Postgres, Docker / Vercel
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: The decision or response you expected, quoting the README section if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: The decision, reason code and remedy ACP returned.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The request body (secrets removed) and the relevant ACP_* settings by name.
+    validations:
+      required: true

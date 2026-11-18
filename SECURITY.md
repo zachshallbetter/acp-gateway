@@ -7,9 +7,10 @@ something its owner did not authorize. Reports are welcome.
 
 Do not open a public issue for a vulnerability.
 
-<!-- OWNER: replace this line with the private reporting route (for example an email address or
-     GitHub private vulnerability reporting). Until it is filled in there is no private route. -->
-**Private reporting route: not yet published.**
+Report it privately through GitHub: open the repository's [Security advisories](https://github.com/zachshallbetter/acp-gateway/security/advisories/new)
+page and choose **Report a vulnerability**.
+
+This is a solo-maintained project: responses are best-effort, with no guaranteed response time.
 
 Include the commit you tested, the request or configuration that shows the problem, and what you
 expected ACP to decide. Test only against a deployment you run yourself, with dummy repositories and

@@ -1559,6 +1559,21 @@ These steps run your own gateway for your own repositories, independent of any o
 Metered builds also need a signed budget policy (`scripts/policy-admin.py budget-policy`) and the
 read-only provider tokens (`ACP_VERCEL_TOKEN`, `ACP_RAILWAY_TOKEN`).
 
+## Repository map
+
+| Path | What it is |
+|---|---|
+| `gateway.py` | The HTTP service: authentication, policy decisions, containment, capabilities, audit |
+| `metering.py` | Decisions for metered actions: budgets, pacing, grants, the deploy gate |
+| `providers.py` | Read-only evidence from GitHub, Vercel and Railway |
+| `posture.py` | The fleet posture report and its findings |
+| `postgres_store.py`, `db_migrations.py`, `migrations/` | Shared PostgreSQL state and its versioned migrations |
+| `api/index.py`, `vercel.json` | The Vercel adapter; `Dockerfile` is the container host |
+| `scripts/` | Operator tools: policy administration, releases, migrations, posture |
+| `github-app/` | The GitHub App definition |
+| `docs/` | Reference documents: metered actions, the GitHub App, the reconciliation record |
+| `test_*.py` | The test suite |
+
 ## Tests
 
 ```bash
@@ -1754,3 +1769,8 @@ service. That is a deployment change on both production hosts, not a client one:
 
 An `<owner>:*` entry admits every board that owner holds, which is what keeps a
 newly created board from needing a gateway edit before it can be read.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Contributions are welcome under the same license; see
+[CONTRIBUTING.md](CONTRIBUTING.md). To cite the project, use [CITATION.cff](CITATION.cff).

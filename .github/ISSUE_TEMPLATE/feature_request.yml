@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a decision rule, provider, metered action or operator capability.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The decision or behavior you want
+      description: What should ACP decide or report, and for which agents and repositories?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How you imagine it
+      description: A new action, a policy field, a provider, a route.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
