@@ -46,8 +46,8 @@ def main() -> int:
     body = admin.gateway_call("/internal/posture", bearer)
     import posture
     try:
-        drift = posture.policy_drift(admin.gateway_call("/internal/policy", bearer),
-                                     admin.gateway_call_at(admin.RAILWAY_URL, "/internal/policy", bearer))
+        drift = [] if not admin.RAILWAY_URL else posture.policy_drift(
+            admin.gateway_call("/internal/policy", bearer), admin.gateway_call_at(admin.RAILWAY_URL, "/internal/policy", bearer))
     except SystemExit as exc:                          # the peer could not be read: that is a finding too
         drift = [{"severity": "high", "code": "POLICY_DRIFT_UNCHECKED", "repository": "railway",
                   "subject": admin.RAILWAY_URL, "problem": f"Railway's policies could not be read: {exc}",

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -363,6 +364,19 @@ class CredentialTests(unittest.TestCase):
                 admin.keychain("ACP_POLICY_SIGNING_KEY")
 
 
+class GatewayHostTests(unittest.TestCase):
+    def test_a_self_hosted_deployment_names_its_own_hosts(self):
+        env = {**os.environ, "ACP_GATEWAY_HOSTS": "acp.example.com", "ACP_GATEWAY_URL": "https://acp.example.com"}
+        env.pop("ACP_RAILWAY_URL", None)
+        code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('a',sys.argv[1]);"
+                "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.GATEWAY, m.RAILWAY_URL);"
+                "m.checked_gateway('https://acp-gateway.vercel.app')")
+        out = subprocess.run([sys.executable, "-c", code, str(ROOT / "scripts/policy-admin.py")], env=env,
+                             capture_output=True, text=True)
+        self.assertIn("https://acp.example.com None", out.stdout)
+        self.assertIn("refusing to send a token", out.stderr, "a host outside ACP_GATEWAY_HOSTS is refused")
+
+
 class CallerTokenTests(unittest.TestCase):
     def test_the_token_reaches_the_keychain_on_stdin_never_on_argv(self):
         fake = FakeStore(None, version=0, name="callers")
@@ -387,6 +401,31 @@ class CallerTokenTests(unittest.TestCase):
         self.assertGreaterEqual(len(token), 32)
         self.assertNotIn(token, " ".join(argv))
         self.assertEqual(len(fake.writes), 1)
+
+    def test_a_token_file_replaces_the_keychain_and_is_owner_only(self):
+        fake = FakeStore(None, version=0, name="callers")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "lane-1.token")
+            args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True, token_file=path)
+            with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                    patch.object(subprocess, "run") as ran, redirect_stdout(io.StringIO()):
+                self.assertEqual(admin.cmd_caller(args), 0)
+            ran.assert_not_called()                                    # no macOS Keychain involved
+            token = open(path).read().strip()
+            self.assertGreaterEqual(len(token), 32)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            stored = fake.documents["callers"][1]["callers"][0]
+            self.assertEqual(stored["token_sha256"], hashlib.sha256(token.encode()).hexdigest())
+
+    def test_a_token_file_never_overwrites_an_existing_file(self):
+        fake = FakeStore(None, version=0, name="callers")
+        with tempfile.NamedTemporaryFile() as existing_file:
+            args = argparse.Namespace(caller_id="lane-1", kind="lane", repo=["o/a"], apply=True,
+                                      token_file=existing_file.name)
+            with patch.object(admin, "keychain", return_value=KEY), patch.multiple(admin, **fake.patches()), \
+                    redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "already exists"):
+                admin.cmd_caller(args)
+        self.assertEqual(fake.writes, [])
 
     def test_a_keychain_failure_stores_nothing_in_acp(self):
         fake = FakeStore(None, version=0, name="callers")

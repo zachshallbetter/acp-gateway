@@ -46,16 +46,24 @@ _spec = importlib.util.spec_from_file_location("ff_merge", Path(__file__).resolv
 ff_merge = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ff_merge)
 
-VERCEL_PROJECT = "acp-gateway"
-VERCEL_TEAM = "team_8mC0mXDMIpioyO8cMRjLwb4H"
-VERCEL_URL = "https://acp-gateway.vercel.app"
-RAILWAY_PROJECT = "a3dbbfc5-3fe7-4365-a754-9a7856766f05"
-RAILWAY_SERVICE = "b2f28e52-a113-41c5-b29f-6dcb6a54d3aa"
-RAILWAY_ENVIRONMENT = "dac18c6b-a1ce-485b-b3a4-a8949dc5ad6e"
-RAILWAY_URL = "https://acp-gateway-production.up.railway.app"
+# The deployment this script releases. Each value is non-secret; a self-hosted deployment sets its own
+# with the ACP_RELEASE_* variables (the defaults are this repository's own hosts).
+def _setting(name, default):
+    return os.environ.get(f"ACP_RELEASE_{name}", default).strip()
+
+
+VERCEL_PROJECT = _setting("VERCEL_PROJECT", "acp-gateway")
+VERCEL_TEAM = _setting("VERCEL_TEAM", "team_8mC0mXDMIpioyO8cMRjLwb4H")
+VERCEL_URL = _setting("VERCEL_URL", "https://acp-gateway.vercel.app")
+RAILWAY_PROJECT = _setting("RAILWAY_PROJECT", "a3dbbfc5-3fe7-4365-a754-9a7856766f05")
+RAILWAY_SERVICE = _setting("RAILWAY_SERVICE", "b2f28e52-a113-41c5-b29f-6dcb6a54d3aa")
+RAILWAY_ENVIRONMENT = _setting("RAILWAY_ENVIRONMENT", "dac18c6b-a1ce-485b-b3a4-a8949dc5ad6e")
+RAILWAY_URL = _setting("RAILWAY_URL", "https://acp-gateway-production.up.railway.app")
 RAILWAY_IDS = ("-p", RAILWAY_PROJECT, "-s", RAILWAY_SERVICE, "-e", RAILWAY_ENVIRONMENT)
 # The non-secret name ACP's database.migrate decisions use for the production database.
-DATABASE_ID = "neon-wispy-scene-19011576-production"
+DATABASE_ID = _setting("DATABASE_ID", "neon-wispy-scene-19011576-production")
+# The repository this checkout releases, as owner/name.
+REPOSITORY = _setting("REPOSITORY", "zachshallbetter/acp-gateway")
 POLL_SECONDS = 10
 sleep = time.sleep
 
@@ -240,7 +248,7 @@ def release(args, checkout: Path) -> None:
     if resuming:
         # A release that stopped after the merge: main already holds this exact revision, so the
         # remaining steps (Vercel check, Railway, verify) run again and the merge is skipped.
-        update = {"owner": "zachshallbetter", "name": "acp-gateway", "ref": "refs/heads/main", "new_sha": head}
+        update = {"owner": REPOSITORY.split("/")[0], "name": REPOSITORY.split("/")[1], "ref": "refs/heads/main", "new_sha": head}
     else:
         update = ff_merge.plan(checkout, "origin", "refs/heads/main", "HEAD")
     if git(checkout, "ls-remote", "origin", f"refs/heads/{branch}").split()[:1] != [update["new_sha"]]:

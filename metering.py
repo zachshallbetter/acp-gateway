@@ -388,10 +388,9 @@ def budget_day(now):
     return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
 
 
-# How the owner runs policy-admin on their machine. A deployment whose operator checkout lives elsewhere
-# sets ACP_GRANT_COMMAND_PREFIX; the default is the acp-gateway checkout under latchkey.
-GRANT_COMMAND_PREFIX = ("latchkey run --env-file ~/Projects/acp-gateway/.env.local -- "
-                        "python3 ~/Projects/acp-gateway/scripts/policy-admin.py")
+# How the operator runs policy-admin. A deployment sets ACP_GRANT_COMMAND_PREFIX to its own form (for example
+# with the operator's secret runner and checkout path); the default assumes the repository root.
+GRANT_COMMAND_PREFIX = "python3 scripts/policy-admin.py"
 
 
 def grant_request(action, owner=None, name=None, reason=None):

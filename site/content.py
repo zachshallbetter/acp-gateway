@@ -41,7 +41,7 @@ LICENSES = {
 # Where each document comes from. `web` is the public GitHub base for links; None means the repository is private.
 # `ref` pins the text to a tag; without one the build reads the checkout as it is.
 REPOS = {
-    "acp-gateway": {"dir": GATEWAY, "label": "zachshallbetter/acp-gateway", "web": "https://github.com/zachshallbetter/acp-gateway/blob/main/", "license": None},
+    "acp-gateway": {"dir": GATEWAY, "label": "zachshallbetter/acp-gateway", "web": "https://github.com/zachshallbetter/acp-gateway/blob/main/", "license": "MIT"},
     "fpb": {"dir": HOME / "_formal-project-bootstrap", "label": "zachshallbetter/formal-project-bootstrap @ v0.7.3", "web": "https://github.com/zachshallbetter/formal-project-bootstrap/blob/v0.7.3/", "ref": "v0.7.3", "license": "MIT"},
     "acpr": {"dir": HOME / "_tools/agent-control-plane", "label": "zachshallbetter/agent-control-plane", "web": "https://github.com/zachshallbetter/agent-control-plane/blob/main/", "license": "Apache-2.0"},
     "protocols": {"dir": HOME / "_protocols", "label": "zachshallbetter/protocols (private)", "web": None, "license": "MIT"},

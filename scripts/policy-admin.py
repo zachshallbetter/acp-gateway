@@ -73,6 +73,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -84,7 +85,9 @@ import urllib.request
 HERE = Path(__file__).resolve().parent.parent
 # The bearer and admin tokens go only to ACP's own hosts over TLS (a loopback host over http for local
 # tests), and never follow a redirect: urllib would resend the Authorization header to wherever it points.
-GATEWAY_HOSTS = ("acp-gateway.vercel.app", "acp-gateway-production.up.railway.app")
+# A self-hosted deployment names its own hosts in ACP_GATEWAY_HOSTS (comma-separated).
+GATEWAY_HOSTS = tuple(h.strip().lower() for h in os.environ.get(
+    "ACP_GATEWAY_HOSTS", "acp-gateway.vercel.app,acp-gateway-production.up.railway.app").split(",") if h.strip())
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -100,17 +103,20 @@ def checked_gateway(url: str) -> str:
     host = (parts.hostname or "").lower()
     if not ((parts.scheme == "https" and host in GATEWAY_HOSTS)
             or (parts.scheme in ("http", "https") and host in ("localhost", "127.0.0.1", "::1"))):
-        raise SystemExit(f"error: ACP_GATEWAY_URL must be https://{GATEWAY_HOSTS[0]} or "
-                         f"https://{GATEWAY_HOSTS[1]} (or a loopback host); refusing to send a token to {host or url!r}")
+        raise SystemExit(f"error: ACP_GATEWAY_URL must be https:// on one of ACP_GATEWAY_HOSTS ({', '.join(GATEWAY_HOSTS)}) "
+                         f"or a loopback host; refusing to send a token to {host or url!r}")
     return url.rstrip("/")
 
 
-GATEWAY = checked_gateway(os.environ.get("ACP_GATEWAY_URL", "https://acp-gateway.vercel.app"))
-KEYCHAIN_SERVICE = "ACP Gateway Production"
+GATEWAY = checked_gateway(os.environ.get("ACP_GATEWAY_URL", f"https://{GATEWAY_HOSTS[0]}" if GATEWAY_HOSTS else ""))
+KEYCHAIN_SERVICE = os.environ.get("ACP_KEYCHAIN_SERVICE", "ACP Gateway Production")
 KEY_ID = "acp-policy-hmac-sha256"
 POLICY_FILE = HERE / "policies/production.json"
 # The second production host. Every signed document ACP loads goes to both, or the hosts drift.
-RAILWAY_URL = "https://acp-gateway-production.up.railway.app"
+# The second host whose policies posture-report compares (ACP_RAILWAY_URL); unset when a deployment has one host.
+_RAILWAY_DEFAULT = "https://acp-gateway-production.up.railway.app"
+RAILWAY_URL = (checked_gateway(os.environ["ACP_RAILWAY_URL"]) if os.environ.get("ACP_RAILWAY_URL")
+               else _RAILWAY_DEFAULT if "acp-gateway-production.up.railway.app" in GATEWAY_HOSTS else None)
 
 
 def keychain(account: str) -> str:
@@ -121,6 +127,8 @@ def keychain(account: str) -> str:
                          "latchkey run --env-file .env.local -- ...")
     if value:
         return value
+    if not shutil.which("security"):                      # not macOS: the environment is the only source
+        raise SystemExit(f"error: {account} is not set in the environment (no macOS Keychain on this system)")
     out = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
@@ -639,7 +647,11 @@ def cmd_caller(args) -> int:
     stored_version, current = read_document("callers")
     current = current or {"callers_id": "acp-callers", "version": 0, "callers": []}
     account = "ACP_GATEWAY_TOKEN_" + args.caller_id.upper().replace("-", "_").replace(".", "_")
-    print(f"{args.kind} {args.caller_id} for {', '.join(args.repo)}; token in Keychain account {account}")
+    token_file = getattr(args, "token_file", None)
+    where = f"file {token_file}" if token_file else f"Keychain account {account}"
+    if token_file and os.path.lexists(token_file):
+        raise SystemExit(f"error: {token_file} already exists; name a new file for the token")
+    print(f"{args.kind} {args.caller_id} for {', '.join(args.repo)}; token in {where}")
     if not args.apply:
         print("dry run: pass --apply to create the token and store the caller list in ACP")
         return 0
@@ -649,6 +661,14 @@ def cmd_caller(args) -> int:
                     "token_sha256": hashlib.sha256(token.encode()).hexdigest()})
     document = {"callers_id": "acp-callers", "version": int(current.get("version", 0)) + 1, "callers": callers}
     signed = signed_document(document, key, "callers", rp)
+    if token_file:
+        # A new file only the owner can read; O_EXCL refuses to follow a link or overwrite anything.
+        fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        write_signed("callers", stored_version, signed)
+        print(f"give the caller the token in {token_file} through its own secret store, then delete the file")
+        return 0
     # The token goes to `security -i` on stdin, never on argv where `ps` would show it.
     quoted = [json.dumps(v) for v in (KEYCHAIN_SERVICE, account, token)]
     stored = subprocess.run(["security", "-i"], capture_output=True, text=True,
@@ -757,6 +777,8 @@ def main() -> int:
     caller.add_argument("caller_id")
     caller.add_argument("--kind", required=True, choices=["lane", "coordinator"])
     caller.add_argument("--repo", action="append", required=True, metavar="OWNER/NAME|OWNER/*")
+    caller.add_argument("--token-file", metavar="PATH",
+                        help="write the new token to this new file (mode 0600) instead of the macOS Keychain")
     caller.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if not (HERE / "gateway.py").exists():

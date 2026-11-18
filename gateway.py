@@ -6120,6 +6120,11 @@ def boot_check():
     for record in policy_registry()["policies"].values():
         recovery_authorizations(record["policy"])
     quarantine_settings()                # a malformed quarantine payload is a config error, not a surprise
+    if not os.getenv("ACP_POLICY_SIGNING_KEY", "").strip():
+        # File mode may run unsigned for local trials; say so, so nobody mistakes it for a governed deployment.
+        print("warning: ACP_POLICY_SIGNING_KEY is not set, so policies load unsigned and anyone who can write "
+              "ACP_POLICY can change them. Set it (and ACP_REQUIRE_PRODUCTION_CONTROLS=1) before real use.",
+              file=sys.stderr)
     retention_days()                     # ...and so is a malformed retention policy
     load_audit_tail()                    # history stays queryable across a restart
     if security_degraded():              # a corrupt containment store must not read as "nothing contained"

@@ -437,8 +437,8 @@ later window issues a new one, so two runs a minute apart across a window edge i
 or none at all (`REPOSITORY_NOT_GOVERNED` otherwise). Every refusal a grant would clear
 carries `grant_request`: the grant's fields and the complete command that issues it, with
 the request's own reason filled in. The command starts with `ACP_GRANT_COMMAND_PREFIX`,
-by default `latchkey run --env-file ~/Projects/acp-gateway/.env.local -- python3
-~/Projects/acp-gateway/scripts/policy-admin.py`.
+by default `python3 scripts/policy-admin.py`; a deployment sets it to the way its operator runs that script
+(for example behind a secret runner, from a checkout path).
 
 **Evidence outside the transaction.** On PostgreSQL storage, `POST /internal/authorize` reads the
 request body, then reads GitHub and provider evidence before its database transaction opens (a short
@@ -1410,6 +1410,7 @@ Everything above stays on the server. The instruction an agent needs is small:
 | `ACP_VERCEL_TOKEN` | for Vercel evidence | Vercel token ACP reads projects and deployments with. Only GETs are sent. |
 | `ACP_VERCEL_TEAM_ID` | no | Default Vercel team. A policy's `metered.providers.vercel.team_id` names the team its projects belong to and takes precedence, so projects in several teams can be metered. The token must reach every such team. |
 | `ACP_RAILWAY_TOKEN` | for Railway evidence | Railway token for the fixed read-only project and usage-limit queries. |
+| `ACP_GRANT_COMMAND_PREFIX` | no | How refusals that a grant would clear tell agents to run `scripts/policy-admin.py`. Defaults to `python3 scripts/policy-admin.py`. |
 
 `configured()` is `False` (and `/internal/app-status`, `/internal/app-probe`
 report it) until the App ID and private key are set — `/health` still returns
@@ -1516,6 +1517,47 @@ Or directly: `python3 gateway.py` with the same environment variables set.
 Deploy to Railway (or any container host) as its own service/project — do not
 attach it to a project that also hosts a webhook receiver or the product
 services it reads Project state for.
+
+## Self-hosting
+
+These steps run your own gateway for your own repositories, independent of any other deployment.
+`.env.example` lists the variables in this order.
+
+1. **Create a GitHub App** from [`github-app/manifest.json`](github-app/manifest.json), as described
+   in [`docs/GITHUB_APP.md`](docs/GITHUB_APP.md) under "Creating it from the manifest", under your own
+   account or organization. Install it on the repositories ACP should govern, then set
+   `ACP_GITHUB_APP_ID` and `ACP_GITHUB_PRIVATE_KEY`.
+2. **Generate the secrets**: `ACP_GATEWAY_TOKEN`, `ACP_POLICY_SIGNING_KEY` and `ACP_POLICY_ADMIN_TOKEN`,
+   each from `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. Keep the signing key and
+   the admin token with the operator; agents get only the gateway token, or a scoped caller token
+   (step 6).
+3. **Write and sign the first policy** with the signing key in the environment:
+   `python3 scripts/register-policy.py --owner OWNER --name NAME --local policy.json --apply`.
+   Point `ACP_POLICY_FILE` at that file, or set `ACP_POLICY` to its contents, and set
+   `ACP_POLICY_SCOPE` to your owners (or `*`).
+4. **Choose storage.** File mode needs `ACP_SECURITY_STATE_FILE`, `ACP_TRUST_STATE_FILE` and
+   `ACP_AUDIT_HASH_CHAIN=1`. Postgres (required for metered builds and for more than one host) needs
+   `ACP_STORAGE_BACKEND=postgres` and `ACP_DATABASE_URL`; apply the migrations first with
+   `ACP_DATABASE_MIGRATION_URL=... python3 scripts/migrate-db.py` (`--check` reports without writing).
+5. **Start it** with `ACP_REQUIRE_PRODUCTION_CONTROLS=1`, so a missing control stops startup instead of
+   running ungoverned, using the commands in "Running it" above. The gateway warns at boot when no
+   signing key is set. Check `GET /health` and `GET /ready`.
+6. **Issue scoped caller tokens** for agents:
+   `python3 scripts/policy-admin.py caller lane-a --kind lane --repo OWNER/NAME --token-file lane-a.token --apply`.
+   `--token-file` writes the new token to a new 0600 file; without it the token goes to the macOS
+   Keychain.
+7. **Point the operator scripts at your gateway**: `ACP_GATEWAY_HOSTS` (comma-separated hostnames the
+   scripts may send tokens to), `ACP_GATEWAY_URL`, and optionally `ACP_RAILWAY_URL` (a second host to
+   compare policies with) and `ACP_KEYCHAIN_SERVICE`. The scripts read credentials from the environment
+   first, then the macOS Keychain. `scripts/release.py` deploys to Vercel and Railway; its deployment ids
+   come from `ACP_RELEASE_VERCEL_PROJECT`, `ACP_RELEASE_VERCEL_TEAM`, `ACP_RELEASE_VERCEL_URL`,
+   `ACP_RELEASE_RAILWAY_PROJECT`, `ACP_RELEASE_RAILWAY_SERVICE`, `ACP_RELEASE_RAILWAY_ENVIRONMENT`,
+   `ACP_RELEASE_RAILWAY_URL`, `ACP_RELEASE_DATABASE_ID` and `ACP_RELEASE_REPOSITORY`. Set
+   `ACP_GRANT_COMMAND_PREFIX` on the deployment to how your operator runs `scripts/policy-admin.py`, so
+   refusals give agents a command that works.
+
+Metered builds also need a signed budget policy (`scripts/policy-admin.py budget-policy`) and the
+read-only provider tokens (`ACP_VERCEL_TOKEN`, `ACP_RAILWAY_TOKEN`).
 
 ## Tests
 
