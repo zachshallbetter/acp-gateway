@@ -491,7 +491,8 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
 
     # What builds is the repository's evidence for this trigger, never the caller's choice of
     # provider: a push builds every connected provider whichever one the caller names.
-    building = [b for b in evidence["builds"] if b["would_build"]]
+    building = [dict(b, repository=(owner.lower(), name.lower())) if b["provider"] == "github_actions" else b
+                for b in evidence["builds"] if b["would_build"]]
     if trigger in TRIGGER_PROVIDER and not building:
         return Outcome("DENY", "PROVIDER_NOT_METERED",
                        f"{trigger} deploys to {TRIGGER_PROVIDER[trigger]}, but the policy meters no "
@@ -700,6 +701,18 @@ def project_id(build):
     return build.get("project_id") or build["project"]
 
 
+def ledger_scope(build):
+    """The ledger filters, beyond provider and project, that pick out one project's own builds.
+
+    A Vercel or Railway project id names one project everywhere. A workflow path names a file that many
+    repositories have, so a workflow's builds are counted, budgeted and paced per repository: otherwise
+    every repository's .github/workflows/ci.yml shares one daily budget."""
+    if build["provider"] == "github_actions":
+        owner, name = build["repository"]
+        return {"owner": owner, "name": name}
+    return {}
+
+
 def project_limit(ledger, limits, metered, build, now):
     """(limit, source) for one provider project's builds today."""
     pid = project_id(build)
@@ -713,7 +726,8 @@ def project_limit(ledger, limits, metered, build, now):
     if hb.get("per_project_per_day") is not None:
         return hb["per_project_per_day"], "budget policy"
     days = [budget_day(now - 86400 * back) for back in range(1, 8)]
-    peak = max(ledger.ledger_project_days(HOSTED, build["provider"], pid, days).values(), default=0)
+    peak = max(ledger.ledger_project_days(HOSTED, build["provider"], pid, days, **ledger_scope(build)).values(),
+               default=0)
     floor, ceiling = hb.get("project_floor") or 0, hb.get("project_ceiling")
     derived = max(floor, -(-peak * 3 // 2))
     return (derived if ceiling is None else min(ceiling, derived)), "history: 1.5x the busiest day this week"
@@ -739,7 +753,7 @@ def _usage(ledger, action, limits, metered, owner, name, building, capacity, day
             checks.append({"scope": f"project {b['provider']}/{b['project']}", "kind": "project", "build": b,
                            "limit": limit, "limit_source": source, "adding": 1,
                            "used": ledger.ledger_count(day, list(HOSTED), provider=b["provider"],
-                                                       project=project_id(b))})
+                                                       project=project_id(b), **ledger_scope(b))})
         for provider in sorted({b["provider"] for b in building}):
             live = capacity.get(provider) or {}
             from_provider = live.get("source") == "live" and "deployments_today" in live
@@ -799,7 +813,7 @@ def _pacing(ledger, limits, building, capacity, now, priority_ok):
                               "batched. A priority request does not jump a saturated service."}
     for b in building:
         pid = project_id(b)
-        recent = ledger.ledger_recent(HOSTED, b["provider"], pid, now - max(window, spacing, 1))
+        recent = ledger.ledger_recent(HOSTED, b["provider"], pid, now - max(window, spacing, 1), **ledger_scope(b))
         in_window = [t for t in recent if t >= now - window] if window else []
         if hb.get("burst_builds") and len(in_window) >= hb["burst_builds"]:
             # Below the burst again once the oldest build that keeps it at burst_builds leaves the window.
@@ -841,7 +855,8 @@ def _priority_open(ledger, limits, caller, priority, builds, day):
     if not cap:
         return None
     remaining = min(cap - ledger.ledger_count(day, ["hosted_build"], provider=b["provider"],
-                                              project=project_id(b), reason_code="PRIORITY_GRANTED")
+                                              project=project_id(b), reason_code="PRIORITY_GRANTED",
+                                              **ledger_scope(b))
                     for b in builds)
     return {"remaining": remaining} if remaining > 0 else None
 
@@ -904,8 +919,8 @@ def advise(ledger, limits, metered, claim, context, action, building, capacity, 
     for b in building:
         pid = project_id(b)
         limit, source = project_limit(ledger, limits, metered, b, now)
-        used = ledger.ledger_count(day, list(HOSTED), provider=b["provider"], project=pid)
-        hour = ledger.ledger_recent(HOSTED, b["provider"], pid, now - 3600)
+        used = ledger.ledger_count(day, list(HOSTED), provider=b["provider"], project=pid, **ledger_scope(b))
+        hour = ledger.ledger_recent(HOSTED, b["provider"], pid, now - 3600, **ledger_scope(b))
         project_usage.append({"provider": b["provider"], "project": b["project"], "used_today": used,
                               "limit": limit, "limit_source": source,
                               "builds_last_30m": sum(1 for t in hour if t >= now - 1800),
@@ -1069,16 +1084,21 @@ class MemoryLedger:
                 and (reason_code is None or r["reason_code"] == reason_code)]
         return len({r["sha"] for r in rows}) if distinct_sha else len(rows)
 
-    def ledger_recent(self, actions, provider, project, since):
+    def _in_repository(self, row, owner, name):
+        return (owner is None or (row["resource_owner"] or "").lower() == owner.lower()) and \
+            (name is None or (row["resource_name"] or "").lower() == name.lower())
+
+    def ledger_recent(self, actions, provider, project, since, owner=None, name=None):
         return sorted(r["created_at"] for r in self.rows.values()
                       if r["counted"] and r["action"] in actions and r["provider"] == provider
-                      and r.get("project") == project and r["created_at"] >= since)
+                      and r.get("project") == project and r["created_at"] >= since
+                      and self._in_repository(r, owner, name))
 
-    def ledger_project_days(self, actions, provider, project, days):
+    def ledger_project_days(self, actions, provider, project, days, owner=None, name=None):
         counts = {}
         for r in self.rows.values():
             if r["counted"] and r["action"] in actions and r["provider"] == provider and \
-                    r.get("project") == project and r["budget_day"] in days:
+                    r.get("project") == project and r["budget_day"] in days and self._in_repository(r, owner, name):
                 counts[r["budget_day"]] = counts.get(r["budget_day"], 0) + 1
         return counts
 

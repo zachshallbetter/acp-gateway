@@ -175,6 +175,15 @@ class PostgresStoreTests(unittest.TestCase):
             self.assertEqual([round(t) for t in recent], [round(now - 60), round(now - 30)])
             self.assertEqual(store.ledger_project_days(["hosted_build"], "vercel", project, [yesterday]),
                              {yesterday: 1})
+            # A workflow path is shared by many repositories: owner and name narrow it to one.
+            self.assertEqual(len(store.ledger_recent(["hosted_build"], "vercel", project, now - 3600,
+                                                     owner=owner.upper(), name="Metered")), 2)
+            self.assertEqual(store.ledger_recent(["hosted_build"], "vercel", project, now - 3600,
+                                                 owner="someone-else", name="metered"), [])
+            self.assertEqual(store.ledger_project_days(["hosted_build"], "vercel", project, [yesterday],
+                                                       owner=owner, name="metered"), {yesterday: 1})
+            self.assertEqual(store.ledger_project_days(["hosted_build"], "vercel", project, [yesterday],
+                                                       owner="someone-else", name="metered"), {})
             self.assertEqual(store.ledger_sha_refs(["hosted_build"], owner, "metered", "2" * 40),
                              ["refs/heads/feature", "refs/heads/other"])
             self.assertEqual(store.ledger_repositories(day, ["hosted_build"], project=project),

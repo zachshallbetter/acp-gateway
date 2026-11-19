@@ -252,6 +252,55 @@ def test_a_projects_default_budget_follows_its_own_history():
         assert {u["scope"]: u for u in quiet["budget"]["usage"]}["project vercel/docs"]["limit"] == 15, "the floor"
 
 
+CI = {"provider": "github_actions", "project": ".github/workflows/ci.yml", "would_build": True,
+      "why": "runs on pushes to main"}
+CI_BOUNDED = [{"path": ".github/workflows/ci.yml", "would_run": True, "jobs_without_timeout": [],
+               "has_concurrency": True}]
+
+
+def ci_row(index, owner, name, at):
+    return {"record_key": f"{index:064x}", "request_id": f"ci{index}", "action": "production_merge",
+            "provider": "github_actions", "project": ".github/workflows/ci.yml", "resource_owner": owner,
+            "resource_name": name, "ref": "refs/heads/main", "sha": f"{index:040x}", "caller_kind": "coordinator",
+            "caller_id": "c", "reason": "merge another change today", "counted": True,
+            "reason_code": "WITHIN_BUDGET", "budget_day": metering.budget_day(at), "grant_id": None,
+            "evidence_digest": None, "created_at": at}
+
+
+def test_a_workflow_path_is_budgeted_and_paced_per_repository():
+    with env(limits={"hosted_build": {"per_project_per_day": 3}}):
+        fresh()
+        ledger = metering.MemoryLedger()
+        for index in range(40):                     # another repository's ci.yml: busy today and a minute ago
+            ledger.ledger_insert(ci_row(index, "other-org", "other", NOW - 60))
+        out = decide(request(sha="1" * 40), ledger, caller=LANE, now=NOW,
+                     provide=evidence(builds=[CI], workflows=CI_BOUNDED))
+        assert out["decision"] == "ALLOW" and out["reason"] == "WITHIN_BUDGET", out
+        usage = {u["scope"]: u for u in out["budget"]["usage"]}["project github_actions/.github/workflows/ci.yml"]
+        assert usage["used"] == 1, "only this build: another repository's 40 ci.yml builds are not counted here"
+        paced = decide(request(sha="2" * 40), ledger, caller=LANE, now=NOW + 30,
+                       provide=evidence(builds=[CI], workflows=CI_BOUNDED))
+        assert paced["reason"] == "BUILD_PACED", "this repository's own ci.yml build still paces the next"
+        for sha in ("3" * 40, "4" * 40):
+            assert decide(request(sha=sha), ledger, caller=LANE,
+                          provide=evidence(builds=[CI], workflows=CI_BOUNDED))["decision"] == "ALLOW"
+        over = decide(request(sha="5" * 40), ledger, caller=LANE, provide=evidence(builds=[CI], workflows=CI_BOUNDED))
+        assert over["reason"] == "BUDGET_EXCEEDED" and over["budget"]["exceeded"]["used"] == 3, over
+
+
+def test_a_workflows_default_budget_follows_its_own_repositorys_history():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        for index in range(30):                     # 30 ci.yml builds yesterday, in another repository
+            ledger.ledger_insert(ci_row(index, "other-org", "other", NOW - 86400))
+        for index in range(30, 50):                 # 20 yesterday in this one
+            ledger.ledger_insert(ci_row(index, "example-org", "widget", NOW - 86400))
+        out = decide(request(), ledger, provide=evidence(builds=[CI], workflows=CI_BOUNDED))
+        usage = {u["scope"]: u for u in out["budget"]["usage"]}["project github_actions/.github/workflows/ci.yml"]
+        assert usage["limit"] == 30, "1.5x this repository's 20, not the pooled 50 (which the ceiling caps at 40)"
+
+
 def test_a_project_override_in_the_repository_policy_wins():
     metered = {"production_branches": ["main"], "projects": {"prj_site": {"per_day": 1}},
                "providers": {"vercel": {"project_ids": ["prj_site", "prj_docs"]}}}

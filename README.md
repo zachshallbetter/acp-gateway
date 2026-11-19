@@ -359,8 +359,9 @@ A repository opts in by listing the first three in its policy's
    (`SERVICE_AT_CAPACITY`) is answered `REVERIFY_REQUIRED` with `retry_after`
    seconds: commit locally, keep working, push once later;
 6. counts the builds against today's budget (UTC) for each provider project
-   (a Vercel project, a Railway project, a workflow) and against each service's
-   ceiling, and records each allowed action once per project, keyed by its
+   (a Vercel project, a Railway project, or one repository's workflow: a path such as
+   `.github/workflows/ci.yml` names a file in many repositories, so each repository's
+   copy is budgeted and paced on its own) and against each service's ceiling, and records each allowed action once per project, keyed by its
    explicit fields (action, provider, repository, ref, commit, workflow, run,
    and the project when one push builds several projects of one provider);
 7. answers `ALLOW` within budget, or `AUTH_REQUIRED` past it with the exact

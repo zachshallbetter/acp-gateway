@@ -923,20 +923,33 @@ class PostgresStore:
             f"SELECT {measure} AS count FROM spend_ledger WHERE " + " AND ".join(clauses), parameters
         ).fetchone()["count"]
 
-    def ledger_recent(self, actions, provider, project, since):
+    @staticmethod
+    def _repository_clause(owner, name):
+        """Extra WHERE terms and parameters narrowing a ledger query to one repository (owner and name are
+        stored lower-cased)."""
+        clauses, parameters = "", []
+        for column, value in (("resource_owner", owner), ("resource_name", name)):
+            if value is not None:
+                clauses += f" AND {column} = %s"
+                parameters.append(value.lower())
+        return clauses, parameters
+
+    def ledger_recent(self, actions, provider, project, since, owner=None, name=None):
         """Creation times (epoch, oldest first) of one project's counted builds since `since`."""
+        extra, values = self._repository_clause(owner, name)
         rows = self.connection.execute(
             "SELECT EXTRACT(EPOCH FROM created_at) AS at FROM spend_ledger WHERE counted AND action = ANY(%s) "
-            "AND provider = %s AND project = %s AND created_at >= %s ORDER BY created_at LIMIT %s",
-            (list(actions), provider, project, _timestamp(since), MAX_STATE_ROWS)).fetchall()
+            "AND provider = %s AND project = %s AND created_at >= %s" + extra + " ORDER BY created_at LIMIT %s",
+            (list(actions), provider, project, _timestamp(since), *values, MAX_STATE_ROWS)).fetchall()
         return [float(row["at"]) for row in rows]
 
-    def ledger_project_days(self, actions, provider, project, days):
+    def ledger_project_days(self, actions, provider, project, days, owner=None, name=None):
         """{day: counted builds} for one project over the given budget days."""
+        extra, values = self._repository_clause(owner, name)
         rows = self.connection.execute(
             "SELECT budget_day, count(*) AS count FROM spend_ledger WHERE counted AND action = ANY(%s) "
-            "AND provider = %s AND project = %s AND budget_day = ANY(%s::date[]) GROUP BY budget_day",
-            (list(actions), provider, project, list(days))).fetchall()
+            "AND provider = %s AND project = %s AND budget_day = ANY(%s::date[])" + extra + " GROUP BY budget_day",
+            (list(actions), provider, project, list(days), *values)).fetchall()
         return {row["budget_day"].isoformat(): row["count"] for row in rows}
 
     def ledger_sha_refs(self, actions, owner, name, sha):
