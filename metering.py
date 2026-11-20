@@ -425,6 +425,7 @@ def _caller_may_reach_production(caller):
 
 
 CI_PENDING_RETRY_SECONDS = 60
+MISSING_CREDENTIAL_RETRY_SECONDS = 3600   # the owner has to act, so agents are told to wait an hour
 
 
 def release_refusal(release, owner, name, builds):
@@ -481,6 +482,18 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
 
     if not evidence.get("available"):
         reason = "PROVIDER_RESPONSE_DIVERGED" if evidence.get("kind") == "DIVERGED" else "PROVIDER_EVIDENCE_UNAVAILABLE"
+        setting = evidence.get("missing_setting")
+        if setting:
+            # No credential at all: asking again cannot help until the owner adds it.
+            return Outcome("REVERIFY_REQUIRED", reason,
+                           f"ACP has no {evidence.get('provider')} credential, so it cannot tell whether this would "
+                           "start a paid build. No paid build is authorized without that evidence.",
+                           f"Do not retry: only the owner can fix this. The owner adds {setting} to the ACP "
+                           "deployment on every host that serves ACP. Tell your coordinator, commit locally, "
+                           "and ask again once it is set.",
+                           provider_error={"provider": evidence.get("provider"), "kind": evidence.get("kind"),
+                                           "missing_setting": setting},
+                           retry_after=MISSING_CREDENTIAL_RETRY_SECONDS)
         return Outcome("REVERIFY_REQUIRED", reason,
                        f"ACP could not read {evidence.get('provider') or 'provider'} evidence "
                        f"({evidence.get('detail') or 'unavailable'}), so it cannot tell whether this would "

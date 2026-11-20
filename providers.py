@@ -39,12 +39,18 @@ RAILWAY_GRAPHQL = "https://backboard.railway.com/graphql/v2"
 SCHEMA_VERSION = 1
 
 
-class ProviderError(Exception):
-    """Evidence could not be used. kind is UNAVAILABLE or DIVERGED."""
+# The deployment setting that holds each provider's read-only token.
+CREDENTIAL_SETTINGS = {"vercel": "ACP_VERCEL_TOKEN", "railway": "ACP_RAILWAY_TOKEN"}
 
-    def __init__(self, provider, kind, detail):
+
+class ProviderError(Exception):
+    """Evidence could not be used. kind is UNAVAILABLE or DIVERGED. missing_setting names the
+    deployment setting the owner must add when the provider has no credential at all."""
+
+    def __init__(self, provider, kind, detail, missing_setting=None):
         super().__init__(f"{provider}: {detail}")
         self.provider, self.kind, self.detail = provider, kind, detail
+        self.missing_setting = missing_setting
 
 
 class _RefuseRedirect(HTTPRedirectHandler):
@@ -62,7 +68,8 @@ def _fetch(provider, url, token, body=None):
     if parts.scheme != "https" or parts.hostname not in ALLOWED_HOSTS:
         raise ProviderError(provider, "UNAVAILABLE", "host is not allowlisted")
     if not token:
-        raise ProviderError(provider, "UNAVAILABLE", "no credential is configured for this provider")
+        raise ProviderError(provider, "UNAVAILABLE", "no credential is configured for this provider",
+                            missing_setting=CREDENTIAL_SETTINGS.get(provider))
     headers = {"Authorization": "Bearer " + token, "Accept": "application/json",
                "User-Agent": "acp-gateway"}
     data = None
@@ -1020,7 +1027,8 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
             release = github_release_readiness(owner, name, sha, production[0], token_for, fetch) \
                 if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or "") else {"sha": None, "branch": production[0]}
     except ProviderError as exc:
-        return {"available": False, "kind": exc.kind, "provider": exc.provider, "detail": exc.detail}
+        return {"available": False, "kind": exc.kind, "provider": exc.provider, "detail": exc.detail,
+                **({"missing_setting": exc.missing_setting} if exc.missing_setting else {})}
     body = {"schema_version": SCHEMA_VERSION, "builds": builds,
             "workflows": [{k: v for k, v in w.items() if k != "triggers"} for w in workflows]}
     if release is not None:

@@ -646,6 +646,22 @@ def test_missing_provider_evidence_refuses_the_paid_build():
         assert result["reason"] == "PROVIDER_EVIDENCE_UNAVAILABLE"
 
 
+def test_missing_provider_credential_names_the_setting_and_says_not_to_retry():
+    import providers
+
+    def real(action, policy_body, claim, context):
+        return providers.build_evidence(action, policy_body, claim, context, token_for=lambda owner: "t")
+    with env(), patch.dict(os.environ, {"ACP_VERCEL_TOKEN": ""}):
+        fresh()
+        result = decide(request(), metering.MemoryLedger(), provide=real)
+        assert result["decision"] == "REVERIFY_REQUIRED" and result["reason"] == "PROVIDER_EVIDENCE_UNAVAILABLE", result
+        assert "Do not retry" in result["remedy"] and "ACP_VERCEL_TOKEN" in result["remedy"], result
+        assert result["retry_after"] == metering.MISSING_CREDENTIAL_RETRY_SECONDS, result
+        assert result["provider_error"]["missing_setting"] == "ACP_VERCEL_TOKEN", result
+        other = decide(request(), metering.MemoryLedger(), provide=evidence(available=False, kind="UNAVAILABLE"))
+        assert "Retry in a minute" in other["remedy"] and "retry_after" not in other, other
+
+
 def test_file_backend_has_no_ledger_and_says_where_to_go():
     with env():
         fresh()
