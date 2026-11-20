@@ -504,6 +504,24 @@ def test_coordinator_merges_past_five_a_day_are_counted_not_refused():
         assert lane["decision"] == "AUTH_REQUIRED", "a lane still needs a grant for production"
 
 
+def test_over_budget_note_records_the_limit_crossed_in_the_audit_record():
+    with env():
+        fresh()
+        ledger = metering.MemoryLedger()
+        for index in range(5):
+            decide(request("production_merge", ref="refs/heads/main", sha=str(index) * 40), ledger, caller=COORDINATOR)
+        gateway.AUDIT.clear()
+        sixth = decide(request("production_merge", ref="refs/heads/main", sha="9" * 40), ledger, caller=COORDINATOR)
+        assert sixth["reason"] == "OVER_BUDGET_NOTED", sixth
+        noted = [e for e in gateway.AUDIT if e.get("reason") == "OVER_BUDGET_NOTED"]
+        assert len(noted) == 1, noted
+        exceeded = noted[0]["budget"]["exceeded"]
+        assert exceeded["scope"] == sixth["budget"]["exceeded"]["scope"] and exceeded["used"] == 5 \
+            and exceeded["limit"] == 5, exceeded
+        within = [e for e in gateway.AUDIT if e.get("reason") == "WITHIN_BUDGET"]
+        assert all("budget" not in e for e in within), "a decision within budget records no exceeded limit"
+
+
 def test_hosted_builds_past_budget_are_still_refused():
     with env(limits={"hosted_build": {"per_project_per_day": 1}}):
         fresh()

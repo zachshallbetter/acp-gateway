@@ -429,7 +429,9 @@ A production merge's builds are counted once, as hosted builds, whether ACP hear
 of them through the merge or the push, so for the coordinator and the owner the
 daily merge count is awareness,
 not a gate: past it a merge is allowed, counted and flagged `OVER_BUDGET_NOTED`
-with the count in the answer and in `GET /internal/budget`. Hosted builds and
+with the count in the answer and in `GET /internal/budget`, and the audit record
+of every decision that crossed a limit carries `budget.exceeded` (`scope`, `used`, `limit`,
+`kind`), so an `OVER_BUDGET_NOTED` can be attributed afterwards. Hosted builds and
 manual CI stay enforced.
 
 The owner is asked only past a budget or for production, through a grant:
