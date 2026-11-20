@@ -714,6 +714,64 @@ def workflow_runs_on(analysis, event, branch):
     return True, "runs on pushes to this branch"
 
 
+# A push to a branch with an open pull request starts that PR's pull_request runs (event type
+# synchronize), whether or not the workflow also runs on push.
+PULL_REQUEST_EVENTS = ("pull_request", "pull_request_target")
+PULL_REQUEST_DEFAULT_TYPES = ("opened", "synchronize", "reopened")
+
+
+def has_pull_request_trigger(analysis):
+    return bool(analysis.get("parse_error")) or any(e in analysis["triggers"] for e in PULL_REQUEST_EVENTS)
+
+
+def pull_request_runs_on(analysis, bases):
+    """(runs, why) for a push to a branch with open pull requests into `bases` (their base branches)."""
+    if analysis.get("parse_error"):
+        return True, "the workflow could not be parsed, so ACP assumes it runs"
+    for event in PULL_REQUEST_EVENTS:
+        if event not in analysis["triggers"]:
+            continue
+        rules = analysis["triggers"][event] if isinstance(analysis["triggers"][event], dict) else {}
+        types = rules.get("types")
+        if types is not None:
+            types = types if isinstance(types, list) else [types]
+            if "synchronize" not in [str(t) for t in types]:
+                continue                             # a push to an open PR is a synchronize event
+        for base in bases:
+            try:
+                if rules.get("branches") is not None:
+                    patterns = rules["branches"] if isinstance(rules["branches"], list) else [rules["branches"]]
+                    if not _branch_matches(patterns, base):
+                        continue
+                elif rules.get("branches-ignore") is not None:
+                    patterns = rules["branches-ignore"] if isinstance(rules["branches-ignore"], list) \
+                        else [rules["branches-ignore"]]
+                    if _branch_matches(patterns, base):
+                        continue
+            except _UnsupportedPattern:
+                return True, f"a {event} branch filter could not be read exactly, so ACP assumes it runs"
+            if rules.get("paths") is not None or rules.get("paths-ignore") is not None:
+                return True, f"runs on {event} for the open pull request into {base}; a path filter may skip it, ACP counts it"
+            return True, f"runs on {event} for the open pull request into {base}"
+    return False, "no pull_request trigger runs for this branch's open pull requests"
+
+
+def github_open_pull_request_bases(owner, name, branch, token_for, fetch=_fetch):
+    """The base branches of this repository's open pull requests whose head is `branch`. Never cached:
+    pull requests open and close between pushes."""
+    raw = _github(f"/repos/{quote(owner)}/{quote(name)}/pulls?state=open&per_page=100"
+                  f"&head={quote(owner, safe='')}:{quote(branch, safe='')}", token_for, owner, fetch)
+    if not isinstance(raw, list):
+        raise ProviderError("github_actions", "DIVERGED", "the pull request list is not a list")
+    bases = []
+    for pull in raw:
+        base = _need("github_actions", pull, "base", dict, "pull request")
+        ref = _need("github_actions", base, "ref", str, "pull request base")
+        if ref not in bases:
+            bases.append(ref)
+    return bases
+
+
 def _github_commit_exists(owner, name, sha, token_for, fetch):
     return _github_ref_sha(owner, name, sha, token_for, fetch) is not None
 
@@ -941,10 +999,16 @@ def build_evidence(action, policy, claim, context, token_for, now=None, fetch=_f
                            "would_build": runs, "why": why})
         if trigger in ("push", "merge", "promote", "workflow_dispatch", "rerun"):
             event = "push" if trigger in ("merge", "promote") else trigger
-            for analysis in github_workflows(owner, name, sha, token_for, fetch, fallback_ref=branch):
+            analyses = github_workflows(owner, name, sha, token_for, fetch, fallback_ref=branch)
+            # Read only when a workflow could run on a pull request: most pushes need no extra call.
+            pr_bases = github_open_pull_request_bases(owner, name, branch, token_for, fetch) \
+                if trigger == "push" and branch and any(has_pull_request_trigger(a) for a in analyses) else []
+            for analysis in analyses:
                 if trigger in ("workflow_dispatch", "rerun") and analysis["path"] != context.get("workflow"):
                     continue
                 runs, why = workflow_runs_on(analysis, event, branch)
+                if not runs and pr_bases:
+                    runs, why = pull_request_runs_on(analysis, pr_bases)
                 workflows.append({**analysis, "would_run": runs, "why": why})
                 builds.append({"provider": "github_actions", "project": analysis["path"],
                                "project_id": analysis["path"], "would_build": runs, "why": why})

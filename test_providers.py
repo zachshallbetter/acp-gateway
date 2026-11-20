@@ -109,10 +109,11 @@ def fresh():
     providers._CACHE.clear()
 
 
-def github_routes(workflow=CI_BOUNDED, vercel_json=None):
+def github_routes(workflow=CI_BOUNDED, vercel_json=None, open_pulls=()):
     routes = {"/contents/.github/workflows?ref=": [{"type": "file", "path": ".github/workflows/ci.yml"},
                                                    {"type": "file", "path": ".github/workflows/README.md"}],
-              "/contents/.github/workflows/ci.yml?ref=": content(workflow)}
+              "/contents/.github/workflows/ci.yml?ref=": content(workflow),
+              "/pulls?state=open": [{"number": n, "base": {"ref": base}} for n, base in enumerate(open_pulls, 1)]}
     if vercel_json is not None:
         routes["/contents/vercel.json?ref="] = content(json.dumps(vercel_json))
     return routes
@@ -329,6 +330,53 @@ def test_build_evidence_for_a_feature_push():
         by = {b["provider"]: b["would_build"] for b in seen["builds"]}
         assert by == {"vercel": True, "railway": False, "github_actions": False}, seen["builds"]
         assert len(seen["digest"]) == 64
+
+
+PR_ONLY = """
+on:
+  pull_request:
+    branches: [main]
+concurrency: {group: ci, cancel-in-progress: true}
+jobs:
+  test: {runs-on: ubuntu-latest, timeout-minutes: 10, steps: [{run: make test}]}
+"""
+
+
+def actions_build(workflow, open_pulls=(), ref="refs/heads/feature"):
+    with creds():
+        fresh()
+        fake = Fake(github_routes(workflow, open_pulls=open_pulls))
+        policy = {"repository": POLICY["repository"], "metered": {"production_branches": ["main"], "providers": {}}}
+        seen = providers.build_evidence("hosted_build", policy, CLAIM, {"trigger": "push", "ref": ref, "new_sha": SHA},
+                                        token_for, NOW, fake)
+        assert seen["available"], seen
+        return next(b for b in seen["builds"] if b["provider"] == "github_actions"), fake
+
+
+def test_a_push_to_a_branch_with_an_open_pull_request_counts_its_pull_request_runs():
+    build, fake = actions_build(PR_ONLY, open_pulls=["main"])
+    assert build["would_build"] and "pull_request for the open pull request into main" in build["why"], build
+    asked = [url for _, url, _ in fake.calls if "/pulls?" in url]
+    assert asked and "head=Example-Org:feature" in asked[0], asked
+    quiet, _ = actions_build(PR_ONLY)
+    assert not quiet["would_build"], "no open pull request, so the push starts no pull_request run"
+
+
+def test_pull_request_filters_and_types_decide_whether_a_push_runs_it():
+    other_base, _ = actions_build(PR_ONLY, open_pulls=["release/1"])
+    assert not other_base["would_build"], "the branches filter applies to the pull request's base"
+    opened_only = PR_ONLY.replace("    branches: [main]", "    types: [opened]")
+    no_sync, _ = actions_build(opened_only, open_pulls=["main"])
+    assert not no_sync["would_build"], "a push to an open pull request is a synchronize event"
+    target = PR_ONLY.replace("pull_request:", "pull_request_target:")
+    on_target, _ = actions_build(target, open_pulls=["main"])
+    assert on_target["would_build"] and "pull_request_target" in on_target["why"], on_target
+
+
+def test_open_pull_requests_are_read_only_when_a_workflow_could_run_on_one():
+    push_only = PR_ONLY.replace("pull_request:\n    branches: [main]", "push:\n    branches: [main]")
+    _, fake = actions_build(push_only, open_pulls=["main"])
+    assert not [url for _, url, _ in fake.calls if "/pulls?" in url], "no pull_request trigger, no extra call"
 
 
 def test_build_evidence_fails_closed_on_any_provider():
