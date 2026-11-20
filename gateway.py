@@ -947,6 +947,13 @@ DEFAULT_PROTECTED_ACTIONS = ("git.remote.update", "git.protected_ref.update", "g
                              "git.default_branch.change", "repository.transfer", "production.deploy",
                              "policy.modify", "credential.modify")
 
+# Actions the gateway handles when a policy lists them. One not listed is ACTION_NOT_IN_POLICY, not unknown.
+SUPPORTED_POLICY_ACTIONS = frozenset(DEFAULT_PROTECTED_ACTIONS) | {"database.migrate"}
+
+# Refusals only the owner can clear. The answer says so and is marked not retryable.
+OWNER_ONLY_REASONS = frozenset({"ACTION_NOT_IN_POLICY", "POLICY_NOT_FOUND", "POLICY_INVALID", "POLICY_INACTIVE",
+                                "REPOSITORY_NOT_GOVERNED", "METERED_ACTION_NOT_ENABLED"})
+
 # Never authorized by repository verification alone -- they change ACP itself.
 ADMIN_ACTIONS = frozenset({"policy.modify", "credential.modify"})
 
@@ -1918,6 +1925,10 @@ REMEDIES = {
                                   "tell your coordinator.",
     "RECOVERY_IN_PROGRESS": "Wait for the recovery to finish; GET /notice?owner=&name= shows the state.",
     "RECOVERY_PRECONDITION_FAILED": "Return the ref to the state the recovery authorization names, then retry.",
+    "ACTION_NOT_IN_POLICY": "Only the owner can add this action to the repository's policy "
+                            "(scripts/policy-admin.py protect OWNER/NAME ACTION --apply, which keeps its metered block). "
+                            "Do not retry; "
+                            "tell your coordinator, and keep the work local meanwhile.",
     "ACTION_NOT_RECOGNIZED": "Use an action ACP classifies: repository.read, source.inspect, local.analysis or "
                              "local.test for local work; hosted_build, production_merge, manual_ci, "
                              "local_heavy_build or heavy_subagent for metered work; or one the policy lists.",
@@ -2883,6 +2894,8 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
             (CONTAINMENT_REMEDY if decision in ("QUARANTINE", "LOCKED") else None)
         if remedy and decision != "ALLOW":
             body["remedy"] = remedy
+            if reason in OWNER_ONLY_REASONS:
+                body["retryable"] = False
         if trace["class"] == "metered":
             body["caller_kind"] = caller["kind"]
         event = extra.pop("event", None) or DECISION_EVENTS.get(decision, "AUTHORIZATION_DENIED")
@@ -3204,7 +3217,7 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                       quarantine=quarantine_payload(advanced),
                       recovery={"required": True, "class": "SECURITY_ADMIN"} if locked else None)
 
-    if trace["class"] == "unrecognized":
+    if trace["class"] == "unrecognized" and action not in SUPPORTED_POLICY_ACTIONS:
         return finish("DENY", "ACTION_NOT_RECOGNIZED",
                       "ACP does not classify this action, so it cannot authorize it.")
     if action == RECOVERY_OPERATION:
@@ -3225,6 +3238,15 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
         return finish("DENY", "POLICY_INVALID", f"The governing policy did not verify: {record['error']}.")
     if record["state"] != "ACTIVE":
         return finish("DENY", "POLICY_INACTIVE", "The governing policy is not active.")
+    if trace["class"] == "unrecognized":
+        # A supported action this repository's policy omits: not unknown, and only the owner can add it.
+        command = _policy_command(f"protect {claim['owner']}/{claim['name']} {action} --apply")
+        return finish("DENY", "ACTION_NOT_IN_POLICY",
+                      f"ACP supports {action}, but the policy governing this repository does not list it, "
+                      "so ACP cannot authorize it here.",
+                      remedy=f"Only the owner can add it, by running: {command}. Do not retry; tell your "
+                             "coordinator, and keep the work local meanwhile.",
+                      owner_command=command)
     if trace["class"] == "metered":
         if action not in protected_actions:
             return finish("DENY", "METERED_ACTION_NOT_ENABLED",
@@ -5225,6 +5247,16 @@ COVERAGE_STATUSES = ("METERED", "MISLINKED", "UNMETERED_GOVERNED", "UNGOVERNED",
 def _admin_command(arguments):
     prefix = os.environ.get("ACP_GRANT_COMMAND_PREFIX", "").strip() or metering.GRANT_COMMAND_PREFIX
     return f"{prefix} {arguments}"
+
+
+def _policy_command(arguments):
+    """An owner command that writes a signed policy. Grants need only the admin token, but a policy write
+    needs the signing key, which the grant prefix's env file does not supply: when the prefix runs through
+    Latchkey, the signing key's Latchkey reference goes in front so the printed command works as printed."""
+    command = _admin_command(arguments)
+    if command.startswith("latchkey run") and "ACP_POLICY_SIGNING_KEY=" not in command:
+        return "ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY " + command
+    return command
 
 
 def coverage_view(owner=None, name=None, now=None, fetch=None):

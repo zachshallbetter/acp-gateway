@@ -540,6 +540,39 @@ def test_an_unknown_action_fails_closed():
     assert out["decision"] == "DENY" and out["reason"] == "ACTION_NOT_RECOGNIZED", out
 
 
+def test_a_supported_action_missing_from_the_policy_is_not_called_unknown():
+    fresh()
+    context = {"source_database": "source.example/neondb", "target_database": "target.example/neondb",
+               "work_item": "7", "environment": "production", "ref": "refs/heads/main", "new_sha": "a" * 40}
+    with env(ACP_GRANT_COMMAND_PREFIX="python3 /opt/acp/scripts/policy-admin.py"):
+        out = gateway.authorize(request("database.migrate", context=context,
+                                        repository_claim=claim(head_sha="a" * 40)), verifier=verifier())
+        unknown = gateway.authorize(request("git.something.new"), verifier=verifier())
+    command = f"python3 /opt/acp/scripts/policy-admin.py protect {OWNER}/{REPO} database.migrate --apply"
+    assert out["decision"] == "DENY" and out["reason"] == "ACTION_NOT_IN_POLICY", out
+    assert out["owner_command"] == command and command in out["remedy"] and "owner" in out["remedy"], out
+    assert out["retryable"] is False, out
+    assert unknown["reason"] == "ACTION_NOT_RECOGNIZED" and "retryable" not in unknown, unknown
+    # A Latchkey prefix supplies the gateway token, not the signing key a policy write needs: its reference goes first.
+    prefix = "latchkey run --env-file /srv/acp/.env.local -- python3 /srv/acp/scripts/policy-admin.py"
+    with env(ACP_GRANT_COMMAND_PREFIX=prefix):
+        fresh()
+        through = gateway.authorize(request("database.migrate", context=context,
+                                            repository_claim=claim(head_sha="a" * 40)), verifier=verifier())
+    assert through["owner_command"] == (f"ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY {prefix} "
+                                        f"protect {OWNER}/{REPO} database.migrate --apply"), through
+
+
+def test_owner_only_refusals_are_not_retryable():
+    fresh()
+    with env():
+        out = gateway.authorize(request("production.deploy",
+                                        repository_claim={"owner": OWNER, "name": "Unregistered"}),
+                                verifier=verifier())
+    assert out["reason"] == "POLICY_NOT_FOUND" and out["retryable"] is False, out
+    assert "ACTION_NOT_IN_POLICY" in gateway.REMEDIES and gateway.REMEDIES["ACTION_NOT_IN_POLICY"]
+
+
 # ---- 12-14. recovery is separate from containment --------------------------
 RECOVERY = [{"recovery_id": "rec-001", "policy_id": "notice-enforcer",
              "repository": {"owner": OWNER, "name": REPO}, "ref": "refs/heads/main",
