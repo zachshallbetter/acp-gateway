@@ -9,6 +9,7 @@
     .venv/bin/python scripts/policy-admin.py unregister OWNER/NAME [--apply]
     .venv/bin/python scripts/policy-admin.py meter OWNER/NAME [--vercel PRJ ... [--vercel-team TEAM]] [--railway-project ID
                      [--railway-service ID ...]] [--production-branch B] [--protect ACTION] [--apply]
+    .venv/bin/python scripts/policy-admin.py protect OWNER/NAME ACTION [--apply]
     .venv/bin/python scripts/policy-admin.py budget-policy [--limits FILE] [--apply]
     .venv/bin/python scripts/policy-admin.py budget-grant --action A [--repo OWNER/NAME] --uses N
                      --expires 2h --reason TEXT [--apply]
@@ -44,6 +45,15 @@ unregister removes a repository's policy, so ACP stops governing it.
 meter     turns on metered actions (hosted_build, production_merge, manual_ci) for a governed
           repository and names its Vercel projects and Railway service, signed as version+1.
 
+protect   adds one protected action (for example database.migrate) to a governed repository's policy,
+          signed as version+1, and keeps its metered block exactly as it is. `meter` instead replaces the
+          providers with the ones named on its command line.
+
+Dry runs print the protected-action and provider changes. An --apply whose signed content would not
+change stores nothing and says so: a new version would invalidate decisions made under the current one.
+Errors that name a fix print the exact command, with absolute paths and the Latchkey reference for the
+signing key; ACP_GRANT_COMMAND_PREFIX, when set, replaces the runner in it.
+
 budget-policy signs the deployment-wide limits (defaults: 20 hosted builds per repository and 60
           in all per day, Vercel 40 / Railway 10 / Actions 30, 5 production merges per repository,
           10 manual CI runs, 6 heavy subagents per session) and writes ACP_BUDGET_POLICY.
@@ -73,6 +83,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 from pathlib import Path
 import subprocess
@@ -119,12 +130,24 @@ RAILWAY_URL = (checked_gateway(os.environ["ACP_RAILWAY_URL"]) if os.environ.get(
                else _RAILWAY_DEFAULT if "acp-gateway-production.up.railway.app" in GATEWAY_HOSTS else None)
 
 
+def owner_command(argv: list | None = None) -> str:
+    """The command that works for the owner: this invocation (`argv`, default what was typed) run from any folder,
+    with absolute paths and the Latchkey reference for the signing key, which .env.local does not hold. A
+    deployment's ACP_GRANT_COMMAND_PREFIX, the way its operator runs this script, replaces the whole runner."""
+    rest = shlex.join(sys.argv[1:] if argv is None else argv)
+    prefix = os.environ.get("ACP_GRANT_COMMAND_PREFIX", "").strip()
+    if prefix:
+        return f"{prefix} {rest}".rstrip()
+    return ("ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file "
+            f"{shlex.quote(str(HERE / '.env.local'))} -- {shlex.quote(str(HERE / '.venv/bin/python'))} "
+            f"{shlex.quote(str(HERE / 'scripts/policy-admin.py'))} {rest}").rstrip()
+
+
 def keychain(account: str) -> str:
     """An owner credential: the environment variable of that name (`latchkey run`), else the Keychain."""
     value = os.environ.get(account, "").strip()
     if value.startswith("latchkey://"):
-        raise SystemExit(f"error: {account} is a Latchkey reference, not a value; run this under "
-                         "latchkey run --env-file .env.local -- ...")
+        raise SystemExit(f"error: {account} is a Latchkey reference, not a value; run exactly: {owner_command()}")
     if value:
         return value
     if not shutil.which("security"):                      # not macOS: the environment is the only source
@@ -133,7 +156,7 @@ def keychain(account: str) -> str:
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
         raise SystemExit(f"error: {account} is neither in the environment nor in the Keychain under "
-                         f"{KEYCHAIN_SERVICE!r}; run this under latchkey run --env-file .env.local -- ...")
+                         f"{KEYCHAIN_SERVICE!r}; run exactly: {owner_command()}")
     return out.stdout.strip()
 
 
@@ -437,6 +460,47 @@ def signed_document(document: dict, key: str, name: str, rp) -> dict:
     return signed
 
 
+def _unsigned(policy: dict) -> dict:
+    """A policy's content: everything the signature covers except the version the write bumps."""
+    return {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id", "sha256", "version")}
+
+
+def change_lines(old: dict, new: dict) -> list:
+    """What a policy write changes: protected actions and metered providers, one line each."""
+    lines = []
+    before, after = set(old.get("protected_actions") or []), set(new.get("protected_actions") or [])
+    if before != after:
+        lines.append("  protected actions: " + " ".join([f"+{a}" for a in sorted(after - before)]
+                                                         + [f"-{a}" for a in sorted(before - after)]))
+    old_meter, new_meter = old.get("metered") or {}, new.get("metered") or {}
+    if old_meter.get("production_branches") != new_meter.get("production_branches"):
+        lines.append(f"  production branches: {old_meter.get('production_branches')} -> "
+                     f"{new_meter.get('production_branches')}")
+    old_providers, new_providers = old_meter.get("providers") or {}, new_meter.get("providers") or {}
+    for provider in sorted(set(old_providers) | set(new_providers)):
+        if old_providers.get(provider) != new_providers.get(provider):
+            lines.append(f"  provider {provider}: {json.dumps(old_providers.get(provider), sort_keys=True)} -> "
+                         f"{json.dumps(new_providers.get(provider), sort_keys=True)}")
+    return lines
+
+
+def report_change(old: dict, new: dict) -> bool:
+    """Print the change from `old` to the signed `new`; True when its signed content differs."""
+    changed = _unsigned(old) != _unsigned(new)
+    for line in change_lines(old, new) if changed else []:
+        print(line)
+    return changed
+
+
+def refuse_unchanged(apply: bool) -> int:
+    """Nothing changed: a stored copy would only be a new version that invalidates decisions made under the last."""
+    if apply:
+        raise SystemExit("error: the signed content would not change, so nothing was stored; a new version would "
+                         "invalidate decisions made under the current one")
+    print("nothing to change")
+    return 0
+
+
 def cmd_meter(args) -> int:
     rp = load_register_policy()
     owner, _, name = args.repository.partition("/")
@@ -456,6 +520,44 @@ def cmd_meter(args) -> int:
         raise SystemExit(f"error: the new document does not load cleanly: {bad}. Nothing was changed.")
     print(f"meter {signed['policy_id']} v{signed['version']} for {owner}/{name}: "
           f"providers {sorted(providers) or 'none (GitHub Actions only)'}")
+    if not report_change(policy, signed):
+        return refuse_unchanged(args.apply)
+    if not args.apply:
+        print("dry run: pass --apply to write it")
+        return 0
+    write_document(version, updated)
+    return 0
+
+
+def cmd_protect(args) -> int:
+    """Add one protected action to a governed repository's policy; its metered block stays as it is."""
+    rp = load_register_policy()
+    owner, _, name = args.repository.partition("/")
+    if not owner or not name:
+        raise SystemExit(f"error: repositories are OWNER/NAME, not {args.repository!r}")
+    if not rp.gateway.ACTION_RE.match(args.action):
+        raise SystemExit(f"error: {args.action!r} is not an action name")
+    key = keychain("ACP_POLICY_SIGNING_KEY")
+    version, document = production_policy()
+    policies = list(document["policies"] if isinstance(document, dict) else document)
+    policy = find_policy(policies, owner, name)
+    if policy is None:
+        raise SystemExit(f"error: no production policy governs {owner}/{name}; register it first")
+    actions = list(policy.get("protected_actions") or rp.gateway.DEFAULT_PROTECTED_ACTIONS)
+    if args.action not in actions:
+        actions = sorted([*actions, args.action])
+    updated_policy = {k: v for k, v in policy.items() if k not in ("signature", "signing_key_id")}
+    updated_policy.update(protected_actions=actions, version=int(policy["version"]) + 1)
+    signed = rp.sign(updated_policy, key, KEY_ID)
+    remaining = [signed if p is policy else p for p in policies]
+    updated = {**document, "policies": remaining} if isinstance(document, dict) else remaining
+    states = rp.validate(updated, key, KEY_ID)
+    bad = {pid: r["state"] for pid, r in states.items() if r["state"] != "ACTIVE"}
+    if bad:
+        raise SystemExit(f"error: the new document does not load cleanly: {bad}. Nothing was changed.")
+    print(f"protect {signed['policy_id']} v{signed['version']} for {owner}/{name}: {args.action}")
+    if not report_change(policy, signed):
+        return refuse_unchanged(args.apply)
     if not args.apply:
         print("dry run: pass --apply to write it")
         return 0
@@ -540,6 +642,7 @@ def cmd_enroll(args) -> int:
         raw = json.loads(Path(args.railway_map).read_text(encoding="utf-8"))
         railway_map = {repo.lower(): block for repo, block in raw.items()}
     linked = {} if "vercel" in explicit else vercel_projects_by_repo()
+    changed = False
     for spec in args.repositories:
         owner, _, name = spec.partition("/")
         if not owner or not name:
@@ -577,12 +680,15 @@ def cmd_enroll(args) -> int:
         policies = [signed if p is policy else p for p in policies]
         print(f"enroll {signed['policy_id']} v{signed['version']} for {owner}/{name}: "
               f"providers {sorted(providers) or 'none (GitHub Actions only)'}")
+        changed = report_change(policy, signed) or changed
     updated = {**document, "policies": policies} if isinstance(document, dict) else policies
     states = rp.validate(updated, key, KEY_ID)
     bad = {pid: r["state"] for pid, r in states.items() if r["state"] != "ACTIVE"}
     if bad:
         raise SystemExit(f"error: the new document does not load cleanly: {bad}. Nothing was changed.")
     print(f"the gateway loader accepts all {len(states)} policies")
+    if not changed:
+        return refuse_unchanged(args.apply)
     if not args.apply:
         print("dry run: pass --apply to store it in ACP")
         return 0
@@ -750,6 +856,10 @@ def main() -> int:
     meter.add_argument("--protect", action="append", default=[], metavar="ACTION",
                        help="also list this action, e.g. database.migrate")
     meter.add_argument("--apply", action="store_true")
+    protect = sub.add_parser("protect", help="add one protected action; the metered block is kept")
+    protect.add_argument("repository", metavar="OWNER/NAME")
+    protect.add_argument("action", metavar="ACTION", help="for example database.migrate")
+    protect.add_argument("--apply", action="store_true")
     budget = sub.add_parser("budget-policy", help="sign the deployment-wide limits")
     budget.add_argument("--limits", help="JSON file of limits overriding the defaults")
     budget.add_argument("--apply", action="store_true")
@@ -784,7 +894,7 @@ def main() -> int:
     if not (HERE / "gateway.py").exists():
         raise SystemExit("error: run this from an acp-gateway checkout")
     return {"register": cmd_register, "grant": cmd_grant, "repin": cmd_repin,
-            "unregister": cmd_unregister, "meter": cmd_meter, "budget-policy": cmd_budget_policy,
+            "unregister": cmd_unregister, "meter": cmd_meter, "protect": cmd_protect, "budget-policy": cmd_budget_policy,
             "budget-grant": cmd_budget_grant, "caller": cmd_caller, "enroll": cmd_enroll,
             "coverage": cmd_coverage}[args.command](args)
 

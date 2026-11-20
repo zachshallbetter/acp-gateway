@@ -1739,11 +1739,21 @@ The owner enrolls a repository with one command, run through Latchkey so the sig
 administrative credential stay out of the shell:
 
 ```sh
-ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file .env.local -- \
-  .venv/bin/python scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...]          # dry run
-ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file .env.local -- \
-  .venv/bin/python scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...] --apply
+ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file /path/to/acp-gateway/.env.local -- \
+  /path/to/acp-gateway/.venv/bin/python /path/to/acp-gateway/scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...]          # dry run
+ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file /path/to/acp-gateway/.env.local -- \
+  /path/to/acp-gateway/.venv/bin/python /path/to/acp-gateway/scripts/policy-admin.py enroll OWNER/NAME [OWNER/NAME ...] --apply
 ```
+
+The `.env.local` file holds no signing-key reference, so the `ACP_POLICY_SIGNING_KEY=latchkey://...` prefix is
+required, and the absolute paths let it run from any folder. When a credential is missing, `policy-admin.py`
+prints this command for the subcommand you ran, with your checkout's paths; `ACP_GRANT_COMMAND_PREFIX`, when
+set, replaces the whole runner in it. Every write command is a dry run until `--apply`, prints the
+protected-action and provider changes it would make, and refuses `--apply` when the signed content would not
+change (storing it would only add a version that invalidates decisions made under the current one).
+`policy-admin.py protect OWNER/NAME ACTION` adds one protected action (for example `database.migrate`)
+and keeps the repository's metered block as it is; `meter` replaces the providers with the ones named on its
+command line, so its dry run shows what it would drop.
 
 `enroll` registers each repository that isn't governed yet (default protected actions, no pinned
 artifacts), turns on the metered actions, and names the Vercel projects linked to the repository on
