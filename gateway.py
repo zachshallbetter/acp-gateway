@@ -2921,6 +2921,8 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                                      for name in ("project", "label", "command", "cache", "attribution")},
                        "admission_state": extra.get("admission_state")}
                       if action == "build_admission" else {}),
+                   **({"budget": {"exceeded": extra["budget"]["exceeded"]}}
+                      if (extra.get("budget") or {}).get("exceeded") else {}),
                    recovery_authorization_id=context.get("recovery_authorization_id"),
                    verification_state=trace["trust"], verification=trace["verification"],
                    provider_verification_state=trace["verification"].get("available"),
