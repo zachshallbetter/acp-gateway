@@ -351,6 +351,145 @@ class EnrollTests(unittest.TestCase):
             admin.cmd_enroll(args)
 
 
+def metered_policy_doc(version=4, actions=("hosted_build", "manual_ci", "production_merge")):
+    return signed({"policy_id": "o-site", "version": version, "status": "active",
+                   "repository": {"owner": "o", "name": "site"}, "protected_actions": list(actions),
+                   "metered": {"production_branches": ["main"], "providers": {
+                       "vercel": {"project_ids": ["prj_v"], "team_id": "team_One"},
+                       "railway": {"project_id": "11111111-1111-4111-8111-111111111111",
+                                   "service_ids": ["22222222-2222-4222-8222-222222222222"]}}}})
+
+
+class OwnerCommandTests(unittest.TestCase):
+    def test_the_command_has_absolute_paths_the_latchkey_reference_and_the_typed_arguments(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ACP_GRANT_COMMAND_PREFIX", None)
+            command = admin.owner_command(["protect", "o/site", "database.migrate", "--apply"])
+        self.assertTrue(command.startswith(
+            "ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file "))
+        here = admin.HERE
+        self.assertIn(f"{here}/.env.local -- {here}/.venv/bin/python {here}/scripts/policy-admin.py "
+                      "protect o/site database.migrate --apply", command)
+        self.assertTrue(here.is_absolute())
+
+    def test_the_grant_command_prefix_replaces_the_runner(self):
+        with patch.dict(os.environ, {"ACP_GRANT_COMMAND_PREFIX": "runner /srv/acp/policy-admin.py"}):
+            self.assertEqual(admin.owner_command(["meter", "o/a"]), "runner /srv/acp/policy-admin.py meter o/a")
+
+    def test_credential_errors_print_that_command(self):
+        reference = "latchkey://ACP_POLICY_SIGNING_KEY"
+        with patch.dict(os.environ, {"ACP_POLICY_SIGNING_KEY": reference}), \
+                patch.object(admin.sys, "argv", ["policy-admin.py", "protect", "o/site", "x.y"]):
+            with self.assertRaises(SystemExit) as caught:
+                admin.keychain("ACP_POLICY_SIGNING_KEY")
+        message = str(caught.exception)
+        self.assertIn("ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file", message)
+        self.assertIn(f"{admin.HERE}/.env.local", message)
+        self.assertTrue(message.endswith("protect o/site x.y"))
+
+    def test_a_missing_credential_prints_that_command_too(self):
+        missing = subprocess.CompletedProcess([], 44, "", "")
+        with patch.dict(os.environ, {}, clear=False), patch.object(admin.shutil, "which", return_value="/usr/bin/security"), \
+                patch.object(admin.subprocess, "run", return_value=missing), \
+                patch.object(admin.sys, "argv", ["policy-admin.py", "coverage"]):
+            os.environ.pop("ACP_POLICY_ADMIN_TOKEN", None)
+            os.environ.pop("ACP_GRANT_COMMAND_PREFIX", None)
+            with self.assertRaisesRegex(SystemExit, r"run exactly: ACP_POLICY_SIGNING_KEY=latchkey://.* coverage$"):
+                admin.keychain("ACP_POLICY_ADMIN_TOKEN")
+
+
+class ProtectMeterTests(unittest.TestCase):
+    def run_command(self, command, document, **fields):
+        fake = FakeStore(document)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(admin, "keychain", return_value=KEY), \
+                patch.multiple(admin, **fake.patches()), patch.object(admin, "POLICY_FILE", Path(tmp) / "p.json"), \
+                redirect_stdout(out):
+            try:
+                code = command(argparse.Namespace(**fields))
+            except SystemExit as exc:
+                return str(exc), fake, out.getvalue()
+        return code, fake, out.getvalue()
+
+    def protect(self, document, action="database.migrate", apply=True):
+        return self.run_command(admin.cmd_protect, document, repository="o/site", action=action, apply=apply)
+
+    def test_protect_adds_the_action_and_keeps_the_metered_block(self):
+        before = metered_policy_doc()
+        code, fake, out = self.protect([before, *existing()])
+        self.assertEqual(code, 0)
+        site = next(p for p in fake.patched if p["policy_id"] == "o-site")
+        self.assertEqual(site["version"], 5)
+        self.assertEqual(site["metered"], before["metered"])
+        self.assertEqual(site["protected_actions"],
+                         ["database.migrate", "hosted_build", "manual_ci", "production_merge"])
+        self.assertEqual(rp.validate(fake.patched, KEY, admin.KEY_ID)["o-site"]["state"], "ACTIVE")
+        self.assertEqual(next(p for p in fake.patched if p["policy_id"] == "o-a"), existing()[0])
+
+    def test_protect_dry_run_prints_the_added_action_and_stores_nothing(self):
+        code, fake, out = self.protect([metered_policy_doc(), *existing()], apply=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.writes, [])
+        self.assertIn("protected actions: +database.migrate", out)
+        self.assertNotIn("provider", out)
+        self.assertIn("dry run", out)
+
+    def test_protect_refuses_to_apply_an_action_the_policy_already_has(self):
+        message, fake, _ = self.protect([metered_policy_doc(), *existing()], action="hosted_build")
+        self.assertIn("would not change", message)
+        self.assertEqual(fake.writes, [])
+
+    def test_protect_dry_run_of_an_action_already_present_says_nothing_to_change(self):
+        code, fake, out = self.protect([metered_policy_doc(), *existing()], action="hosted_build", apply=False)
+        self.assertEqual((code, fake.writes), (0, []))
+        self.assertIn("nothing to change", out)
+
+    def test_protect_needs_a_governed_repository_and_a_valid_action(self):
+        message, fake, _ = self.protect(existing())
+        self.assertIn("no production policy governs o/site", message)
+        message, fake, _ = self.protect([metered_policy_doc()], action="Not An Action")
+        self.assertIn("is not an action name", message)
+
+    def meter(self, document, apply=True, vercel=(), protect=()):
+        return self.run_command(admin.cmd_meter, document, repository="o/site", vercel=list(vercel),
+                                vercel_team=None, railway_project=None, railway_service=[],
+                                production_branch=[], protect=list(protect), apply=apply)
+
+    def test_meter_dry_run_prints_the_provider_it_would_drop(self):
+        code, fake, out = self.meter([metered_policy_doc(), *existing()], apply=False, protect=["database.migrate"])
+        self.assertEqual(code, 0)
+        self.assertIn("protected actions: +database.migrate", out)
+        self.assertIn('provider vercel: {"project_ids": ["prj_v"], "team_id": "team_One"} -> null', out)
+        self.assertIn("provider railway:", out)
+
+    def test_meter_refuses_to_apply_identical_content(self):
+        site = metered_policy_doc()
+        site_same = {k: v for k, v in site.items() if k not in ("signature", "signing_key_id")}
+        site_same["metered"] = {"production_branches": ["main"], "providers": {}}
+        document = [signed(site_same), *existing()]
+        message, fake, _ = self.meter(document, apply=True)
+        self.assertIn("would not change", message)
+        self.assertEqual(fake.writes, [])
+        code, fake, out = self.meter(document, apply=False)
+        self.assertEqual((code, fake.writes), (0, []))
+        self.assertIn("nothing to change", out)
+
+    def test_enroll_refuses_to_apply_when_nothing_changes_and_prints_provider_changes_otherwise(self):
+        metered = signed({"policy_id": "o-a", "version": 4, "status": "active", "repository": {"owner": "o", "name": "a"},
+                          "protected_actions": ["hosted_build", "manual_ci", "production_merge"],
+                          "metered": {"production_branches": ["main"], "providers": {}}})
+        fields = dict(repositories=["o/a"], vercel=[], vercel_team=None, railway_project=None, railway_service=[],
+                      railway_map=None, production_branch=[])
+        with patch.object(admin, "vercel_projects_by_repo", return_value={}):
+            message, fake, _ = self.run_command(admin.cmd_enroll, [metered], apply=True, **fields)
+            self.assertIn("would not change", message)
+            self.assertEqual(fake.writes, [])
+        with patch.object(admin, "vercel_projects_by_repo", return_value={"o/a": [("team_Two", "prj_a")]}):
+            code, fake, out = self.run_command(admin.cmd_enroll, [metered], apply=False, **fields)
+            self.assertEqual(code, 0)
+            self.assertIn('provider vercel: null -> {"project_ids": ["prj_a"], "team_id": "team_Two"}', out)
+
+
 class CredentialTests(unittest.TestCase):
     def test_the_environment_comes_before_the_keychain(self):
         with patch.dict(os.environ, {"ACP_POLICY_SIGNING_KEY": "from-env"}), patch.object(subprocess, "run") as ran:

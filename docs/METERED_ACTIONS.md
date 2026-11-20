@@ -119,7 +119,10 @@ deploys.
    billing reads need the organization's Administration (read) permission. Personal-account Actions
    spend is not readable through an App, so the posture report lists it as unreadable.
 4. **Meter repositories.** `scripts/policy-admin.py meter OWNER/NAME --vercel <project id> [--vercel-team <team id>]
-   [--railway-project <id> --railway-service <id>] --apply` for each governed repository.
+   [--railway-project <id> --railway-service <id>] --apply` for each governed repository. `meter` replaces the
+   providers with the ones named; to add only an action, keeping the metered block, use
+   `scripts/policy-admin.py protect OWNER/NAME database.migrate --apply`. Dry runs print the protected-action and
+   provider changes, and `--apply` refuses when the signed content would not change.
 5. **Callers.** `scripts/policy-admin.py caller <id> --kind coordinator --repo OWNER/* --apply` for each
    coordinator, and `--kind lane` for each lane. Until then the shared bearer counts as a lane.
 6. **Posture.** `scripts/posture-report.py --refresh` and fix the high findings.
