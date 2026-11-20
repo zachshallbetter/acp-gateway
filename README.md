@@ -336,7 +336,11 @@ A repository opts in by listing the first three in its policy's
 1. verifies the repository through GitHub, as for any protected action;
 2. reads provider evidence: which connected Vercel projects, Railway services
    and workflows this exact commit would build (`vercel.json` and the
-   workflows are read at `new_sha`), and whether those workflows are bounded;
+   workflows are read at `new_sha`), and whether those workflows are bounded.
+   A workflow builds when its `push` trigger runs for the branch, or, for a
+   branch with an open pull request, when its `pull_request` or
+   `pull_request_target` trigger runs for that PR's base branch (a push to an
+   open PR is a `synchronize` event; a workflow that runs both ways is one build);
 3. refuses a workflow with no `timeout-minutes` or no concurrency group
    (`WORKFLOW_UNBOUNDED`), naming the lines to add. A push's commit is not on GitHub yet, so its
    workflows are read at the branch, and there the same finding only advises
