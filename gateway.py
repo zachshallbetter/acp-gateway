@@ -1926,7 +1926,8 @@ REMEDIES = {
     "RECOVERY_IN_PROGRESS": "Wait for the recovery to finish; GET /notice?owner=&name= shows the state.",
     "RECOVERY_PRECONDITION_FAILED": "Return the ref to the state the recovery authorization names, then retry.",
     "ACTION_NOT_IN_POLICY": "Only the owner can add this action to the repository's policy "
-                            "(scripts/policy-admin.py meter OWNER/NAME --protect ACTION --apply). Do not retry; "
+                            "(scripts/policy-admin.py protect OWNER/NAME ACTION --apply, which keeps its metered block). "
+                            "Do not retry; "
                             "tell your coordinator, and keep the work local meanwhile.",
     "ACTION_NOT_RECOGNIZED": "Use an action ACP classifies: repository.read, source.inspect, local.analysis or "
                              "local.test for local work; hosted_build, production_merge, manual_ci, "
@@ -3239,7 +3240,7 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
         return finish("DENY", "POLICY_INACTIVE", "The governing policy is not active.")
     if trace["class"] == "unrecognized":
         # A supported action this repository's policy omits: not unknown, and only the owner can add it.
-        command = _admin_command(f"meter {claim['owner']}/{claim['name']} --protect {action} --apply")
+        command = _policy_command(f"protect {claim['owner']}/{claim['name']} {action} --apply")
         return finish("DENY", "ACTION_NOT_IN_POLICY",
                       f"ACP supports {action}, but the policy governing this repository does not list it, "
                       "so ACP cannot authorize it here.",
@@ -5246,6 +5247,16 @@ COVERAGE_STATUSES = ("METERED", "MISLINKED", "UNMETERED_GOVERNED", "UNGOVERNED",
 def _admin_command(arguments):
     prefix = os.environ.get("ACP_GRANT_COMMAND_PREFIX", "").strip() or metering.GRANT_COMMAND_PREFIX
     return f"{prefix} {arguments}"
+
+
+def _policy_command(arguments):
+    """An owner command that writes a signed policy. Grants need only the admin token, but a policy write
+    needs the signing key, which the grant prefix's env file does not supply: when the prefix runs through
+    Latchkey, the signing key's Latchkey reference goes in front so the printed command works as printed."""
+    command = _admin_command(arguments)
+    if command.startswith("latchkey run") and "ACP_POLICY_SIGNING_KEY=" not in command:
+        return "ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY " + command
+    return command
 
 
 def coverage_view(owner=None, name=None, now=None, fetch=None):
