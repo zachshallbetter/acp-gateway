@@ -81,6 +81,7 @@ The standard decision envelope, plus:
 | `lease_id` | `heavy_subagent` `ALLOW` | Send it to `POST /internal/subagent/release` when the subagent stops. |
 | `replayed` | a repeat of an allowed request | The earlier record stands; nothing was counted again. This includes a merge whose builds ACP already counted for the push of the same commit, and the reverse. |
 | `caller_kind` | metered actions | `shared`, `lane`, `coordinator` or `owner`, as ACP identified the caller. |
+| `notices` | any decision, when the client is on a pre-0.7 layout | `[{code: "CLIENT_LAYOUT_DEPRECATED", text, upgrade}]`, from `principal.client_type` `formal-project-bootstrap` and `client_version` below 0.7.0. Informational: the decision is unchanged. Show it once per run. |
 
 ## What the hook does
 

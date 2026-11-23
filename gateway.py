@@ -2898,6 +2898,9 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
                 body["retryable"] = False
         if trace["class"] == "metered":
             body["caller_kind"] = caller["kind"]
+        notices = client_notices(telemetry.get("client_type"), telemetry.get("client_version"))
+        if notices:
+            body["notices"] = notices
         event = extra.pop("event", None) or DECISION_EVENTS.get(decision, "AUTHORIZATION_DENIED")
         body.update(extra)
         if decision != "ALLOW":
@@ -4328,6 +4331,31 @@ def version_key(version):
 
 
 CLIENT_FILES = (".agents/acp/lib/acp.py", "scripts/acp.py")
+BOOTSTRAP_CLIENT_TYPE = "formal-project-bootstrap"
+CURRENT_LAYOUT_FROM = (0, 7, 0)
+
+
+def legacy_layout(version):
+    """True only for a version that parses as a release older than the current layout.
+
+    An unparseable or missing version is not legacy: nothing is known about it.
+    """
+    try:
+        return tuple(int(part) for part in str(version).split(".")) < CURRENT_LAYOUT_FROM
+    except ValueError:
+        return False
+
+
+def client_notices(client_type, client_version):
+    """Non-blocking notices for the client that sent a request. They never change a decision."""
+    if client_type != BOOTSTRAP_CLIENT_TYPE or not legacy_layout(client_version):
+        return []
+    versions = release_versions()
+    latest = versions[-1] if versions else None
+    return [{"code": "CLIENT_LAYOUT_DEPRECATED",
+             "text": f"This client reports version {client_version}, a pre-0.7 layout. Decisions are "
+                     "unaffected; upgrade when convenient.",
+             **({"upgrade": f".agents/bootstrap/bootstrap upgrade --to v{latest}"} if latest else {})}]
 
 
 def releases_shipping(path, digest):
@@ -4355,7 +4383,7 @@ def client_status(version, digest):
     current = bool(latest and latest in shipped and not claims_older)
     return {"latest": latest, "version": version or None, "known": bool(shipped), "matches_release": matched,
             "current": current,
-            "deprecated_layout": matched is not None and version_key(matched) < (0, 7, 0),
+            "deprecated_layout": matched is not None and legacy_layout(matched),
             "upgrade": None if current or not latest else f".agents/bootstrap/bootstrap upgrade --to v{latest}"}
 
 

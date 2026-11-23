@@ -1013,6 +1013,46 @@ def test_shared_bearer_tamper_reports_are_recorded_but_never_escalate():
                                          caller=ATTESTED)
         assert escalated["authorization_state"] == "LOCKED", escalated
 
+
+def _notice_probe(client_type, client_version):
+    principal = {"client_type": client_type}
+    if client_version is not None:
+        principal["client_version"] = client_version
+    return gateway.authorize(envelope("git.remote.update", principal=principal), verifier=verifier())
+
+
+def test_a_legacy_layout_client_gets_a_notice_and_the_same_decision():
+    fresh()
+    with contained_env():
+        current = _notice_probe("formal-project-bootstrap", "0.7.0")
+        legacy = _notice_probe("formal-project-bootstrap", "0.6.3")
+        assert legacy["decision"] == current["decision"] == "ALLOW"
+        assert legacy["reason"] == current["reason"]
+        assert [n["code"] for n in legacy["notices"]] == ["CLIENT_LAYOUT_DEPRECATED"], legacy
+        assert "0.6.3" in legacy["notices"][0]["text"]
+
+
+def test_a_current_or_unversioned_client_gets_no_notice():
+    fresh()
+    with contained_env():
+        assert "notices" not in _notice_probe("formal-project-bootstrap", "0.7.0")
+        assert "notices" not in _notice_probe("formal-project-bootstrap", "1.2.3")
+        assert "notices" not in _notice_probe("formal-project-bootstrap", None)
+        assert "notices" not in _notice_probe("formal-project-bootstrap", "not-a-version")
+        assert "notices" not in _notice_probe("acp-gateway-operator", "1")   # not a bootstrap layout
+
+
+def test_a_legacy_layout_notice_rides_a_refusal_without_changing_it():
+    fresh()
+    with contained_env():
+        refused = gateway.authorize(envelope("production.deploy", principal={
+            "client_type": "formal-project-bootstrap", "client_version": "0.5.3"}), verifier=None)
+        plain = gateway.authorize(envelope("production.deploy", principal={
+            "client_type": "formal-project-bootstrap", "client_version": "0.7.0"}), verifier=None)
+        assert refused["decision"] == plain["decision"] and refused["reason"] == plain["reason"]
+        assert refused["decision"] != "ALLOW" and refused["notices"] and "notices" not in plain
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
