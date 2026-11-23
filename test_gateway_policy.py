@@ -561,6 +561,14 @@ def test_a_supported_action_missing_from_the_policy_is_not_called_unknown():
                                             repository_claim=claim(head_sha="a" * 40)), verifier=verifier())
     assert through["owner_command"] == (f"ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY {prefix} "
                                         f"protect {OWNER}/{REPO} database.migrate --apply"), through
+    # The same CLI under its other names (lk, and pistachio after the rename) needs the reference too.
+    for runner in ("lk run", "pistachio run"):
+        renamed = prefix.replace("latchkey run", runner, 1)
+        with env(ACP_GRANT_COMMAND_PREFIX=renamed):
+            fresh()
+            other = gateway.authorize(request("database.migrate", context=context,
+                                              repository_claim=claim(head_sha="a" * 40)), verifier=verifier())
+        assert other["owner_command"].startswith(f"ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY {runner}"), other
 
 
 def test_owner_only_refusals_are_not_retryable():

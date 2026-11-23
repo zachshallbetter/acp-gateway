@@ -386,6 +386,9 @@ class OwnerCommandTests(unittest.TestCase):
         self.assertIn("ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY latchkey run --env-file", message)
         self.assertIn(f"{admin.HERE}/.env.local", message)
         self.assertTrue(message.endswith("protect o/site x.y"))
+        with patch.dict(os.environ, {"ACP_POLICY_SIGNING_KEY": "pistachio://ACP_POLICY_SIGNING_KEY"}):
+            with self.assertRaises(SystemExit):
+                admin.keychain("ACP_POLICY_SIGNING_KEY")      # Pistachio's scheme is a reference too
 
     def test_a_missing_credential_prints_that_command_too(self):
         missing = subprocess.CompletedProcess([], 44, "", "")

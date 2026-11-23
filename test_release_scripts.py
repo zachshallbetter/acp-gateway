@@ -183,9 +183,11 @@ class BearerTests(unittest.TestCase):
         ran.assert_not_called()
 
     def test_an_unresolved_reference_names_the_fix(self):
-        with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": "latchkey://acp-gateway/production/ACP_GATEWAY_TOKEN"}):
-            with self.assertRaisesRegex(Stop, "latchkey run --env-file"):
-                acp_ops.bearer("ACP_GATEWAY_TOKEN")
+        # Latchkey's scheme, and Pistachio's after the rename, are both references, never values.
+        for scheme in ("latchkey://", "pistachio://"):
+            with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": f"{scheme}acp-gateway/production/ACP_GATEWAY_TOKEN"}):
+                with self.assertRaisesRegex(Stop, "latchkey run --env-file"):
+                    acp_ops.bearer("ACP_GATEWAY_TOKEN")
 
     def test_neither_source_names_the_fix(self):
         with patch.dict(os.environ, {"ACP_GATEWAY_TOKEN": ""}), \

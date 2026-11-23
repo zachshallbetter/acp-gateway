@@ -20,6 +20,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# Unresolved secret references: Latchkey's scheme, and Pistachio's after the rename (zachshallbetter/latchkey#122).
+SECRET_SCHEMES = ("latchkey://", "pistachio://")
+
 ROOT = Path(__file__).resolve().parent.parent
 # The bearer and admin tokens go only to ACP's own hosts over TLS (a loopback host over http for local
 # tests), and never follow a redirect: urllib would resend the Authorization header to wherever it points.
@@ -82,7 +85,7 @@ def github_repository(checkout: Path | str, remote: str) -> tuple[str, str]:
 def bearer(account: str) -> str:
     """The caller's token: the environment variable of that name (as `latchkey run` supplies it), else the Keychain."""
     value = os.environ.get(account, "").strip()
-    if value.startswith("latchkey://"):
+    if value.startswith(SECRET_SCHEMES):
         raise Stop(f"{account} is a Latchkey reference, not a value. Run this under "
                    "latchkey run --env-file .env.local -- ...")
     if value:
