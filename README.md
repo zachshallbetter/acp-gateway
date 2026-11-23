@@ -1568,6 +1568,53 @@ These steps run your own gateway for your own repositories, independent of any o
    `ACP_GRANT_COMMAND_PREFIX` on the deployment to how your operator runs `scripts/policy-admin.py`, so
    refusals give agents a command that works.
 
+### The shared token, for one team
+
+`ACP_GATEWAY_TOKEN` is one secret that authenticates every client of an instance as the same
+caller (`caller_kind: shared`). Anyone holding it is indistinguishable from anyone else holding it, so
+use it for one team that trusts each other, and read "what it cannot do" before you hand it out.
+
+**It can** request decisions and send reports and snapshots. Its reports are recorded but never
+quarantine or lock a repository or actor, because the token sits in every agent's hook. Production
+deploys and merges, refreshing provider evidence and the full coverage audit need a coordinator or the
+owner; grants need the admin token.
+
+**It cannot** approve or administer. Changing policy, issuing grants, recovery and the containment
+state need `ACP_POLICY_ADMIN_TOKEN`, sent in `X-ACP-Admin-Authorization` on top of a valid bearer;
+holding the gateway token is never enough, and the gateway never accepts the admin token alone. Keep
+the admin token and `ACP_POLICY_SIGNING_KEY` with the operator and out of every agent's environment.
+
+**Registered caller tokens** (`policy-admin.py caller`, step 6 above) are the other kind of bearer. Each
+has its own id, a `lane` or `coordinator` kind, and a list of repositories it may act on; ACP stores only
+its sha256. A `lane` or `coordinator` caller's reports can quarantine and lock; the shared token's
+cannot. A `coordinator` can also refresh provider evidence and run production actions. Re-running
+`caller` with an existing id issues a new token and replaces the old one as soon as the gateway
+reloads the callers document (`ACP_DOCUMENT_TTL_SECONDS`, 15 by default), with no overlap, and there is no command that deletes a caller.
+
+**Generate and distribute.** Generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+Set it on the deployment, and give each client the same value through its own secret store, never in a
+repository. The gateway refuses to start without it.
+
+**Rotate.** There is one shared slot, so the moment the deployment holds the new value the old one is
+refused, with `401 UNAUTHORIZED`, `Missing or wrong bearer token`, and the remedy `Send Authorization:
+Bearer <ACP_GATEWAY_TOKEN>`. To rotate without interrupting anyone, move clients off the shared token
+first:
+
+1. Issue each client its own caller token: `policy-admin.py caller NAME --kind lane --repo OWNER/NAME
+   --token-file NAME.token --apply`. A caller token is not touched by rotating the shared one.
+2. Give each client its token and confirm a decision succeeds with it.
+3. Generate a new shared token, set `ACP_GATEWAY_TOKEN` on every host that serves the instance (set all
+   hosts before you restart any), and restart or redeploy. The old shared token now gets 401 everywhere.
+4. Hand out the new shared token only to clients that still need it, or to none.
+
+If you cannot move clients to caller tokens, rotation is a short outage: set the new value, restart, and
+update each client's secret store; clients get 401 until they do. Rotate at once if the token appears in a
+log, a commit or a screenshot.
+
+A client cannot present two shared tokens at once, and the gateway accepts one: a rotation window where
+old and new both work is not supported today. Multi-tenant hosting, where one deployment serves people who
+must not act as each other, needs per-person identity (#12); this token model does not provide it.
+
 Metered builds also need a signed budget policy (`scripts/policy-admin.py budget-policy`) and the
 read-only provider tokens (`ACP_VERCEL_TOKEN`, `ACP_RAILWAY_TOKEN`).
 
