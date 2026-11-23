@@ -93,6 +93,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# Unresolved secret references: Latchkey's scheme, and Pistachio's after the rename (zachshallbetter/latchkey#122).
+SECRET_SCHEMES = ("latchkey://", "pistachio://")
+
 HERE = Path(__file__).resolve().parent.parent
 # The bearer and admin tokens go only to ACP's own hosts over TLS (a loopback host over http for local
 # tests), and never follow a redirect: urllib would resend the Authorization header to wherever it points.
@@ -146,7 +149,7 @@ def owner_command(argv: list | None = None) -> str:
 def keychain(account: str) -> str:
     """An owner credential: the environment variable of that name (`latchkey run`), else the Keychain."""
     value = os.environ.get(account, "").strip()
-    if value.startswith("latchkey://"):
+    if value.startswith(SECRET_SCHEMES):
         raise SystemExit(f"error: {account} is a Latchkey reference, not a value; run exactly: {owner_command()}")
     if value:
         return value

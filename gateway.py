@@ -5249,12 +5249,17 @@ def _admin_command(arguments):
     return f"{prefix} {arguments}"
 
 
+# The secret manager's CLI, by every name it answers to: Latchkey is being renamed Pistachio and keeps
+# `latchkey` and `lk` as aliases (zachshallbetter/latchkey#123).
+SECRET_RUNNERS = ("latchkey run", "lk run", "pistachio run")
+
+
 def _policy_command(arguments):
     """An owner command that writes a signed policy. Grants need only the admin token, but a policy write
     needs the signing key, which the grant prefix's env file does not supply: when the prefix runs through
     Latchkey, the signing key's Latchkey reference goes in front so the printed command works as printed."""
     command = _admin_command(arguments)
-    if command.startswith("latchkey run") and "ACP_POLICY_SIGNING_KEY=" not in command:
+    if command.startswith(SECRET_RUNNERS) and "ACP_POLICY_SIGNING_KEY=" not in command:
         return "ACP_POLICY_SIGNING_KEY=latchkey://ACP_POLICY_SIGNING_KEY " + command
     return command
 

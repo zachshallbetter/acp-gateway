@@ -43,6 +43,9 @@ from acp_ops import ROOT, Stop, git
 sys.path.insert(0, str(ROOT))
 from db_migrations import is_additive, migration_files
 
+# Unresolved secret references: Latchkey's scheme, and Pistachio's after the rename (zachshallbetter/latchkey#122).
+SECRET_SCHEMES = ("latchkey://", "pistachio://")
+
 _spec = importlib.util.spec_from_file_location("ff_merge", Path(__file__).resolve().parent / "ff-merge.py")
 ff_merge = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ff_merge)
@@ -80,7 +83,7 @@ def migration_state() -> tuple[int, dict]:
     if not name:
         raise Stop("ACP_DATABASE_READ_URL is not set. Run this under "
                    "latchkey run --env-file .env.local -- ...")
-    if os.environ[name].strip().startswith("latchkey://"):
+    if os.environ[name].strip().startswith(SECRET_SCHEMES):
         raise Stop(f"{name} is a Latchkey reference, not a value. Run this under "
                    "latchkey run --env-file .env.local -- ...")
     result = acp_ops.run(sys.executable, str(ROOT / "scripts/migrate-db.py"), "--check")
