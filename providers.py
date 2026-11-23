@@ -296,6 +296,33 @@ def vercel_team_activity(team_id, now=None, fetch=_fetch):
     return _cached(_CACHE, ("vercel-activity", team_id), CAPACITY_TTL, now, load)
 
 
+def vercel_teams(now=None, fetch=_fetch):
+    """Every team the gateway's Vercel credential can read (GET /v2/teams), for the coverage audit."""
+    now = time.time() if now is None else now
+
+    def load():
+        # Not team-scoped: this lists the scopes the credential itself can see.
+        teams, until = [], None
+        for _ in range(MAX_PROJECT_PAGES):
+            query = {"limit": 20}
+            if until:
+                query["until"] = until
+            raw = fetch("vercel", "https://api.vercel.com/v2/teams?" + urlencode(query),
+                        os.getenv("ACP_VERCEL_TOKEN", "").strip())
+            for row in _need("vercel", raw, "teams", list, "teams"):
+                teams.append({"id": _need("vercel", row, "id", str, "teams[]"),
+                              "slug": _need("vercel", row, "slug", str, "teams[]")})
+            page = _need("vercel", raw, "pagination", dict, "teams", optional=True) or {}
+            until = page.get("next")
+            if not until:
+                break
+        else:
+            raise ProviderError("vercel", "DIVERGED", "the team list does not end")
+        return sorted(teams, key=lambda t: t["id"])
+
+    return _cached(_CACHE, ("vercel-teams",), SETTINGS_TTL, now, load)
+
+
 def vercel_team_projects(team_id, now=None, fetch=_fetch):
     """Every project in the team with its git link (GET /v9/projects), for the coverage audit."""
     now = time.time() if now is None else now

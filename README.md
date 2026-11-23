@@ -416,13 +416,17 @@ a saturated service or a service ceiling, and the shared bearer cannot ask.
 Refusals priority would clear carry `priority_request`. Priority is not spent
 when nothing needed waiving.
 
-**Coverage.** `GET /internal/coverage` matches every live Vercel project in the
-metered teams to the policies: `METERED`, `MISLINKED` (metered for one repository,
+**Coverage.** `GET /internal/coverage` matches every live Vercel project in every team
+the gateway's Vercel credential can read (`GET /v2/teams`), plus the teams policies
+name, to the policies: `METERED`, `MISLINKED` (metered for one repository,
 git-linked to another), `UNMETERED_GOVERNED`, `UNGOVERNED`, `UNLINKED` or
 `MISSING` (a metered id the team no longer has), each with its remedy and one
 `enroll` command per repository. `?owner=&name=` narrows it to one repository,
 which is all a scoped caller may ask; the full audit is for the coordinator, the
-owner or the admin credential. `scripts/policy-admin.py coverage [OWNER/NAME]`
+owner or the admin credential. `teams` lists each team scanned with where it came from
+(`credential`, `policy` or `default`) and whether it was read; a team that could not
+be read, or a team list that could not be fetched, appears in `errors` with its
+reason and is never skipped silently. `scripts/policy-admin.py coverage [OWNER/NAME]`
 prints it, and `enroll` prints it for the repository it just enrolled.
 
 A production merge's builds are counted once, as hosted builds, whether ACP hears

@@ -801,6 +801,11 @@ def print_coverage(repository: str | None = None) -> int:
     result = gateway_call("/internal/coverage" + query, keychain("ACP_GATEWAY_TOKEN"),
                           keychain("ACP_POLICY_ADMIN_TOKEN"))
     print("coverage: " + ", ".join(f"{count} {status.lower()}" for status, count in result["summary"].items() if count))
+    teams = result.get("teams", [])
+    print(f"teams: {sum(1 for t in teams if t['read'])} read of {len(teams)} the gateway knows")
+    for team in teams:
+        if not team["read"]:
+            print(f"  NOT READ {team['slug'] or team['team_id']}: {team['reason']}")
     for row in result["projects"]:
         if row["status"] == "METERED":
             continue
@@ -812,7 +817,7 @@ def print_coverage(repository: str | None = None) -> int:
                                  for r in result["projects"] if r.get("command")}):
         print(f"  fix {repo}: {command}")
     for error in result["errors"]:
-        print(f"  error reading {error['provider']} {error.get('team_id', '')}: {error['detail']}")
+        print(f"  error reading {error['provider']} {error.get('team_id') or '(team list)'}: {error['detail']}")
     return 1 if any(r["status"] != "METERED" for r in result["projects"]) or result["errors"] else 0
 
 

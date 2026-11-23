@@ -588,6 +588,40 @@ def test_team_projects_are_read_in_small_pages():
     assert [p["id"] for p in seen] == ["prj_a", "prj_b"]
 
 
+def test_teams_are_listed_across_pages_without_a_team_scope():
+    first = {"teams": [{"id": "team_a", "slug": "a"}], "pagination": {"next": 111}}
+    second = {"teams": [{"id": "team_b", "slug": "b"}], "pagination": {"next": None}}
+
+    def fetch(provider, url, token, body=None):
+        assert url.startswith("https://api.vercel.com/v2/teams?") and "teamId" not in url
+        return second if "until=111" in url else first
+    with creds(), patch.dict(os.environ, {"ACP_VERCEL_TEAM_ID": "team_default"}):
+        fresh()
+        seen = providers.vercel_teams(NOW, fetch)
+    assert seen == [{"id": "team_a", "slug": "a"}, {"id": "team_b", "slug": "b"}]
+
+
+def test_a_team_list_that_diverges_is_refused():
+    for bad in ({}, {"teams": {}}, {"teams": [{"id": "team_a"}]}, {"teams": [{"id": 1, "slug": "a"}]}):
+        with creds():
+            fresh()
+            try:
+                providers.vercel_teams(NOW, lambda *a, **k: bad)
+            except providers.ProviderError as exc:
+                assert exc.kind == "DIVERGED"
+            else:
+                raise AssertionError(bad)
+    endless = {"teams": [{"id": "team_a", "slug": "a"}], "pagination": {"next": 1}}
+    with creds():
+        fresh()
+        try:
+            providers.vercel_teams(NOW, lambda *a, **k: endless)
+        except providers.ProviderError as exc:
+            assert exc.kind == "DIVERGED"
+        else:
+            raise AssertionError("endless")
+
+
 def test_team_projects_carry_their_git_link():
     with creds():
         fresh()
