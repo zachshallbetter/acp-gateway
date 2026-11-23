@@ -950,6 +950,9 @@ def _coverage_env():
 
 
 def _team_projects(provider, url, token, body=None):
+    if "/v2/teams?" in url:
+        assert "teamId" not in url
+        return {"teams": [{"id": "team_abc", "slug": "abc"}], "pagination": {"next": None}}
     assert "/v9/projects?" in url and "teamId=team_abc" in url
     link = lambda repo: {"type": "github", "org": repo.split("/")[0], "repo": repo.split("/")[1]}
     return {"projects": [
@@ -976,6 +979,45 @@ def test_coverage_flags_every_project_that_is_not_metered_where_it_builds():
         "re-enrolling drops the id that no longer exists and keeps the rest"
     assert "Elsewhere" in rows["prj_moved"]["remedy"] or "elsewhere" in rows["prj_moved"]["remedy"]
     assert view["summary"]["METERED"] == 1 and view["errors"] == []
+
+
+def test_coverage_scans_every_team_the_credential_reads_and_names_those_it_cannot():
+    link = {"type": "github", "org": "Aaf", "repo": "Site"}
+
+    def fetch(provider, url, token, body=None):
+        if "/v2/teams?" in url:
+            return {"teams": [{"id": "team_abc", "slug": "abc"}, {"id": "team_aaf", "slug": "aaf"},
+                              {"id": "team_sso", "slug": "locked"}], "pagination": {"next": None}}
+        if "teamId=team_aaf" in url:
+            return {"projects": [{"id": "prj_aaf", "name": "aaf", "link": link}], "pagination": {"next": None}}
+        if "teamId=team_sso" in url:
+            raise gateway.providers.ProviderError("vercel", "UNAVAILABLE", "HTTP 403")
+        return _team_projects(provider, url, token)
+    with _coverage_env():
+        fresh()
+        gateway.providers._CACHE.clear()
+        view = gateway.coverage_view(now=NOW, fetch=fetch)
+    rows = {r["project_id"]: r for r in view["projects"]}
+    assert rows["prj_aaf"]["status"] == "UNGOVERNED" and rows["prj_aaf"]["team_id"] == "team_aaf"
+    teams = {t["team_id"]: t for t in view["teams"]}
+    assert teams["team_abc"]["source"] == "default" and teams["team_abc"]["read"] is True
+    assert teams["team_aaf"]["source"] == "credential" and teams["team_aaf"]["read"] is True
+    assert teams["team_sso"]["read"] is False and teams["team_sso"]["reason"] == "HTTP 403"
+    assert [e["team_id"] for e in view["errors"]] == ["team_sso"]
+
+
+def test_coverage_reports_a_team_list_it_cannot_read_and_still_scans_the_named_teams():
+    def fetch(provider, url, token, body=None):
+        if "/v2/teams?" in url:
+            raise gateway.providers.ProviderError("vercel", "DIVERGED", "teams is missing")
+        return _team_projects(provider, url, token)
+    with _coverage_env():
+        fresh()
+        gateway.providers._CACHE.clear()
+        view = gateway.coverage_view(now=NOW, fetch=fetch)
+    assert view["summary"]["METERED"] == 1
+    assert [(e["team_id"], e["kind"]) for e in view["errors"]] == [(None, "DIVERGED")]
+    assert "teams is missing" in view["errors"][0]["detail"]
 
 
 def test_coverage_for_one_repository_and_who_may_ask():

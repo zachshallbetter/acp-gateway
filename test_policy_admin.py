@@ -398,6 +398,22 @@ class OwnerCommandTests(unittest.TestCase):
                 admin.keychain("ACP_POLICY_ADMIN_TOKEN")
 
 
+class CoverageTeamsTests(unittest.TestCase):
+    def test_coverage_names_each_team_it_could_not_read_and_why(self):
+        result = {"summary": {"METERED": 1}, "projects": [{"status": "METERED"}], "errors": [
+            {"provider": "vercel", "team_id": "team_sso", "kind": "UNAVAILABLE", "detail": "HTTP 403"}],
+            "teams": [{"team_id": "team_a", "slug": "a", "source": "credential", "read": True, "reason": None},
+                      {"team_id": "team_sso", "slug": "locked", "source": "credential", "read": False,
+                       "reason": "HTTP 403"}]}
+        out = io.StringIO()
+        with patch.object(admin, "gateway_call", lambda *a, **k: result), \
+                patch.object(admin, "keychain", lambda name: "x"), redirect_stdout(out):
+            code = admin.print_coverage()
+        self.assertEqual(code, 1)
+        self.assertIn("teams: 1 read of 2", out.getvalue())
+        self.assertIn("NOT READ locked: HTTP 403", out.getvalue())
+
+
 class ProtectMeterTests(unittest.TestCase):
     def run_command(self, command, document, **fields):
         fake = FakeStore(document)

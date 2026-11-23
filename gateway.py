@@ -5286,16 +5286,29 @@ def coverage_view(owner=None, name=None, now=None, fetch=None):
             teams.add(team)
             for project_id in vercel["project_ids"]:
                 metered_by[project_id] = (slug, team)
-    if default_team:
-        teams.add(default_team)
     rows, errors, seen = [], [], set()
     kwargs = {} if fetch is None else {"fetch": fetch}
-    for team in sorted(t for t in teams if t):
+    # Every team the credential can read is scanned too, so a git-linked project in a team no policy names is
+    # still flagged. A failed enumeration is reported as an error, never a reason to scan fewer teams quietly.
+    sources = {team: "policy" for team in teams if team}
+    if default_team:
+        sources[default_team] = "default"
+    slugs = {}
+    try:
+        for found in providers.vercel_teams(now, **kwargs):
+            slugs[found["id"]] = found["slug"]
+            sources.setdefault(found["id"], "credential")
+    except providers.ProviderError as exc:
+        errors.append({"provider": "vercel", "team_id": None, "kind": exc.kind,
+                       "detail": f"could not list the teams the credential can read: {exc.detail}"})
+    scanned = []
+    for team in sorted(sources):
         try:
             listed = providers.vercel_team_projects(team, now, **kwargs)
         except providers.ProviderError as exc:
             errors.append({"provider": "vercel", "team_id": team, "kind": exc.kind, "detail": exc.detail})
             continue
+        scanned.append(team)
         for project in listed:
             seen.add(project["id"])
             linked = (project["linked_repository"] or "").lower() or None
@@ -5345,9 +5358,12 @@ def coverage_view(owner=None, name=None, now=None, fetch=None):
     rows.sort(key=lambda r: (COVERAGE_STATUSES.index(r["status"]), r["linked_repository"] or r["metered_for"] or "",
                              r["project_id"]))
     summary = {status: sum(1 for r in rows if r["status"] == status) for status in COVERAGE_STATUSES}
+    team_report = [{"team_id": team, "slug": slugs.get(team), "source": sources[team], "read": team in scanned,
+                    "reason": next((e["detail"] for e in errors if e["team_id"] == team), None)}
+                   for team in sorted(sources)]
     return {"repository": slug, "governed": (slug in active) if slug else None,
             "enroll_command": enroll.get(slug) if slug else None, "providers_checked": ["vercel"],
-            "summary": summary, "projects": rows, "errors": errors}
+            "summary": summary, "teams": team_report, "projects": rows, "errors": errors}
 
 
 def issue_grant(body, now=None):
