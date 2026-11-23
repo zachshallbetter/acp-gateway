@@ -1851,7 +1851,7 @@ EVENT_SEVERITY = {
     "REVERIFY_REQUIRED": "WARNING", "PROVIDER_ACCESS_LOST": "WARNING", "NOTICE_MISMATCH": "WARNING",
     "REPOSITORY_MISMATCH": "WARNING", "REMOTE_MISMATCH": "WARNING", "TRUST_DOWNGRADED": "WARNING",
     "REPEATED_PROTECTED_ATTEMPT": "WARNING", "LOCKED_REQUEST_DENIED": "WARNING",
-    "QUARANTINE_ATTEMPT": "WARNING", "NOTIFICATION_FAILED": "WARNING",
+    "QUARANTINE_ATTEMPT": "WARNING", "NOTIFICATION_FAILED": "WARNING", "PROVIDER_CREDENTIAL_MISSING": "WARNING",
     "RECOVERY_GRANT_MISMATCH": "WARNING",
     "QUARANTINE_ENTERED": "HIGH", "LOCAL_POLICY_MODIFIED": "HIGH", "LOCAL_POLICY_REMOVED": "HIGH",
     "DELEGATION_AFTER_DENIAL": "HIGH", "IDENTITY_MISMATCH": "HIGH", "BOOTSTRAP_CHANGED": "HIGH",
@@ -1973,7 +1973,7 @@ CONTAINMENT_REMEDY = ("Stop controlled operations on this resource. Local work c
 NOTIFY_EVENTS = frozenset({"BOARD_READ_REFUSED", "NOTICE_REMOVED", "CONTROL_ARTIFACT_REMOVED", "BOOTSTRAP_MISSING",
                            "QUARANTINE_ENTERED", "LOCKED_ENTERED", "RECOVERY_AUTHORIZED",
                            "RECOVERY_VERIFICATION_FAILED", "RECOVERY_VERIFIED",
-                           "MANAGED_POLICY_CHANGED", "MANAGED_POLICY_MISSING",
+                           "MANAGED_POLICY_CHANGED", "MANAGED_POLICY_MISSING", "PROVIDER_CREDENTIAL_MISSING",
                            "FORGED_AUTHORIZATION_ATTEMPT", "CREDENTIAL_EXTRACTION_ATTEMPT"})
 
 # Counters are kept by category, so an ordinary mistake never accumulates
@@ -2253,7 +2253,7 @@ def notify(record):
                ("event_id", "event", "severity", "timestamp", "incident_id", "actor_id", "agent_id",
                 "client_type", "resource_id", "repository", "reason", "old_state", "new_state",
                 "authorization_state", "security_version", "policy_id", "policy_version",
-                "recovery_required", "related_attempts", "ref")
+                "recovery_required", "related_attempts", "ref", "provider", "missing_setting", "host")
                if record.get(key) is not None}
     if suppressed:
         payload["suppressed_duplicates"] = suppressed
@@ -2279,6 +2279,40 @@ def notify(record):
                   "detail": redact(problem)})
     print(json.dumps(AUDIT[-1], sort_keys=True, separators=(",", ":")), file=sys.stderr)
     return False
+
+
+def host_identity():
+    """Which platform serves this ACP instance, from the platform's own environment."""
+    if os.getenv("VERCEL"):
+        return "vercel"
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_ID"):
+        return "railway"
+    return "local"
+
+
+def notify_missing_credential(provider, setting, now):
+    """Tell the owner, once per provider per host per UTC day, that a provider credential is missing.
+
+    The day's earlier events are counted in the audit store, so many short-lived instances agree
+    without a new table. When that count cannot be read nothing is emitted: the notification is
+    lost, the decision it accompanies is not.
+    """
+    host = host_identity()
+    resource = f"{provider}:{host}"
+    day_start = now - now % 86400
+    try:
+        if postgres_store.enabled():
+            seen = postgres_store.current().audit_count(
+                since=day_start, filters={"event_type": "PROVIDER_CREDENTIAL_MISSING", "resource": resource})
+        else:
+            seen = sum(1 for record in AUDIT if record.get("event") == "PROVIDER_CREDENTIAL_MISSING"
+                       and record.get("resource_id") == resource and record.get("timestamp_epoch", 0) >= day_start)
+    except postgres_store.StorageError:
+        return None
+    if seen:
+        return None
+    return emit_event("PROVIDER_CREDENTIAL_MISSING", now=now, resource_id=resource, provider=provider,
+                      missing_setting=setting, host=host)
 
 
 # ---------------------------------------------------------------- incidents
@@ -2969,6 +3003,9 @@ def authorize(request, verifier=None, admin=False, now=None, caller=None, provid
 
     def metered_finish(outcome):
         extra = dict(outcome.extra)
+        missing = (extra.get("provider_error") or {}).get("missing_setting")
+        if missing and outcome.reason == "PROVIDER_EVIDENCE_UNAVAILABLE":
+            notify_missing_credential(extra["provider_error"]["provider"], missing, now)
         if outcome.decision == "ALLOW" and action in metering.REPO_ACTIONS:
             scope_of = {"ref": context.get("ref"), "new_sha": context.get("new_sha"),
                         "trigger": context.get("trigger"), "workflow": context.get("workflow"),

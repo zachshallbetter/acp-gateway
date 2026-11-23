@@ -680,6 +680,58 @@ def test_missing_provider_credential_names_the_setting_and_says_not_to_retry():
         assert "Retry in a minute" in other["remedy"] and "retry_after" not in other, other
 
 
+def test_missing_credential_notifies_the_owner_once_per_provider_host_and_day():
+    import providers
+
+    def real(action, policy_body, claim, context):
+        return providers.build_evidence(action, policy_body, claim, context, token_for=lambda owner: "t")
+
+    def events():
+        return [e for e in gateway.AUDIT if e["event"] == "PROVIDER_CREDENTIAL_MISSING"]
+    clean = {"ACP_VERCEL_TOKEN": "", "VERCEL": "", "RAILWAY_ENVIRONMENT": "", "RAILWAY_SERVICE_ID": ""}
+    with env(), patch.dict(os.environ, clean):
+        fresh()
+        first = decide(request(), metering.MemoryLedger(), provide=real, now=NOW)
+        assert [(e["provider"], e["missing_setting"], e["host"], e["severity"]) for e in events()] == \
+            [("vercel", "ACP_VERCEL_TOKEN", "local", "WARNING")], events()
+        again = decide(request(), metering.MemoryLedger(), provide=real, now=NOW + 600)
+        assert len(events()) == 1
+        assert {k: first[k] for k in ("decision", "reason", "remedy", "retry_after")} == \
+            {k: again[k] for k in ("decision", "reason", "remedy", "retry_after")}
+        with patch.dict(os.environ, {"VERCEL": "1"}):
+            decide(request(), metering.MemoryLedger(), provide=real, now=NOW + 1200)
+        assert [e["host"] for e in events()] == ["local", "vercel"]
+        decide(request(), metering.MemoryLedger(), provide=real, now=NOW + 86400)
+        assert len(events()) == 3
+        with patch.dict(os.environ, {"ACP_VERCEL_TOKEN": "x"}):
+            gateway.notify_missing_credential("railway", "ACP_RAILWAY_TOKEN", NOW)
+        assert [e["provider"] for e in events()][-1] == "railway"
+        gateway.AUDIT.clear()
+        decide(request(), metering.MemoryLedger(), provide=evidence(available=False, kind="UNAVAILABLE"), now=NOW)
+        assert not events()
+
+
+def test_unreadable_notification_count_does_not_change_the_decision():
+    import providers
+    import postgres_store
+
+    def real(action, policy_body, claim, context):
+        return providers.build_evidence(action, policy_body, claim, context, token_for=lambda owner: "t")
+
+    class Broken:
+        def audit_count(self, **kwargs):
+            raise postgres_store.StorageError("unreadable")
+    with env(), patch.dict(os.environ, {"ACP_VERCEL_TOKEN": ""}):
+        fresh()
+        with patch.object(postgres_store, "enabled", return_value=True), \
+                patch.object(postgres_store, "current", return_value=Broken()):
+            result = gateway.notify_missing_credential("vercel", "ACP_VERCEL_TOKEN", NOW)
+        assert result is None
+        assert not [e for e in gateway.AUDIT if e["event"] == "PROVIDER_CREDENTIAL_MISSING"]
+        decided = decide(request(), metering.MemoryLedger(), provide=real, now=NOW)
+        assert decided["reason"] == "PROVIDER_EVIDENCE_UNAVAILABLE" and "Do not retry" in decided["remedy"]
+
+
 def test_file_backend_has_no_ledger_and_says_where_to_go():
     with env():
         fresh()

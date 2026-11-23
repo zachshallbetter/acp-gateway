@@ -1015,8 +1015,10 @@ never one response.
 Set `ACP_SECURITY_WEBHOOK_URL` (and optionally `ACP_SECURITY_WEBHOOK_TOKEN`) to
 alert on `QUARANTINE_ENTERED`, `LOCKED_ENTERED`, `RECOVERY_AUTHORIZED`,
 `RECOVERY_VERIFICATION_FAILED`, `RECOVERY_VERIFIED`, `MANAGED_POLICY_MISSING`,
-`MANAGED_POLICY_CHANGED`, `FORGED_AUTHORIZATION_ATTEMPT` and
-`CREDENTIAL_EXTRACTION_ATTEMPT`. The payload carries identifiers and state only
+`MANAGED_POLICY_CHANGED`, `FORGED_AUTHORIZATION_ATTEMPT`,
+`CREDENTIAL_EXTRACTION_ATTEMPT` and `PROVIDER_CREDENTIAL_MISSING` (`WARNING`: a provider
+credential is not set; sent once per provider per host per UTC day, with `provider`,
+`missing_setting` and `host`: `vercel`, `railway` or `local`). The payload carries identifiers and state only
 — no secrets, no prompts, no commands:
 
 ```json
