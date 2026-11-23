@@ -236,6 +236,15 @@ Every response also carries `trust_code` (`T0` `VERIFIED`, `T1` `SELF_REPORTED`,
 `T2` `UNVERIFIED`, `T3` `QUARANTINED`), `authorization_state`, `incident_id`
 and `security_version`. `A5` is an authorization state, not a trust level.
 
+A decision may also carry `notices`, a list of non-blocking messages about the
+requesting client. Today the one notice is `CLIENT_LAYOUT_DEPRECATED`: the
+request's `principal` has `client_type: formal-project-bootstrap` and a
+`client_version` below 0.7.0, so the client is on the pre-0.7 layout, and the
+notice carries the `upgrade` command. A notice never changes `decision`, `reason`
+or `remedy`, and ACP never refuses on version alone. A request with no version, or
+one that is not a release number, gets no notice. `/internal/client-status`
+reports the same layout check for a client that asks.
+
 Reason codes are stable: `POLICY_NOT_FOUND`, `POLICY_INVALID`,
 `POLICY_INACTIVE`, `OUT_OF_POLICY_SCOPE`, `NOT_PROTECTED_ACTION`,
 `ACTION_NOT_RECOGNIZED`, `ACTION_NOT_IN_POLICY`, `REPOSITORY_MISMATCH`, `REMOTE_MISMATCH`,
