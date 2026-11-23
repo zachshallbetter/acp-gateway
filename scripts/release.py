@@ -5,7 +5,8 @@
                        [--token-account ACP_GATEWAY_TOKEN] [--timeout SECONDS] [--dry-run]
 
 It acts on the checkout it lives in, which must be clean and on the pull request branch at the
-commit to release, with ACP_DATABASE_MIGRATION_URL in the environment (never printed). In order:
+commit to release, with ACP_DATABASE_READ_URL in the environment (never printed). A release with
+pending migrations also needs ACP_DATABASE_MIGRATION_URL, the owner's credential. In order:
 
 1. Plan: HEAD is published as BRANCH on GitHub and fast-forwards origin/main.
 2. Hold: the machine is not on hold (~/.claude/hooks/HOLD). The pushes and deploys below run in
@@ -74,12 +75,13 @@ def report(step: str, **fields) -> None:
 
 def migration_state() -> tuple[int, dict]:
     """migrate-db.py --check in its own process, so the connection string never enters this one's output."""
-    dsn = os.environ.get("ACP_DATABASE_MIGRATION_URL", "").strip()
-    if not dsn:
-        raise Stop("ACP_DATABASE_MIGRATION_URL is not set. Run this under "
+    name = next((name for name in ("ACP_DATABASE_READ_URL", "ACP_DATABASE_MIGRATION_URL")
+                 if os.environ.get(name, "").strip()), None)
+    if not name:
+        raise Stop("ACP_DATABASE_READ_URL is not set. Run this under "
                    "latchkey run --env-file .env.local -- ...")
-    if dsn.startswith("latchkey://"):
-        raise Stop("ACP_DATABASE_MIGRATION_URL is a Latchkey reference, not a value. Run this under "
+    if os.environ[name].strip().startswith("latchkey://"):
+        raise Stop(f"{name} is a Latchkey reference, not a value. Run this under "
                    "latchkey run --env-file .env.local -- ...")
     result = acp_ops.run(sys.executable, str(ROOT / "scripts/migrate-db.py"), "--check")
     try:
@@ -260,6 +262,12 @@ def release(args, checkout: Path) -> None:
     if resuming and step:
         raise Stop("main already holds this release but the database is missing its migrations; apply them under "
                    "their own database.migrate decision before deploying again")
+    if step and not os.environ.get("ACP_DATABASE_MIGRATION_URL", "").strip():
+        raise Stop(f"migrations {', '.join(step['versions'])} are pending and applying them needs the owner's "
+                   "database credential, which agents do not hold. The owner runs this release: "
+                   "ACP_DATABASE_MIGRATION_URL=latchkey://acp-gateway/development/ACP_DATABASE_MIGRATION_URL "
+                   "latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py "
+                   f"--work-item {args.work_item} (Latchkey asks the owner); nothing was changed")
     if args.dry_run:
         return
     report("harness", allowed_by=acp_ops.harness_gate(update["name"]))

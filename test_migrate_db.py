@@ -88,6 +88,16 @@ class MigrateDbTests(unittest.TestCase):
         self.assertEqual(cp.returncode, 2)
         self.assertIn("ACP_DATABASE_MIGRATION_URL", cp.stderr)
 
+    def test_check_accepts_the_read_only_url(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ACP_")}
+        env["ACP_DATABASE_READ_URL"] = self.url
+        cp = subprocess.run([sys.executable, str(SCRIPT), "--check"], cwd=ROOT, env=env,
+                            capture_output=True, text=True)
+        self.assertIn(cp.returncode, (0, 3), cp.stderr)
+        applied = subprocess.run([sys.executable, str(SCRIPT)], cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(applied.returncode, 2)
+        self.assertIn("ACP_DATABASE_MIGRATION_URL is required", applied.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

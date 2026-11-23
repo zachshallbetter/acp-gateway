@@ -237,16 +237,22 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(Stop, "0003 are not marked additive"):
             release.pending_plan({"applied_versions": ["0001", "0002"], "pending_versions": ["0003", "0004"]})
 
-    def test_the_check_needs_the_migration_url(self):
-        with patch.dict(os.environ, {"ACP_DATABASE_MIGRATION_URL": ""}):
-            with self.assertRaisesRegex(Stop, "ACP_DATABASE_MIGRATION_URL is not set"):
+    def test_the_check_needs_a_database_url(self):
+        with patch.dict(os.environ, {"ACP_DATABASE_READ_URL": "", "ACP_DATABASE_MIGRATION_URL": ""}):
+            with self.assertRaisesRegex(Stop, "ACP_DATABASE_READ_URL is not set"):
                 release.migration_state()
         reference = "latchkey://acp-gateway/production/ACP_DATABASE_MIGRATION_URL"
-        with patch.dict(os.environ, {"ACP_DATABASE_MIGRATION_URL": reference}), \
+        with patch.dict(os.environ, {"ACP_DATABASE_READ_URL": "", "ACP_DATABASE_MIGRATION_URL": reference}), \
                 patch.object(acp_ops, "run") as ran:
             with self.assertRaisesRegex(Stop, "Latchkey reference.*latchkey run --env-file"):
                 release.migration_state()
         ran.assert_not_called()
+
+    def test_the_read_only_url_is_enough_to_check(self):
+        with patch.dict(os.environ, {"ACP_DATABASE_READ_URL": "set", "ACP_DATABASE_MIGRATION_URL": ""}), \
+                patch.object(acp_ops, "run", return_value=completed('{"status": "current"}')) as ran:
+            self.assertEqual(release.migration_state(), (0, {"status": "current"}))
+        self.assertEqual(ran.call_args.args[2], "--check")
 
     def test_a_conflicting_history_stops_before_anything_changes(self):
         with patch.dict(os.environ, {"ACP_DATABASE_MIGRATION_URL": "set"}), \
@@ -343,7 +349,7 @@ class RailwayTests(unittest.TestCase):
 
 class ReleaseOrderTests(unittest.TestCase):
     def run_release(self, dry_run=False, step=None, skip_railway=False, resuming=False, railway_fails=False,
-                    merge_fails=False):
+                    merge_fails=False, owner=True):
         calls = []
         update = {"owner": "zachshallbetter", "name": "acp-gateway", "remote": "origin", "ref": "refs/heads/main",
                   "old_sha": "b" * 40, "new_sha": SHA}
@@ -366,7 +372,8 @@ class ReleaseOrderTests(unittest.TestCase):
         args = argparse.Namespace(work_item="zachshallbetter/acp-gateway#1", branch="feature", dry_run=dry_run,
                                   token_account="ACP_GATEWAY_TOKEN", timeout=60, skip_railway=skip_railway)
         state = {"status": "pending" if step else "current", "pending_versions": step["versions"] if step else []}
-        with patch.object(release, "git", git), \
+        owner_env = {"ACP_DATABASE_MIGRATION_URL": "set" if owner else ""}
+        with patch.object(release, "git", git), patch.dict(os.environ, owner_env), \
                 patch.object(release.ff_merge, "plan", note("plan", update)), \
                 patch.object(release, "migration_state", note("check", (3 if step else 0, state))), \
                 patch.object(release, "pending_plan", lambda s: step), \
@@ -424,6 +431,18 @@ class ReleaseOrderTests(unittest.TestCase):
         step = {"from": "0003", "to": "0004", "versions": ["0004"]}
         with self.assertRaisesRegex(Stop, "missing its migrations"):
             self.run_release(resuming=True, step=step)
+
+    def test_pending_migrations_without_the_owner_credential_stop_before_anything_changes(self):
+        step = {"from": "0003", "to": "0004", "versions": ["0004"]}
+        with self.assertRaises(Stop) as stopped:
+            self.run_release(step=step, owner=False)
+        message = str(stopped.exception)
+        self.assertIn("0004 are pending", message)
+        self.assertIn("ACP_DATABASE_MIGRATION_URL=latchkey://acp-gateway/development/ACP_DATABASE_MIGRATION_URL", message)
+        self.assertIn("--work-item zachshallbetter/acp-gateway#1", message)
+
+    def test_a_current_database_releases_without_the_owner_credential(self):
+        self.assertIn("merge", self.run_release(owner=False))
 
     def test_dry_run_changes_nothing(self):
         step = {"from": "0003", "to": "0004", "versions": ["0004"]}

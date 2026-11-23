@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check or apply ACP's versioned PostgreSQL migrations.
 
-The connection string comes from ACP_DATABASE_MIGRATION_URL and is never printed.
+The connection string comes from ACP_DATABASE_MIGRATION_URL and is never printed. --check reads
+ACP_DATABASE_READ_URL instead when it is set, so a read-only role can check.
 
     scripts/migrate-db.py --check   read-only: report applied, pending and mismatched versions
     scripts/migrate-db.py           apply pending migrations in one serializable transaction
@@ -47,9 +48,11 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="report migration state without writing")
     args = parser.parse_args()
     dsn = os.getenv("ACP_DATABASE_MIGRATION_URL", "").strip()
+    if args.check:
+        dsn = os.getenv("ACP_DATABASE_READ_URL", "").strip() or dsn
     if not dsn:
-        print("ACP_DATABASE_MIGRATION_URL is required; it names the database to check or migrate",
-              file=sys.stderr)
+        print("ACP_DATABASE_MIGRATION_URL is required; it names the database to "
+              + ("check (ACP_DATABASE_READ_URL also works)" if args.check else "migrate"), file=sys.stderr)
         return 2
     try:
         if args.check:

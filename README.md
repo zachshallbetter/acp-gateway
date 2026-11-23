@@ -1545,7 +1545,8 @@ These steps run your own gateway for your own repositories, independent of any o
 4. **Choose storage.** File mode needs `ACP_SECURITY_STATE_FILE`, `ACP_TRUST_STATE_FILE` and
    `ACP_AUDIT_HASH_CHAIN=1`. Postgres (required for metered builds and for more than one host) needs
    `ACP_STORAGE_BACKEND=postgres` and `ACP_DATABASE_URL`; apply the migrations first with
-   `ACP_DATABASE_MIGRATION_URL=... python3 scripts/migrate-db.py` (`--check` reports without writing).
+   `ACP_DATABASE_MIGRATION_URL=... python3 scripts/migrate-db.py` (`--check` reports without writing,
+   and reads `ACP_DATABASE_READ_URL` instead when it is set).
 5. **Start it** with `ACP_REQUIRE_PRODUCTION_CONTROLS=1`, so a missing control stops startup instead of
    running ungoverned, using the commands in "Running it" above. The gateway warns at boot when no
    signing key is set. Check `GET /health` and `GET /ready`.
@@ -1648,12 +1649,22 @@ steps instead.
 `scripts/release.py` releases a reviewed pull request to both production hosts in that
 order. Run it from a clean checkout of the pull request branch, pushed, at the commit to
 release. `.env.local` names its secrets as `latchkey://` references, so run it under
-`latchkey run`, which supplies `ACP_DATABASE_MIGRATION_URL` and `ACP_GATEWAY_TOKEN` to the process
+`latchkey run`, which supplies `ACP_DATABASE_READ_URL` and `ACP_GATEWAY_TOKEN` to the process
 without printing them:
 
 ```bash
 latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N --dry-run
 latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N
+```
+
+`ACP_DATABASE_READ_URL` is the `acp_reader` role: it can read every table and write none, so
+an agent can check migrations and run analysis without being able to change budgets, grants or
+containment. The owner role's URLs are not in `.env.local` and Latchkey asks the owner before
+releasing them. A release with pending migrations therefore stops before changing anything and
+names the owner's command, which adds the owner URL for that run:
+
+```bash
+ACP_DATABASE_MIGRATION_URL=latchkey://acp-gateway/development/ACP_DATABASE_MIGRATION_URL latchkey run --env-file .env.local -- .venv/bin/python scripts/release.py --work-item zachshallbetter/acp-gateway#N
 ```
 
 1. It checks that HEAD is the published branch tip and fast-forwards `origin/main`.
