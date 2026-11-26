@@ -93,7 +93,7 @@ class VercelAdapterTests(unittest.TestCase):
 
     def test_a_host_that_fails_its_configuration_check_refuses_everything_but_health(self):
         responses = []
-        with patch.dict(adapter._BOOT, {"checked": False, "problem": None}), \
+        with patch.dict(adapter._BOOT, {"passed": False, "problem": None, "checked_at": None}), \
                 patch.object(adapter, "boot_check", side_effect=SystemExit("ACP_GATEWAY_TOKEN is required")):
             for path, allowed in (("/api?__acp_path=%2Fhealth", True), ("/api?__acp_path=%2Fready", False)):
                 handler = object.__new__(adapter.handler)
@@ -103,6 +103,34 @@ class VercelAdapterTests(unittest.TestCase):
                 self.assertEqual(handler._restore_path(), allowed)
         self.assertEqual(responses, [(503, responses[0][1])])
         self.assertEqual(responses[0][1]["error"], "MISCONFIGURED")
+
+    def test_a_failed_check_is_run_again_after_a_pause_and_a_pass_is_kept(self):
+        calls = []
+
+        def check():
+            calls.append(1)
+            if len(calls) == 1:
+                raise SystemExit("PostgreSQL storage is unavailable: database schema validation failed")
+        with patch.dict(adapter._BOOT, {"passed": False, "problem": None, "checked_at": None}), \
+                patch.object(adapter, "boot_check", side_effect=check), \
+                patch.object(adapter.logging, "error") as error, patch.object(adapter.logging, "warning") as warning:
+            self.assertIn("schema validation failed", adapter.boot_problem(now=100.0))
+            self.assertIn("schema validation failed", adapter.boot_problem(now=105.0))
+            self.assertEqual(len(calls), 1, "within the pause the failure is answered without checking again")
+            self.assertIsNone(adapter.boot_problem(now=100.0 + adapter.BOOT_RETRY_SECONDS))
+            self.assertEqual(len(calls), 2, "after the pause the check runs again and passes")
+            self.assertIsNone(adapter.boot_problem(now=10_000.0))
+            self.assertEqual(len(calls), 2, "a passed check is not run again")
+        self.assertEqual(error.call_count, 1)
+        self.assertEqual(warning.call_count, 1, "recovery is logged once")
+
+    def test_a_repeated_failure_is_logged_once(self):
+        with patch.dict(adapter._BOOT, {"passed": False, "problem": None, "checked_at": None}), \
+                patch.object(adapter, "boot_check", side_effect=SystemExit("ACP_GATEWAY_TOKEN is required")), \
+                patch.object(adapter.logging, "error") as error:
+            for moment in (0.0, 20.0, 40.0):
+                self.assertEqual(adapter.boot_problem(now=moment), "ACP_GATEWAY_TOKEN is required")
+        self.assertEqual(error.call_count, 1)
 
     def test_an_unexpected_failure_rolls_back_and_a_serialization_conflict_is_retried(self):
         attempts = {"opened": 0, "committed": 0}
