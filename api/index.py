@@ -64,30 +64,30 @@ _BOOT_LOCK = threading.Lock()
 
 
 def boot_problem(now=None):
-    """The gateway's start-up configuration check (Vercel never calls main()); None once it has passed."""
+    """The gateway's start-up configuration check (Vercel never calls main()); None once it has passed.
+
+    Requests that arrive while a check runs wait for its answer: none is served before the check has
+    passed, and none is refused only because another request got there first."""
     if _BOOT["passed"]:
         return None
-    now = time.monotonic() if now is None else now
-    if _BOOT["checked_at"] is not None and now - _BOOT["checked_at"] < BOOT_RETRY_SECONDS:
-        return _BOOT["problem"]
-    if not _BOOT_LOCK.acquire(blocking=False):
-        return _BOOT["problem"] or "configuration check in progress"   # another request is running it
-    try:
-        _BOOT["checked_at"] = now
+    with _BOOT_LOCK:
+        if _BOOT["passed"]:
+            return None
+        now = time.monotonic() if now is None else now
+        if _BOOT["checked_at"] is not None and now - _BOOT["checked_at"] < BOOT_RETRY_SECONDS:
+            return _BOOT["problem"]                          # a recent failure; not checked again yet
         try:
             boot_check()
         except SystemExit as exc:
             problem = str(exc) or "configuration check failed"
             if problem != _BOOT["problem"]:                  # log each new failure, not every retry
                 logging.error("ACP configuration check failed: %s", problem)
-            _BOOT["problem"] = problem
+            _BOOT.update(problem=problem, checked_at=now)
             return problem
         if _BOOT["problem"]:
             logging.warning("ACP configuration check passed after failing: %s", _BOOT["problem"])
-        _BOOT.update(passed=True, problem=None)
+        _BOOT.update(passed=True, problem=None, checked_at=now)
         return None
-    finally:
-        _BOOT_LOCK.release()
 
 
 class handler(Handler):
