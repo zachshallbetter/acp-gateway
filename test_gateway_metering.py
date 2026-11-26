@@ -171,6 +171,7 @@ def test_repository_budget_past_limit_asks_the_owner_with_a_grant_command():
             assert decide(request(sha=sha), ledger)["decision"] == "ALLOW"
         over = decide(request(sha="3" * 40), ledger)
         assert over["decision"] == "AUTH_REQUIRED" and over["reason"] == "BUDGET_EXCEEDED", over
+        assert over["remedy"].startswith("Collaborate with other agents"), over
         assert "budget-grant --action hosted_build --repo Example-Org/Widget" in over["remedy"]
         assert over["budget"]["exceeded"]["limit"] == 2
         grant = over["grant_request"]
@@ -498,6 +499,7 @@ def test_coordinator_merges_past_five_a_day_are_counted_not_refused():
             assert result["decision"] == "ALLOW", result
         sixth = decide(request("production_merge", ref="refs/heads/main", sha="9" * 40), ledger, caller=COORDINATOR)
         assert sixth["decision"] == "ALLOW" and sixth["reason"] == "OVER_BUDGET_NOTED", sixth
+        assert "Collaborate with other agents" in sixth["detail"], sixth
         assert sixth["budget"]["exceeded"]["limit"] == 5 and sixth["capability_token"]
         assert ledger.ledger_count(metering.budget_day(NOW), ["production_merge"]) == 6, "still counted"
         lane = decide(request("production_merge", ref="refs/heads/main", sha="8" * 40), ledger, caller=LANE)
@@ -529,6 +531,7 @@ def test_hosted_builds_past_budget_are_still_refused():
         assert decide(request(ref="refs/heads/main", sha="1" * 40), ledger, caller=COORDINATOR)["decision"] == "ALLOW"
         over = decide(request(ref="refs/heads/main", sha="2" * 40), ledger, caller=COORDINATOR)
         assert over["decision"] == "AUTH_REQUIRED" and over["reason"] == "BUDGET_EXCEEDED", over
+        assert over["remedy"].startswith("Collaborate with other agents"), over
 
 
 def test_a_repeated_grant_request_returns_the_grant_it_made():
