@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import threading
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -123,6 +124,27 @@ class VercelAdapterTests(unittest.TestCase):
             self.assertEqual(len(calls), 2, "a passed check is not run again")
         self.assertEqual(error.call_count, 1)
         self.assertEqual(warning.call_count, 1, "recovery is logged once")
+
+    def test_requests_during_a_check_wait_for_its_answer(self):
+        started, release, answers = threading.Event(), threading.Event(), []
+
+        def slow_check():
+            started.set()
+            release.wait(5)                                  # the first request is still checking
+        with patch.dict(adapter._BOOT, {"passed": False, "problem": None, "checked_at": None}), \
+                patch.object(adapter, "boot_check", side_effect=slow_check) as check:
+            first = threading.Thread(target=lambda: answers.append(("first", adapter.boot_problem())))
+            first.start()
+            self.assertTrue(started.wait(5))
+            second = threading.Thread(target=lambda: answers.append(("second", adapter.boot_problem())))
+            second.start()
+            second.join(0.2)
+            self.assertTrue(second.is_alive(), "a request during the check waits; it is neither refused nor served")
+            release.set()
+            first.join(5)
+            second.join(5)
+            self.assertEqual(check.call_count, 1, "the waiting request uses the finished check's answer")
+        self.assertEqual(sorted(answers), [("first", None), ("second", None)])
 
     def test_a_repeated_failure_is_logged_once(self):
         with patch.dict(adapter._BOOT, {"passed": False, "problem": None, "checked_at": None}), \
