@@ -413,6 +413,12 @@ def grant_command(action, owner=None, name=None, reason=None):
     return grant_request(action, owner, name, reason)["command"]
 
 
+# Said to every agent past a budget: hosted builds are shared, so batching them is the agents' job.
+COLLABORATE = ("Collaborate with other agents working on this project to prioritize pushes and PR merges: "
+               "keep less important work in local commits and bundle it into one push and one merge when it is "
+               "ready; push alone only what development or operation needs now.")
+
+
 class Outcome:
     """One metered decision, before the gateway wraps it in its response envelope."""
 
@@ -646,7 +652,7 @@ def evaluate_repo(action, policy, claim, context, caller, limits, evidence, ledg
         return Outcome("ALLOW", "OVER_BUDGET_NOTED",
                        f"Allowed and counted past today's {exceeded['scope']} count for {action} "
                        f"({exceeded['used']} of {exceeded['limit']}). The count is shown in GET /internal/budget; "
-                       "nothing is refused for it.",
+                       "nothing is refused for it. " + COLLABORATE,
                        budget={"day": day, "usage": _usage(ledger, action, limits, metered, owner, name, building,
                                                            capacity, day, now)[0], "exceeded": exceeded}, **common)
 
@@ -907,7 +913,8 @@ def _budget_refusal(ledger, action, owner, name, context, exceeded, usage, day, 
     else:
         detail = f"Today's {exceeded['scope']} budget for {action} is used up ({exceeded['used']} of {exceeded['limit']})."
         reason = "BUDGET_EXCEEDED"
-    remedy = (f"Commit locally and keep working; push once the budget resets at {resets_at}, with everything batched"
+    remedy = (f"{COLLABORATE} Commit locally and keep working; push once the budget resets at {resets_at}, "
+              "with everything batched"
               + ("; if you cannot continue without this push, ask for priority (see priority_request)"
                  if priority_open else "")
               + f"; or ask the owner for a grant: {grant_command(action, owner, name, context.get('reason'))}")
