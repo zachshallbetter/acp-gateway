@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
+import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 # `vercel dev` does not always set the platform marker on Python workers.
@@ -53,19 +55,39 @@ def restore_request_path(request_path: str) -> str:
     return safe_route + ("?" + query if query else "")
 
 
-_BOOT = {"checked": False, "problem": None}
+# A passed check holds for the instance's life. A failed one is run again, at most every BOOT_RETRY_SECONDS:
+# a database that was briefly unreachable (waking, at its connection limit) must not leave a warm instance
+# refusing every request until Vercel recycles it, as happened on 2026-11-26.
+BOOT_RETRY_SECONDS = 15
+_BOOT = {"passed": False, "problem": None, "checked_at": None}
+_BOOT_LOCK = threading.Lock()
 
 
-def boot_problem():
-    """The gateway's start-up configuration check, run once per instance (Vercel never calls main())."""
-    if not _BOOT["checked"]:
+def boot_problem(now=None):
+    """The gateway's start-up configuration check (Vercel never calls main()); None once it has passed."""
+    if _BOOT["passed"]:
+        return None
+    now = time.monotonic() if now is None else now
+    if _BOOT["checked_at"] is not None and now - _BOOT["checked_at"] < BOOT_RETRY_SECONDS:
+        return _BOOT["problem"]
+    if not _BOOT_LOCK.acquire(blocking=False):
+        return _BOOT["problem"] or "configuration check in progress"   # another request is running it
+    try:
+        _BOOT["checked_at"] = now
         try:
             boot_check()
         except SystemExit as exc:
-            _BOOT["problem"] = str(exc) or "configuration check failed"
-            logging.error("ACP configuration check failed: %s", _BOOT["problem"])
-        _BOOT["checked"] = True
-    return _BOOT["problem"]
+            problem = str(exc) or "configuration check failed"
+            if problem != _BOOT["problem"]:                  # log each new failure, not every retry
+                logging.error("ACP configuration check failed: %s", problem)
+            _BOOT["problem"] = problem
+            return problem
+        if _BOOT["problem"]:
+            logging.warning("ACP configuration check passed after failing: %s", _BOOT["problem"])
+        _BOOT.update(passed=True, problem=None)
+        return None
+    finally:
+        _BOOT_LOCK.release()
 
 
 class handler(Handler):
